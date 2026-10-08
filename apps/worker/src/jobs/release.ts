@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Job } from "pg-boss";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   PolicyDecision,
+  TRANSITIONS,
   audit,
+  auditLog,
   criteria as criteriaTable,
   deliveries,
   milestones,
@@ -18,19 +20,24 @@ import type { JobData } from "../handlers.js";
 import { getDb } from "../lib/db.js";
 import { paypal } from "../lib/paypal.js";
 
-// ---------- Pure helpers (unit-tested in apps/worker/test) ----------
+/*
+ * ONE payout attempt per milestone. Once a payout or refund op for a milestone has been claimed (status "sent"), no job
+ * ever creates another one: the claiming job (or its pg-boss retry) only finishes the PayPal calls of that claim. If any
+ * item of the attempt fails, is blocked, returned, reversed or refunded, the milestone goes to held with an audit
+ * "milestone.needs_operator", and the release job refuses to run for that milestone again
+ * ("release.refused_needs_operator"). An operator resolves it by hand.
+ */
 
-/** States after which a release job has nothing left to do, unless a claimed refund is still unfinished. */
-export const SETTLED_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["released", "partial_released"]);
+// ---------- Pure helpers (unit-tested in apps/worker/test) ----------
 
 /** The only states a new release may start from. */
 export const RELEASABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review", "needs_client"]);
 
-/** States in which an already-claimed release may still finish its PayPal calls (a retry after a crash, or a late refund). */
+/** States in which the claiming job may still finish its own PayPal calls (a retry after a crash or a failed refund call). */
 export const RESUMABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review", "needs_client", "released", "partial_released"]);
 
-/** paypal_ops statuses meaning "this payout (or refund) has started": the client can no longer veto or hold. */
-export const STARTED_OP_STATUSES: ReadonlySet<string> = new Set(["sent", "succeeded"]);
+export const NEEDS_OPERATOR_EVENT = "milestone.needs_operator";
+export const REFUSED_NEEDS_OPERATOR_EVENT = "release.refused_needs_operator";
 
 /** Client responses that count as approval before the review window closes. */
 const EARLY_APPROVALS = new Set(["approve", "confirm_partial"]);
@@ -116,20 +123,6 @@ export function requiredNotPassed(verdict: unknown, criteria: ReadonlyArray<{ id
   return criteria.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
 }
 
-/** paypal_ops key of the n-th payout attempt. The first attempt keeps the plain milestone id that executeRelease asks for. */
-export function payoutOpKey(milestoneId: string, attempt: number): string {
-  return attempt <= 1 ? milestoneId : `${milestoneId}:${attempt}`;
-}
-
-/** Inverse of payoutOpKey; null when the key is not one of this milestone's payout keys. */
-export function payoutAttempt(milestoneId: string, key: string): number | null {
-  if (key === milestoneId) return 1;
-  const prefix = `${milestoneId}:`;
-  if (!key.startsWith(prefix)) return null;
-  const n = Number(key.slice(prefix.length));
-  return Number.isInteger(n) && n >= 2 ? n : null;
-}
-
 export interface AdvanceRow {
   principalMinor: number;
   feeBpsPerDay: number;
@@ -157,10 +150,9 @@ export function payoutShares(releaseMinor: number, partnerOwedMinor: number): { 
   return { partnerShareMinor, freelancerShareMinor: releaseMinor - partnerShareMinor };
 }
 
-/** Shares for a (re-)payment: a party whose item already succeeded in an earlier attempt is never paid again. */
-export function planShares(releaseMinor: number, partnerOwedMinor: number, paid: { partner: boolean; freelancer: boolean }) {
-  const s = payoutShares(releaseMinor, partnerOwedMinor);
-  return { partnerShareMinor: paid.partner ? 0 : s.partnerShareMinor, freelancerShareMinor: paid.freelancer ? 0 : s.freelancerShareMinor };
+/** True when the milestone may be moved to held through the transition table (or already is). */
+export function canHold(status: MilestoneStatus): boolean {
+  return status === "held" || TRANSITIONS[status].includes("held");
 }
 
 export type PayoutParty = "partner" | "freelancer";
@@ -175,15 +167,22 @@ export interface ItemOutcome {
   reason?: string;
 }
 
+/** A RETURNED / REVERSED / REFUNDED payout item, stored by the settle job under paypal_ops.response.reversals[party]. */
+export interface ItemReversal {
+  eventId: string;
+  eventType: string;
+  amountMinor: number | null;
+  payoutItemId?: string;
+}
+
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+
 /** Reads the per-item outcomes stored on a payout op's response JSON. */
 export function itemOutcomes(response: unknown): Partial<Record<PayoutParty, ItemOutcome>> {
-  const items = response && typeof response === "object" ? (response as { items?: unknown }).items : undefined;
+  const items = obj(obj(response).items);
   const out: Partial<Record<PayoutParty, ItemOutcome>> = {};
-  if (!items || typeof items !== "object") return out;
   for (const party of ["partner", "freelancer"] as const) {
-    const v = (items as Record<string, unknown>)[party];
-    if (!v || typeof v !== "object") continue;
-    const r = v as Record<string, unknown>;
+    const r = obj(items[party]);
     if (r.status !== "succeeded" && r.status !== "failed") continue;
     out[party] = {
       status: r.status,
@@ -196,15 +195,21 @@ export function itemOutcomes(response: unknown): Partial<Record<PayoutParty, Ite
   return out;
 }
 
-/** Which parties have been paid by any earlier attempt. */
-export function paidParties(responses: readonly unknown[]): { partner: boolean; freelancer: boolean } {
-  const paid = { partner: false, freelancer: false };
-  for (const r of responses) {
-    const items = itemOutcomes(r);
-    if (items.partner?.status === "succeeded") paid.partner = true;
-    if (items.freelancer?.status === "succeeded") paid.freelancer = true;
+/** Reads the per-item reversals stored on a payout op's response JSON. */
+export function itemReversals(response: unknown): Partial<Record<PayoutParty, ItemReversal>> {
+  const rev = obj(obj(response).reversals);
+  const out: Partial<Record<PayoutParty, ItemReversal>> = {};
+  for (const party of ["partner", "freelancer"] as const) {
+    const r = obj(rev[party]);
+    if (typeof r.eventId !== "string" || typeof r.eventType !== "string") continue;
+    out[party] = {
+      eventId: r.eventId,
+      eventType: r.eventType,
+      amountMinor: typeof r.amountMinor === "number" ? r.amountMinor : null,
+      ...(typeof r.payoutItemId === "string" ? { payoutItemId: r.payoutItemId } : {}),
+    };
   }
-  return paid;
+  return out;
 }
 
 /**
@@ -213,13 +218,12 @@ export function paidParties(responses: readonly unknown[]): { partner: boolean; 
  */
 export interface ReleaseClaim {
   deliveryId: string;
-  attempt: number;
   action: "release" | "partial";
   ruleIds: string[];
   reason: string;
-  /** Released to the parties in this attempt (partner + freelancer shares). */
+  /** Released to the parties (partner + freelancer shares). */
   releaseMinor: number;
-  /** Refunded to the client by this claim; 0 when there is none or an earlier claim already refunded. */
+  /** Refunded to the client; 0 when there is none. */
   refundMinor: number;
   currency: string;
   captureId: string;
@@ -230,17 +234,15 @@ export interface ReleaseClaim {
 
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
+/** Reads request.claim; a legacy "attempt" field on older claims is ignored. */
 export function parseClaim(request: unknown): ReleaseClaim | null {
-  const c = request && typeof request === "object" ? (request as { claim?: unknown }).claim : undefined;
-  if (!c || typeof c !== "object") return null;
-  const r = c as Record<string, unknown>;
-  const shares = r.shares as Record<string, unknown> | undefined;
-  if (typeof r.deliveryId !== "string" || !isInt(r.attempt) || (r.action !== "release" && r.action !== "partial")) return null;
+  const r = obj(obj(request).claim);
+  const shares = obj(r.shares);
+  if (typeof r.deliveryId !== "string" || (r.action !== "release" && r.action !== "partial")) return null;
   if (!isInt(r.releaseMinor) || !isInt(r.refundMinor) || typeof r.currency !== "string" || typeof r.captureId !== "string" || typeof r.freelancerEmail !== "string") return null;
-  if (!shares || !isInt(shares.partnerShareMinor) || !isInt(shares.freelancerShareMinor)) return null;
+  if (!isInt(shares.partnerShareMinor) || !isInt(shares.freelancerShareMinor)) return null;
   return {
     deliveryId: r.deliveryId,
-    attempt: r.attempt,
     action: r.action,
     ruleIds: Array.isArray(r.ruleIds) ? r.ruleIds.filter((x): x is string => typeof x === "string") : [],
     reason: typeof r.reason === "string" ? r.reason : "",
@@ -280,29 +282,118 @@ export function refundPlan(milestoneId: string, c: ReleaseClaim): ReleasePlan {
   };
 }
 
+/** The shape of a paypal_ops row the gate and the operator summary read. */
+export interface OpView {
+  kind: string;
+  status: string;
+  paypalId: string | null;
+  request: unknown;
+  response?: unknown;
+}
+
+export type ReleaseGate =
+  | { kind: "new" }
+  | { kind: "resume"; claim: ReleaseClaim }
+  | { kind: "skip"; reason: string }
+  | { kind: "refuse"; reason: string };
+
+/**
+ * The one-attempt rule. "new" only when no payout or refund op was ever claimed for the milestone; "resume" only for the
+ * job of the claimed delivery while one of its ops was claimed but never answered by PayPal; "refuse" (audited as
+ * release.refused_needs_operator) once the milestone needs an operator or for any new decision after an op was sent.
+ */
+export function releaseGate(input: { jobDeliveryId: string | null; decisionDeliveryId: string | null; status: MilestoneStatus; needsOperator: boolean; ops: readonly OpView[] }): ReleaseGate {
+  if (input.needsOperator) return { kind: "refuse", reason: "the milestone needs an operator; the release job never runs for it again" };
+  const claimed = input.ops.filter((o) => o.status !== "pending");
+  if (claimed.length === 0) {
+    const stale = staleReason(input);
+    return stale ? { kind: "skip", reason: stale } : { kind: "new" };
+  }
+  const claim = claimed.map((o) => parseClaim(o.request)).find((c): c is ReleaseClaim => c !== null) ?? null;
+  if (claim && claim.deliveryId === input.jobDeliveryId) {
+    if (input.decisionDeliveryId !== input.jobDeliveryId) return { kind: "skip", reason: "the claimed release belongs to an older decision" };
+    if (!claimed.some((o) => o.status === "sent" && !o.paypalId)) return { kind: "skip", reason: "this release was already sent to PayPal" };
+    if (!RESUMABLE_STATUSES.has(input.status)) return { kind: "refuse", reason: `the claimed release cannot resume while the milestone is ${input.status}` };
+    return { kind: "resume", claim };
+  }
+  if (!input.jobDeliveryId || input.decisionDeliveryId !== input.jobDeliveryId) return { kind: "skip", reason: staleReason(input) ?? "stale job" };
+  const kinds = [...new Set(claimed.map((o) => o.kind))].join(" and ");
+  return { kind: "refuse", reason: `a ${kinds} was already sent for this milestone (delivery ${claim?.deliveryId ?? "unknown"}); one attempt per milestone` };
+}
+
+/** What an operator needs to know: what was paid, what failed or was reversed, what is still pending, what was refunded. */
+export function operatorSummary(claim: ReleaseClaim | null, payout: OpView | undefined, refund: OpView | undefined) {
+  const items = itemOutcomes(payout?.response);
+  const reversals = itemReversals(payout?.response);
+  const share = (p: PayoutParty) => (p === "partner" ? claim?.shares.partnerShareMinor : claim?.shares.freelancerShareMinor) ?? 0;
+  const paid: Partial<Record<PayoutParty, number>> = {};
+  const failed: Partial<Record<PayoutParty, string>> = {};
+  const reversed: Partial<Record<PayoutParty, { eventType: string; amountMinor: number | null }>> = {};
+  const pending: PayoutParty[] = [];
+  for (const p of ["partner", "freelancer"] as const) {
+    const it = items[p];
+    if (it?.status === "succeeded") paid[p] = it.amountMinor ?? share(p);
+    else if (it?.status === "failed") failed[p] = it.reason ?? "failed";
+    else if (share(p) > 0) pending.push(p);
+    const rv = reversals[p];
+    if (rv) reversed[p] = { eventType: rv.eventType, amountMinor: rv.amountMinor };
+  }
+  const settled = obj(obj(refund?.response).webhook);
+  return {
+    deliveryId: claim?.deliveryId ?? null,
+    action: claim?.action ?? null,
+    currency: claim?.currency ?? null,
+    payoutBatchId: payout?.paypalId ?? null,
+    payoutOpStatus: payout?.status ?? null,
+    paid,
+    failed,
+    reversed,
+    pending,
+    refunded: refund
+      ? { claimedMinor: claim?.refundMinor ?? null, opStatus: refund.status, refundId: refund.paypalId, settledMinor: typeof settled.amountMinor === "number" ? settled.amountMinor : null }
+      : null,
+  };
+}
+
 // ---------- DB helpers ----------
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Q = Db | Tx;
 export type OpRow = typeof paypalOps.$inferSelect;
 
-/** This milestone's payout ops (every attempt, oldest first) and its refund op. */
-export async function releaseOps(q: Q, milestoneId: string): Promise<{ payouts: Array<OpRow & { attempt: number }>; refund: OpRow | undefined }> {
-  const rows = await q
-    .select()
-    .from(paypalOps)
-    .where(
-      or(
-        and(eq(paypalOps.kind, "payout"), or(eq(paypalOps.key, milestoneId), sql`starts_with(${paypalOps.key}, ${`${milestoneId}:`})`)),
-        and(eq(paypalOps.kind, "refund"), eq(paypalOps.key, milestoneId)),
-      ),
-    );
-  const payouts = rows
-    .filter((r) => r.kind === "payout")
-    .map((r) => ({ ...r, attempt: payoutAttempt(milestoneId, r.key) }))
-    .filter((r): r is OpRow & { attempt: number } => r.attempt !== null)
-    .sort((a, b) => a.attempt - b.attempt);
-  return { payouts, refund: rows.find((r) => r.kind === "refund") };
+/** This milestone's payout op and refund op (one of each at most: both are keyed by the milestone id). */
+export async function releaseOps(q: Q, milestoneId: string): Promise<{ payout: OpRow | undefined; refund: OpRow | undefined }> {
+  const rows = await q.select().from(paypalOps).where(and(eq(paypalOps.key, milestoneId), inArray(paypalOps.kind, ["payout", "refund"])));
+  return { payout: rows.find((r) => r.kind === "payout"), refund: rows.find((r) => r.kind === "refund") };
+}
+
+/** Whether the milestone was ever flagged for an operator. Once flagged, the release job never runs for it again. */
+export async function isFlaggedForOperator(q: Q, milestoneId: string): Promise<boolean> {
+  const [row] = await q.select({ id: auditLog.id }).from(auditLog).where(and(eq(auditLog.milestoneId, milestoneId), eq(auditLog.event, NEEDS_OPERATOR_EVENT))).limit(1);
+  return row !== undefined;
+}
+
+/**
+ * Moves the milestone to held (when the transition table allows it) and writes milestone.needs_operator with the
+ * current picture of the attempt. Call under the milestone row lock.
+ */
+export async function flagNeedsOperator(
+  q: Db,
+  m: { id: string; contractId: string; status: MilestoneStatus },
+  input: { actor: string; reason: string; detail?: Record<string, unknown> },
+): Promise<void> {
+  if (m.status !== "held" && canHold(m.status)) {
+    await transition(q, m.id, "held", { actor: input.actor, event: "milestone.held", detail: { reason: input.reason } });
+  }
+  const ops = await releaseOps(q, m.id);
+  const claim = parseClaim(ops.payout?.request) ?? parseClaim(ops.refund?.request);
+  await audit(q, {
+    actor: input.actor,
+    event: NEEDS_OPERATOR_EVENT,
+    milestoneId: m.id,
+    contractId: m.contractId,
+    detail: { reason: input.reason, status: m.status, ...input.detail, ...operatorSummary(claim, ops.payout, ops.refund) },
+  });
 }
 
 /** Claims a paypal_ops row for this release: creates it as "sent", or moves a never-sent "pending" row to "sent". */
@@ -316,17 +407,31 @@ async function claimOp(tx: Tx, kind: "payout" | "refund", key: string, claim: Re
   if (row?.status !== "sent" || parseClaim(row.request)?.deliveryId !== claim.deliveryId) throw new Error(`could not claim ${kind} op ${key}`);
 }
 
-/** Stores PayPal's answer without losing per-item outcomes the settle job may already have written. */
-async function recordResponse(db: Db, kind: string, key: string, set: { paypalId?: string; status?: "sent" | "succeeded" | "failed"; response: unknown }): Promise<void> {
-  await db
-    .update(paypalOps)
-    .set({
-      ...(set.paypalId ? { paypalId: set.paypalId } : {}),
-      ...(set.status ? { status: set.status } : {}),
-      response: sql`${JSON.stringify(set.response ?? {})}::jsonb || jsonb_build_object('items', coalesce(${paypalOps.response} -> 'items', '{}'::jsonb))`,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(paypalOps.kind, kind), eq(paypalOps.key, key), inArray(paypalOps.status, ["sent", "pending"])));
+/**
+ * Stores PayPal's answer. The PayPal id is always written (R8), whatever the op's status; the status only moves while the
+ * op is still sent; per-item outcomes and reversals the settle job may already have written are kept.
+ */
+async function recordResponse(db: Db, kind: string, key: string, set: { paypalId?: string; status?: "failed" | "succeeded"; response: unknown }): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(paypalOps).where(and(eq(paypalOps.kind, kind), eq(paypalOps.key, key))).for("update");
+    if (!row) return;
+    const prev = obj(row.response);
+    const response = { ...obj(set.response), ...(prev.items ? { items: prev.items } : {}), ...(prev.reversals ? { reversals: prev.reversals } : {}), ...(prev.webhook ? { webhook: prev.webhook } : {}) };
+    const status = set.status && (row.status === "sent" || row.status === "pending") ? set.status : row.status;
+    await tx
+      .update(paypalOps)
+      .set({ ...(set.paypalId ? { paypalId: set.paypalId } : {}), status, response, updatedAt: new Date() })
+      .where(eq(paypalOps.id, row.id));
+  });
+}
+
+/** Locks the milestone and flags it for an operator (release job side: a DENIED batch or a FAILED refund). */
+async function flagFromJob(db: Db, milestoneId: string, reason: string, detail: Record<string, unknown>): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [m] = await tx.select().from(milestones).where(eq(milestones.id, milestoneId)).for("update");
+    if (!m) throw new Error(`milestone ${milestoneId} not found`);
+    await flagNeedsOperator(tx as unknown as Db, m, { actor: "paypal", reason, detail });
+  });
 }
 
 // ---------- Job ----------
@@ -337,38 +442,31 @@ interface Claimed {
 }
 
 /**
- * Locks the milestone, checks the job is still current and the client has not stopped it, and claims the paypal_ops
- * rows (status "sent") in the same transaction. The review route takes the same lock and refuses veto / hold once a
- * claimed op exists, so a veto either lands before the claim (and this job skips) or is refused.
+ * Locks the milestone, applies the one-attempt gate, checks the job is still current and the client has not stopped it,
+ * and claims the paypal_ops rows (status "sent") in the same transaction. The review route takes the same lock and
+ * refuses veto / hold once a claimed op exists, so a veto either lands before the claim (and this job skips) or is refused.
  */
 async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string | null): Promise<Claimed | null> {
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
     const [m] = await tx.select().from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!m) throw new Error(`milestone ${milestoneId} not found`);
-    const skip = async (reason: string, extra: Record<string, unknown> = {}) => {
-      await audit(t, { actor: "system", event: "release.skipped", milestoneId, contractId: m.contractId, detail: { reason, jobDeliveryId, status: m.status, ...extra } });
+    const note = async (event: string, reason: string, extra: Record<string, unknown> = {}) => {
+      await audit(t, { actor: "system", event, milestoneId, contractId: m.contractId, detail: { reason, jobDeliveryId, status: m.status, ...extra } });
       return null;
     };
+    const skip = (reason: string, extra: Record<string, unknown> = {}) => note("release.skipped", reason, extra);
     const decId = decisionDeliveryId(m.decision);
     const ops = await releaseOps(tx, milestoneId);
+    const opList = [ops.payout, ops.refund].filter((o): o is OpRow => o !== undefined);
 
-    // Resume: this delivery's release was already claimed (crash or retry after the PayPal call, or a refund to finish).
-    const mine = [...ops.payouts, ...(ops.refund ? [ops.refund] : [])].map((o) => parseClaim(o.request)).filter((c): c is ReleaseClaim => c !== null && c.deliveryId === jobDeliveryId);
-    const resume = mine.sort((a, b) => b.attempt - a.attempt)[0];
-    if (resume) {
-      if (decId !== jobDeliveryId) return skip("the claimed release belongs to an older decision", { claimedFor: resume.deliveryId });
-      if (!RESUMABLE_STATUSES.has(m.status)) return skip(`claimed release cannot resume while milestone is ${m.status}`);
-      return { claim: resume, contractId: m.contractId };
-    }
+    const gate = releaseGate({ jobDeliveryId, decisionDeliveryId: decId, status: m.status, needsOperator: await isFlaggedForOperator(tx, milestoneId), ops: opList });
+    if (gate.kind === "refuse") return note(REFUSED_NEEDS_OPERATOR_EVENT, gate.reason, { ops: opList.map((o) => ({ kind: o.kind, status: o.status, paypalId: o.paypalId })) });
+    if (gate.kind === "skip") return skip(gate.reason);
+    if (gate.kind === "resume") return { claim: gate.claim, contractId: m.contractId };
 
-    const stale = staleReason({ jobDeliveryId, decisionDeliveryId: decId, status: m.status });
-    if (stale) return skip(stale);
     const stored = parseDecision(m.decision);
     if (!stored) return skip("milestone has no policy decision");
-    const latest = ops.payouts.at(-1);
-    if (latest?.status === "sent" || ops.refund?.status === "sent") return skip("another release is still in flight");
-
     const outcome = clientOutcome(stored, m, new Date());
     if (outcome.action === "hold") {
       await transition(t, milestoneId, "held", { actor: "policy", event: "milestone.held", detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
@@ -403,17 +501,13 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       owedMinor = owed.principalMinor + owed.feeMinor;
     }
 
-    const paid = paidParties(ops.payouts.map((o) => o.response));
-    const shares = planShares(outcome.amountMinor, owedMinor, paid);
+    const shares = payoutShares(outcome.amountMinor, owedMinor);
     const releaseMinor = shares.partnerShareMinor + shares.freelancerShareMinor;
-    const refundDue = Math.max(0, m.amountMinor - outcome.amountMinor);
-    const refundMinor = !ops.refund || ops.refund.status === "pending" ? refundDue : 0;
-    if (releaseMinor === 0 && refundMinor === 0) return skip("nothing left to pay or refund", { paid, refundOp: ops.refund?.status ?? null });
+    const refundMinor = Math.max(0, m.amountMinor - outcome.amountMinor);
+    if (releaseMinor === 0 && refundMinor === 0) return skip("nothing to pay or refund");
 
-    const attempt = !latest ? 1 : latest.status === "pending" ? latest.attempt : latest.attempt + 1;
     const claim: ReleaseClaim = {
       deliveryId: jobDeliveryId!,
-      attempt,
       action: outcome.action === "partial" ? "partial" : "release",
       ruleIds: outcome.ruleIds,
       reason: outcome.reason,
@@ -425,17 +519,25 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       partnerEmail,
       shares,
     };
-    if (releaseMinor > 0) await claimOp(tx, "payout", payoutOpKey(milestoneId, attempt), claim);
+    // Both ops are claimed before any PayPal call, so a retry of this job can finish either and nothing else can start one.
+    if (releaseMinor > 0) await claimOp(tx, "payout", milestoneId, claim);
     if (refundMinor > 0) await claimOp(tx, "refund", milestoneId, claim);
-    await audit(t, { actor: "policy", event: "release.claimed", milestoneId, contractId: m.contractId, detail: { ...claim, paidBefore: paid } });
+    await audit(t, { actor: "policy", event: "release.claimed", milestoneId, contractId: m.contractId, detail: { ...claim } });
     return { claim, contractId: m.contractId };
   });
+}
+
+/** True when this op belongs to the claim and was claimed but never answered by PayPal. */
+function unsent(op: OpRow | undefined, claim: ReleaseClaim): op is OpRow {
+  return op?.status === "sent" && !op.paypalId && parseClaim(op.request)?.deliveryId === claim.deliveryId;
 }
 
 /**
  * Runs when the review window closes, or right away on early approval / client confirmation of a partial.
  * Sends the payout (and the refund of an unverified share) but never marks the milestone released:
  * the settle job does that when PayPal's webhook confirms the payout (CLAUDE.md rule 7).
+ * A throw makes pg-boss retry this same job, which resumes the same claim with the same PayPal-Request-Id; nothing
+ * else ever re-enqueues a release.
  */
 export async function release(job: Job<JobData>): Promise<void> {
   const db = getDb();
@@ -445,32 +547,26 @@ export async function release(job: Job<JobData>): Promise<void> {
   const claimed = await claimRelease(db, milestoneId, jobDeliveryId);
   if (!claimed) return;
   const { claim, contractId } = claimed;
-  const ctx: MoneyContext = {
-    client: paypal(),
-    // executeRelease asks for ("payout", milestoneId); a re-pay attempt maps that to its own key, hence its own PayPal-Request-Id.
-    requestIdFor: (kind, key) => requestIdFor(db, kind, kind === "payout" ? payoutOpKey(key, claim.attempt) : key),
-  };
+  const ctx: MoneyContext = { client: paypal(), requestIdFor: (kind, key) => requestIdFor(db, kind, key) };
   const fail = async (event: string, err: unknown) => {
-    await audit(db, { actor: "paypal", event, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, attempt: claim.attempt, error: err instanceof Error ? err.message : String(err) } });
+    await audit(db, { actor: "paypal", event, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, error: err instanceof Error ? err.message : String(err) } });
     throw err; // pg-boss retries with the same PayPal-Request-Id
   };
 
   const ops = await releaseOps(db, milestoneId);
-  const payoutKey = payoutOpKey(milestoneId, claim.attempt);
-  const payoutOp = ops.payouts.find((o) => o.key === payoutKey);
-  let batch: { payout_batch_id?: string; batch_status?: string } | undefined;
-  if (claim.releaseMinor > 0 && payoutOp?.status === "sent" && !payoutOp.paypalId && parseClaim(payoutOp.request)?.deliveryId === claim.deliveryId) {
+  if (claim.releaseMinor > 0 && unsent(ops.payout, claim)) {
     let results: { payout?: { batch_header?: { payout_batch_id?: string; batch_status?: string } } };
     try {
       results = (await executeRelease(ctx, payoutPlan(milestoneId, claim))) as typeof results;
     } catch (err) {
       return fail("paypal.payout_error", err);
     }
-    batch = results.payout?.batch_header;
+    const batch = results.payout?.batch_header;
+    const denied = batch?.batch_status === "DENIED";
     // Recorded before the refund call, so a failing refund never loses the payout result.
-    await recordResponse(db, "payout", payoutKey, {
+    await recordResponse(db, "payout", milestoneId, {
       ...(batch?.payout_batch_id ? { paypalId: batch.payout_batch_id } : {}),
-      ...(batch?.batch_status === "DENIED" ? { status: "failed" as const } : {}),
+      ...(denied ? { status: "failed" as const } : {}),
       response: results.payout ?? {},
     });
     await audit(db, {
@@ -482,7 +578,6 @@ export async function release(job: Job<JobData>): Promise<void> {
         payoutBatchId: batch?.payout_batch_id ?? null,
         batchStatus: batch?.batch_status ?? null,
         deliveryId: claim.deliveryId,
-        attempt: claim.attempt,
         action: claim.action,
         ruleIds: claim.ruleIds,
         amountMinor: claim.releaseMinor,
@@ -490,10 +585,10 @@ export async function release(job: Job<JobData>): Promise<void> {
         ...claim.shares,
       },
     });
+    if (denied) await flagFromJob(db, milestoneId, "PayPal denied the payout batch", { payoutBatchId: batch?.payout_batch_id ?? null });
   }
 
-  const refundOp = ops.refund;
-  if (claim.refundMinor > 0 && refundOp?.status === "sent" && !refundOp.paypalId && parseClaim(refundOp.request)?.deliveryId === claim.deliveryId) {
+  if (claim.refundMinor > 0 && unsent(ops.refund, claim)) {
     let results: { refund?: { id?: string; status?: string } };
     try {
       results = (await executeRelease(ctx, refundPlan(milestoneId, claim))) as typeof results;
@@ -510,5 +605,6 @@ export async function release(job: Job<JobData>): Promise<void> {
       contractId,
       detail: { refundId: r?.id ?? null, refundStatus: r?.status ?? null, refundMinor: claim.refundMinor, currency: claim.currency, deliveryId: claim.deliveryId },
     });
+    if (status === "failed") await flagFromJob(db, milestoneId, `PayPal refund ${r?.status ?? "failed"}`, { refundId: r?.id ?? null });
   }
 }

@@ -416,4 +416,30 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
       }
     }
   });
+  it("7. R6: after an earlier delivery's payout, a new delivery's approve/veto get 409 needs_operator and the job refuses", async () => {
+    const t = await seed({ status: "review", decision: release6, reviewEndsIn: -60_000 });
+    fake.calls.length = 0;
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    expect(payoutPosts(fake.calls)).toHaveLength(1);
+
+    // Re-verification of a new delivery puts the milestone back in review with a decision for that delivery.
+    const d2 = `${t.deliveryId}_b`;
+    await db.insert(deliveries).values({ id: d2, milestoneId: t.milestoneId, source: "manual", ref: `e2e-${t.milestoneId}-b`, verdict: { delivery_id: d2, suspected_injection: false, criteria: [{ criterion_id: t.critId, status: "pass", confidence: 0.95, evidence_ids: ["evd_1"], rationale: "ok" }] }, result: "pass", verifiedAt: new Date() });
+    await db
+      .update(milestones)
+      .set({ status: "review", decision: { ...release6, deliveryId: d2 } as never, reviewEndsAt: new Date(Date.now() + hour), clientResponse: null })
+      .where(eq(milestones.id, t.milestoneId));
+
+    const approve = await review(t.milestoneId, "approve");
+    expect(approve).toMatchObject({ status: 409, body: { reason: "needs_operator" } });
+    const veto = await review(t.milestoneId, "veto");
+    expect(veto).toMatchObject({ status: 409, body: { reason: "needs_operator" } });
+
+    await release(job({ milestoneId: t.milestoneId, deliveryId: d2 }));
+    expect(payoutPosts(fake.calls)).toHaveLength(1);
+    const s = await t.state();
+    expect(s.audits).toContain("release.refused_needs_operator");
+    expect(s.ops).toHaveLength(1);
+    expect(s.m.clientResponse).toBeNull();
+  });
 });

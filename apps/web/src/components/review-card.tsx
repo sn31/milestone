@@ -12,6 +12,24 @@ function timeLeft(ms: number): string {
   return d ? `${d}d ${h}h left` : h ? `${h}h ${m}m left` : `${m}m ${s % 60}s left`;
 }
 
+/** Human text for the 409 reasons the review route returns; falls back to the route's own error message. */
+function refusalText(body: { error?: unknown; reason?: unknown; criteria?: unknown } | null, status: number): string {
+  const error = typeof body?.error === "string" ? body.error : `request failed (${status})`;
+  const reason = typeof body?.reason === "string" ? body.reason : null;
+  if (!reason) return error;
+  if (reason === "needs_operator") return "An earlier payout or refund for this milestone went wrong and needs an operator. Nothing more can be approved or stopped here.";
+  if (reason === "review_window_closed") return "The review window has closed, so the release can no longer be vetoed.";
+  if (reason === "required_criteria_not_passed") {
+    const list = Array.isArray(body?.criteria) ? body.criteria.filter((c): c is string => typeof c === "string") : [];
+    return list.length > 0 ? `Required criteria did not pass: ${list.join(", ")}.` : "Required criteria did not pass.";
+  }
+  if (/^(payout|refund)_(sent|succeeded|failed)$/.test(reason)) {
+    const kind = reason.startsWith("payout") ? "payout" : "refund";
+    return `The ${kind} has already been sent to PayPal, so it can no longer be changed or stopped.`;
+  }
+  return error;
+}
+
 export function ReviewCard(props: {
   milestoneId: string;
   status: "review" | "needs_client";
@@ -40,8 +58,13 @@ export function ReviewCard(props: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
-      if (!res.ok) setError(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `request failed (${res.status})`);
-      else router.refresh();
+      if (res.ok) {
+        router.refresh();
+        return;
+      }
+      setError(refusalText((await res.json().catch(() => null)) as Parameters<typeof refusalText>[0], res.status));
+      // A 409 means the milestone moved on (payout sent, window closed): show the current state behind the message.
+      if (res.status === 409) router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
@@ -61,9 +84,15 @@ export function ReviewCard(props: {
     </button>
   );
 
+  const endsAt = props.reviewEndsAt ? new Date(props.reviewEndsAt).getTime() : null;
+  // Veto only while the window is known to be open (the route refuses it once reviewEndsAt has passed).
+  const windowOpen = endsAt === null || (now !== null && endsAt > now);
+
   const buttons: React.ReactNode[] = [];
-  if (props.status === "review") buttons.push(btn("approve", "Approve now", true), btn("veto", "Veto"));
-  else {
+  if (props.status === "review") {
+    buttons.push(btn("approve", "Approve now", true));
+    if (windowOpen) buttons.push(btn("veto", "Veto"));
+  } else {
     if (props.decisionAction === "partial") buttons.push(btn("confirm_partial", "Release partial", true));
     if (props.decisionAction === "ask_client") buttons.push(btn("approve", "Approve full", true));
     buttons.push(btn("hold", "Hold"));
@@ -74,7 +103,8 @@ export function ReviewCard(props: {
     <div className="mt-3 space-y-2 rounded border border-zinc-200 p-3 text-sm">
       {props.status === "review" ? (
         <p>
-          Review window: {props.reviewEndsAt && now !== null ? timeLeft(new Date(props.reviewEndsAt).getTime() - now) : "..."}. Funds release automatically when it closes unless the client vetoes.
+          Review window: {endsAt !== null && now !== null ? timeLeft(endsAt - now) : "..."}.{" "}
+          {endsAt !== null && now !== null && endsAt <= now ? "The window has closed; the release is being processed." : "Funds release automatically when it closes unless the client vetoes."}
         </p>
       ) : (
         <p>

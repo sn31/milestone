@@ -38,6 +38,32 @@ export function paypalErrorResponse(e: unknown) {
 
 // ---------- Funding: shared by the capture route and the PayPal webhook ----------
 
+const GITHUB_API = "https://api.github.com";
+const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/**
+ * The head commit of the repository's default branch, recorded on the milestone at funding as the verifier's
+ * tamper-check baseline. Null without GITHUB_TOKEN, without a repository, or on any GitHub failure: funding never
+ * waits on GitHub, and the verifier then falls back to the pull request's base commit.
+ */
+export async function defaultBranchHead(repoFullName: string | null, f: typeof fetch = fetch, token = process.env.GITHUB_TOKEN): Promise<string | null> {
+  if (!token || !repoFullName || !REPO_NAME.test(repoFullName)) return null;
+  const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "milestone-escrow" };
+  try {
+    const signal = AbortSignal.timeout(5_000);
+    const repo = await f(`${GITHUB_API}/repos/${repoFullName}`, { headers, signal });
+    if (!repo.ok) return null;
+    const branch = ((await repo.json()) as { default_branch?: unknown }).default_branch;
+    if (typeof branch !== "string" || !branch) return null;
+    const commit = await f(`${GITHUB_API}/repos/${repoFullName}/commits/${encodeURIComponent(branch)}`, { headers, signal });
+    if (!commit.ok) return null;
+    const sha = ((await commit.json()) as { sha?: unknown }).sha;
+    return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The parts of a PayPal capture we act on (order capture response or PAYMENT.CAPTURE.* resource). */
 export interface CaptureInfo {
   id: string;
@@ -97,6 +123,9 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
     return { kind: "pending", status: "draft", captureId: capture.id, captureStatus: capture.status };
   }
 
+  // Outside the row lock: a network call. Recorded only by the call that moves the milestone to funded.
+  const baselineSha = await defaultBranchHead(c.repoFullName);
+
   return db.transaction(async (tx): Promise<FundResult> => {
     // The core helpers take Db; a transaction exposes the same query builder.
     const t = tx as unknown as Db;
@@ -104,7 +133,7 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
     if (!row) throw new Error(`milestone ${m.id} disappeared`);
     if (row.status !== "draft") return { kind: "already", status: row.status, captureId: row.captureId };
 
-    await tx.update(milestones).set({ paypalCaptureId: capture.id }).where(eq(milestones.id, m.id));
+    await tx.update(milestones).set({ paypalCaptureId: capture.id, ...(baselineSha ? { baselineSha } : {}) }).where(eq(milestones.id, m.id));
     const posted = await tx.query.ledgerEntries.findFirst({ where: (l) => eq(l.ref, capture.id) });
     if (!posted) {
       await postTransaction(t, {
@@ -119,7 +148,7 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
     await transition(t, m.id, "funded", {
       actor,
       event: "milestone.funded",
-      detail: { orderId: orderId ?? m.paypalOrderId, captureId: capture.id, amountMinor: m.amountMinor, currency: c.currency },
+      detail: { orderId: orderId ?? m.paypalOrderId, captureId: capture.id, amountMinor: m.amountMinor, currency: c.currency, baselineSha },
     });
     return { kind: "funded", status: "funded", captureId: capture.id };
   });

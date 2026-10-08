@@ -44,6 +44,8 @@ export async function git(workdir: string, args: string[], timeoutMs = 60_000): 
 export interface ReaderInput {
   workdir: string | null;
   sha: string;
+  /** The commit the deterministic stage diffed against (fetched into workdir); null shows the commit's own diff. */
+  baseline?: string | null;
   repoUrl: string;
   evidence: EvidenceSummary[];
 }
@@ -62,8 +64,13 @@ export function createEvidenceReader(input: ReaderInput): EvidenceReader {
     getDiff() {
       const workdir = input.workdir;
       if (!workdir) return Promise.resolve("the delivery could not be checked out, no diff is available");
-      // The deterministic stage fetched depth 2 (the commit and its first parent), so this diffs against the parent.
-      diff ??= git(workdir, ["show", "--stat", "-p", "--no-color", input.sha]).then((d) => bound(d));
+      // The deterministic stage fetched the baseline it compared against, and depth 2 (the commit and its first
+      // parent), so without a baseline this is the commit's own diff against its parent.
+      const baseline = input.baseline;
+      diff ??= (baseline
+        ? git(workdir, ["diff", "--stat", "-p", "--no-color", baseline, input.sha]).then((d) => `diff from baseline ${baseline.slice(0, 12)} to ${input.sha.slice(0, 12)}\n${d}`)
+        : git(workdir, ["show", "--stat", "-p", "--no-color", input.sha])
+      ).then((d) => bound(d));
       return diff;
     },
     async listEvidence() {

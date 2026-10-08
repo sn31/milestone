@@ -8,6 +8,13 @@
       "when": 1791440083477,
       "tag": "0000_charming_wraith",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791442456071,
+      "tag": "0001_normal_shatterstar",
+      "breakpoints": true
     }
   ]
 }

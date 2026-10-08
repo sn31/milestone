@@ -53,6 +53,8 @@ export const milestones = pgTable("milestones", {
   status: milestoneStatus("status").default("draft").notNull(),
   paypalOrderId: text("paypal_order_id"),
   paypalCaptureId: text("paypal_capture_id"),
+  /** Default branch head when the milestone was funded; the verifier's tamper check diffs deliveries against it. */
+  baselineSha: text("baseline_sha"),
   decision: jsonb("decision").$type<{ action: string; amountMinor: number; ruleIds: string[]; reason: string }>(),
   decidedAt: timestamp("decided_at", { withTimezone: true }),
   reviewEndsAt: timestamp("review_ends_at", { withTimezone: true }),

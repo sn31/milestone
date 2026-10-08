@@ -41,6 +41,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
   let repo: string;
   let sha: string;
   let tamperSha: string;
+  let laterSha: string;
 
   beforeAll(async () => {
     delete process.env.ANTHROPIC_API_KEY;
@@ -57,6 +58,11 @@ describe.skipIf(!run)("verify job end to end", async () => {
     await writeFile(join(repo, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0", scripts: { test: "exit 0", fail: "node -e \"process.exit(1)\"" } }));
     g("add", "."); g("commit", "-qm", "chore: faster tests");
     tamperSha = g("rev-parse", "HEAD");
+    // The same script rewrite in an earlier commit, then a delivery commit that only adds a file:
+    // the first-parent diff misses it, a baseline from funding or the PR base catches it.
+    await writeFile(join(repo, "CHANGELOG.md"), "- faster tests\n");
+    g("add", "."); g("commit", "-qm", "docs: changelog");
+    laterSha = g("rev-parse", "HEAD");
     g("checkout", "-q", "main");
     const db = getDb();
     await db.insert(contracts).values({ id: contractId, clientId: "usr_client", freelancerId: "usr_freelancer", title: "e2e", scopeText: "e2e", currency: "USD", totalMinor: 30000, repoFullName: `e2e/${tag}`, status: "active" });
@@ -77,13 +83,13 @@ describe.skipIf(!run)("verify job end to end", async () => {
   });
 
   type MilestoneInsert = typeof milestones.$inferInsert;
-  async function setup(seq: number, crit: Array<{ kind: "test" | "file" | "judgment"; spec: Record<string, unknown>; required: boolean }>, opts: { sha?: string; milestone?: Partial<MilestoneInsert> } = {}) {
+  async function setup(seq: number, crit: Array<{ kind: "test" | "file" | "judgment"; spec: Record<string, unknown>; required: boolean }>, opts: { sha?: string; milestone?: Partial<MilestoneInsert>; payload?: Record<string, unknown> } = {}) {
     const db = getDb();
     const milestoneId = `mst_e2e_${tag}_${seq}`;
     await db.insert(milestones).values({ id: milestoneId, contractId, seq, title: `m${seq}`, amountMinor: 10000, status: "funded", ...opts.milestone });
     await db.insert(criteria).values(crit.map((c, i) => ({ id: `crt_e2e_${tag}_${seq}_${i}`, milestoneId, kind: c.kind, description: `${c.kind} ${i}`, spec: c.spec, required: c.required })));
     const deliveryId = `dlv_e2e_${tag}_${seq}`;
-    await db.insert(deliveries).values({ id: deliveryId, milestoneId, source: "github_pr", ref: `e2e/${tag}#${seq}`, payload: { sha: opts.sha ?? sha, title: "m", body: "", branch: `m${seq}-x`, clone_url: `file://${repo}` } });
+    await db.insert(deliveries).values({ id: deliveryId, milestoneId, source: "github_pr", ref: `e2e/${tag}#${seq}`, payload: { sha: opts.sha ?? sha, title: "m", body: "", branch: `m${seq}-x`, clone_url: `file://${repo}`, ...opts.payload } });
     const job = { id: "j", name: "verify", data: { milestoneId, deliveryId } } as unknown as Job<{ milestoneId: string } & Record<string, unknown>>;
     const state = async () => ({
       m: (await db.query.milestones.findFirst({ where: (m, { eq }) => eq(m.id, milestoneId) }))!,
@@ -102,8 +108,9 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.status).toBe("review");
     expect(s.m.decision).toMatchObject({ action: "release", deliveryId: t.deliveryId });
     expect(s.m.reviewEndsAt).not.toBeNull();
-    const tamper = (s.d.evidence as Array<{ id: string; status?: string }>).find((e) => e.id === "evd_tamper_check");
+    const tamper = (s.d.evidence as Array<{ id: string; status?: string; summary: string }>).find((e) => e.id === "evd_tamper_check");
     expect(tamper?.status).toBe("pass");
+    expect(tamper?.summary).toMatch(/no baseline recorded/);
     const rel = enqueued.filter((e) => e.milestoneId === t.milestoneId);
     expect(rel).toHaveLength(1);
     expect(rel[0]).toMatchObject({ name: "release", data: { deliveryId: t.deliveryId }, opts: { dedupe: t.deliveryId } });
@@ -146,6 +153,48 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.status).toBe("needs_client");
     expect(s.m.decision).toMatchObject({ action: "ask_client", deliveryId: t.deliveryId });
     expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
+  });
+
+  const crit2 = [{ kind: "test" as const, spec: { command: "npm test" }, required: true }, { kind: "file" as const, spec: { path: "README.md" }, required: true }];
+  async function tamperEvidence(t: Awaited<ReturnType<typeof setup>>) {
+    await verify(t.job);
+    const s = await t.state();
+    const evidence = s.d.evidence as Array<{ id: string; criterion_id?: string; status?: string; summary: string }>;
+    return { s, tamper: evidence.find((e) => e.id === "evd_tamper_check")!, tests: evidence.find((e) => e.criterion_id === t.milestoneId.replace("mst_", "crt_") + "_0")! };
+  }
+
+  it("without a baseline, a script rewrite in an earlier commit is missed by the first-parent fallback, and the evidence says so", { timeout: 120_000 }, async () => {
+    const t = await setup(6, crit2, { sha: laterSha });
+    const { s, tamper } = await tamperEvidence(t);
+    expect(tamper).toMatchObject({ status: "pass" });
+    expect(tamper.summary).toMatch(/first parent .* only \(no baseline recorded/);
+    expect(s.m.status).toBe("review");
+  });
+
+  it("the funding-time baseline on the milestone catches a script rewrite in an earlier commit -> needs_client", { timeout: 120_000 }, async () => {
+    const t = await setup(7, crit2, { sha: laterSha, milestone: { baselineSha: sha }, payload: { base_sha: tamperSha } });
+    const { s, tamper, tests } = await tamperEvidence(t);
+    expect(tamper).toMatchObject({ status: "unclear" });
+    expect(tamper.summary).toMatch(/funding-time default branch baseline .*package\.json scripts changed/);
+    expect(tests).toMatchObject({ status: "unclear" });
+    expect(s.m.status).toBe("needs_client");
+    expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
+  });
+
+  it("with no milestone baseline, the delivery's PR base sha is used", { timeout: 120_000 }, async () => {
+    const t = await setup(8, crit2, { sha: laterSha, payload: { base_sha: sha } });
+    const { s, tamper } = await tamperEvidence(t);
+    expect(tamper.summary).toMatch(/pull request base baseline .*package\.json scripts changed/);
+    expect(s.m.status).toBe("needs_client");
+  });
+
+  it("a recorded baseline that cannot be fetched fails closed -> needs_client", { timeout: 120_000 }, async () => {
+    const t = await setup(9, crit2, { milestone: { baselineSha: "0123456789abcdef0123456789abcdef01234567" } });
+    const { s, tamper, tests } = await tamperEvidence(t);
+    expect(tamper).toMatchObject({ status: "unclear" });
+    expect(tamper.summary).toMatch(/could not be fetched/);
+    expect(tests).toMatchObject({ status: "unclear" });
+    expect(s.m.status).toBe("needs_client");
   });
 
   it("re-entering verifying clears the previous delivery's response, window and decision", { timeout: 120_000 }, async () => {

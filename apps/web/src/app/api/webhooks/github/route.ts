@@ -10,7 +10,7 @@ function verify(raw: string, signature: string | null, secret: string): boolean 
 
 type PullRequestPayload = {
   action?: string;
-  pull_request?: { merged?: boolean; number: number; merge_commit_sha?: string | null; title?: string | null; body?: string | null; head?: { ref?: string } };
+  pull_request?: { merged?: boolean; number: number; merge_commit_sha?: string | null; title?: string | null; body?: string | null; head?: { ref?: string }; base?: { sha?: string | null } };
   repository?: { full_name?: string; clone_url?: string };
 };
 
@@ -60,7 +60,8 @@ export async function POST(req: Request) {
     milestoneId: milestone.id,
     source: "github_pr",
     ref: `${repoFullName}#${pr.number}`,
-    payload: { sha, title: pr.title ?? "", body: pr.body ?? "", branch: pr.head?.ref ?? "", clone_url: cloneUrl, pr_number: pr.number, repo: repoFullName },
+    // base_sha: the tamper check's baseline when no funding-time baseline was recorded on the milestone.
+    payload: { sha, title: pr.title ?? "", body: pr.body ?? "", branch: pr.head?.ref ?? "", clone_url: cloneUrl, pr_number: pr.number, repo: repoFullName, base_sha: typeof pr.base?.sha === "string" ? pr.base.sha : null },
   }).onConflictDoNothing();
   await enqueue("verify", milestone.id, { deliveryId }, { dedupe: sha });
   return Response.json({ ok: true, milestoneId: milestone.id, deliveryId });

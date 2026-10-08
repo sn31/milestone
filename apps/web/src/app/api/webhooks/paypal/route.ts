@@ -94,7 +94,11 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
     }
     case PAYPAL_EVENTS.payoutItemSucceeded:
     case PAYPAL_EVENTS.payoutItemFailed:
-    case PAYPAL_EVENTS.payoutItemBlocked: {
+    case PAYPAL_EVENTS.payoutItemBlocked:
+    case PAYPAL_EVENTS.payoutItemUnclaimed:
+    case PAYPAL_EVENTS.payoutItemReturned:
+    case PAYPAL_EVENTS.payoutItemReversed:
+    case PAYPAL_EVENTS.payoutItemRefunded: {
       // sender_item_id is "<milestoneId>:<party>" (see executeRelease); the settle job marks the event processed.
       const item = (resource.payout_item as { sender_item_id?: string } | undefined) ?? (resource as { sender_item_id?: string });
       const milestoneId = item.sender_item_id?.split(":")[0];

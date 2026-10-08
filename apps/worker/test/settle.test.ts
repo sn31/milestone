@@ -2,15 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   canHold,
   deriveOpStatus,
-  itemStatusFor,
+  isOurRefund,
   ledgerRef,
+  matchPayoutOp,
   mergeItemOutcome,
+  mergeItemReversal,
   paidTotal,
   parsePayoutItemEvent,
   parseRefundEvent,
+  payoutEventKind,
   receiptInvoiceNumber,
+  reverseEntries,
   settleTarget,
-  settlesMilestone,
 } from "../src/jobs/settle.js";
 
 const mid = "3f0c2a5e-8f6b-4d1e-9a7c-0b1d2e3f4a5b";
@@ -46,16 +49,6 @@ describe("parsePayoutItemEvent", () => {
     expect(parsePayoutItemEvent(null)).toEqual({});
     expect(parsePayoutItemEvent({ resource: "nope" })).toEqual({});
     expect(parsePayoutItemEvent({ resource: { payout_item: { sender_item_id: `${mid}:someone` } } }).party).toBeUndefined();
-  });
-});
-
-describe("settlesMilestone", () => {
-  it("settles on the freelancer item", () => {
-    expect(settlesMilestone("freelancer", { freelancerShareMinor: 9_680 })).toBe(true);
-  });
-  it("settles on the partner item only when the partner took the whole release", () => {
-    expect(settlesMilestone("partner", { freelancerShareMinor: 9_680 })).toBe(false);
-    expect(settlesMilestone("partner", { freelancerShareMinor: 0 })).toBe(true);
   });
 });
 
@@ -110,12 +103,16 @@ describe("parseRefundEvent", () => {
   });
 });
 
-describe("itemStatusFor", () => {
-  it("maps payout item events", () => {
-    expect(itemStatusFor("PAYMENT.PAYOUTS-ITEM.SUCCEEDED")).toBe("succeeded");
-    expect(itemStatusFor("PAYMENT.PAYOUTS-ITEM.FAILED")).toBe("failed");
-    expect(itemStatusFor("PAYMENT.PAYOUTS-ITEM.BLOCKED")).toBe("failed");
-    expect(itemStatusFor("PAYMENT.CAPTURE.REFUNDED")).toBeNull();
+describe("payoutEventKind", () => {
+  it("maps payout item events (R9: UNCLAIMED stays in flight, RETURNED / REVERSED / REFUNDED reverse)", () => {
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.SUCCEEDED")).toBe("succeeded");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.FAILED")).toBe("failed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.BLOCKED")).toBe("failed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.UNCLAIMED")).toBe("unclaimed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.RETURNED")).toBe("reversed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.REVERSED")).toBe("reversed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.REFUNDED")).toBe("reversed");
+    expect(payoutEventKind("PAYMENT.CAPTURE.REFUNDED")).toBeNull();
   });
 });
 
@@ -145,7 +142,7 @@ describe("mergeItemOutcome (F6)", () => {
   });
 });
 
-describe("deriveOpStatus", () => {
+describe("deriveOpStatus (R5)", () => {
   const both = { partnerShareMinor: 40_320, freelancerShareMinor: 9_680 };
   const ok = { status: "succeeded" as const, amountMinor: 1, eventId: "e" };
   const bad = { status: "failed" as const, amountMinor: 1, eventId: "e" };
@@ -155,9 +152,71 @@ describe("deriveOpStatus", () => {
     expect(deriveOpStatus(both, { partner: ok, freelancer: ok })).toBe("succeeded");
     expect(deriveOpStatus({ partnerShareMinor: 0, freelancerShareMinor: 9_680 }, { freelancer: ok })).toBe("succeeded");
   });
-  it("fails the op on any failed item, even after another succeeded", () => {
+  it("stays sent after one failed item until the other item has an outcome too", () => {
+    expect(deriveOpStatus(both, { partner: bad })).toBe("sent");
+    expect(deriveOpStatus(both, { freelancer: bad })).toBe("sent");
     expect(deriveOpStatus(both, { partner: ok, freelancer: bad })).toBe("failed");
-    expect(deriveOpStatus(both, { partner: bad })).toBe("failed");
+    expect(deriveOpStatus(both, { partner: bad, freelancer: bad })).toBe("failed");
+  });
+  it("is failed when a succeeded item was reversed", () => {
+    expect(deriveOpStatus(both, { partner: ok, freelancer: ok }, { freelancer: { eventId: "r" } })).toBe("failed");
+  });
+});
+
+describe("mergeItemReversal", () => {
+  const rv = { eventId: "r1", eventType: "PAYMENT.PAYOUTS-ITEM.RETURNED", amountMinor: 9_680 };
+  it("records the first reversal per party and keeps the items", () => {
+    const a = mergeItemReversal({ items: { freelancer: { status: "succeeded" } } }, "freelancer", rv);
+    expect(a).toEqual({ changed: true, response: { items: { freelancer: { status: "succeeded" } }, reversals: { freelancer: rv } } });
+    expect(mergeItemReversal(a.response, "freelancer", { ...rv, eventId: "r2" }).changed).toBe(false);
+    expect(mergeItemReversal(a.response, "partner", rv).changed).toBe(true);
+  });
+});
+
+describe("matchPayoutOp (R8)", () => {
+  it("matches only the op carrying the event's batch id, never another one", () => {
+    expect(matchPayoutOp({ status: "sent", paypalId: "B1" }, "B1")).toBe("match");
+    expect(matchPayoutOp({ status: "succeeded", paypalId: "B1" }, "B1")).toBe("match");
+    expect(matchPayoutOp({ status: "sent", paypalId: "B1" }, "B2")).toBe("unmatched");
+    expect(matchPayoutOp({ status: "failed", paypalId: null }, "B2")).toBe("unmatched");
+    expect(matchPayoutOp(undefined, "B1")).toBe("unmatched");
+    expect(matchPayoutOp({ status: "pending", paypalId: null }, undefined)).toBe("unmatched");
+  });
+  it("waits while our sent op has no batch id recorded yet, and uses the milestone's op when the event has no batch id", () => {
+    expect(matchPayoutOp({ status: "sent", paypalId: null }, "B1")).toBe("wait");
+    expect(matchPayoutOp({ status: "sent", paypalId: "B1" }, undefined)).toBe("match");
+  });
+});
+
+describe("isOurRefund (R10)", () => {
+  it("matches by refund id when our op has one", () => {
+    expect(isOurRefund({ status: "sent", paypalId: "R1" }, 4_000, { refundId: "R1", amountMinor: 4_000 })).toBe(true);
+    expect(isOurRefund({ status: "sent", paypalId: "R1" }, 4_000, { refundId: "R2", amountMinor: 4_000 })).toBe(false);
+    expect(isOurRefund({ status: "sent", paypalId: "R1" }, 4_000, { amountMinor: 4_000 })).toBe(false);
+  });
+  it("without an id yet, matches only the exact claimed amount", () => {
+    expect(isOurRefund({ status: "sent", paypalId: null }, 4_000, { refundId: "R9", amountMinor: 4_000 })).toBe(true);
+    expect(isOurRefund({ status: "sent", paypalId: null }, 4_000, { refundId: "R9", amountMinor: 3_999 })).toBe(false);
+    expect(isOurRefund({ status: "sent", paypalId: null }, 4_000, { refundId: "R9", amountMinor: null })).toBe(false);
+  });
+  it("never matches without a claimed op", () => {
+    expect(isOurRefund(undefined, 4_000, { refundId: "R1", amountMinor: 4_000 })).toBe(false);
+    expect(isOurRefund({ status: "pending", paypalId: null }, 4_000, { refundId: "R1", amountMinor: 4_000 })).toBe(false);
+  });
+});
+
+describe("reverseEntries", () => {
+  it("mirrors a posting so the pair sums to zero per account", () => {
+    const posted = [
+      { account: "held:m", amountMinor: 10_000, direction: "debit" as const },
+      { account: "partner:p:receivable", amountMinor: 9_000, direction: "credit" as const },
+      { account: "partner:p:fees", amountMinor: 1_000, direction: "credit" as const },
+    ];
+    expect(reverseEntries(posted)).toEqual([
+      { account: "held:m", amountMinor: 10_000, direction: "credit" },
+      { account: "partner:p:receivable", amountMinor: 9_000, direction: "debit" },
+      { account: "partner:p:fees", amountMinor: 1_000, direction: "debit" },
+    ]);
   });
 });
 
@@ -174,5 +233,7 @@ describe("ledgerRef (F10)", () => {
     expect(ledgerRef.release(mid, "freelancer")).toBe(`release:${mid}`);
     expect(ledgerRef.release(mid, "partner")).toBe(`release:${mid}:partner`);
     expect(ledgerRef.refund(mid)).toBe(`refund:${mid}`);
+    expect(ledgerRef.reversal(mid, "freelancer")).toBe(`reversal:${mid}:freelancer`);
+    expect(ledgerRef.reversal(mid, "partner")).toBe(`reversal:${mid}:partner`);
   });
 });

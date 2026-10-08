@@ -3,21 +3,22 @@ import { applyReviewWindow } from "@milestone/money";
 import type { PolicyDecision } from "@milestone/core";
 import {
   advanceRepayment,
+  canHold,
   clientOutcome,
   decisionDeliveryId,
   itemOutcomes,
-  paidParties,
+  itemReversals,
+  operatorSummary,
   parseClaim,
   parseDecision,
-  payoutAttempt,
-  payoutOpKey,
   payoutPlan,
   payoutShares,
-  planShares,
   refundPlan,
+  releaseGate,
   requiredNotPassed,
   reviewWindowState,
   staleReason,
+  type OpView,
   type ReleaseClaim,
 } from "../src/jobs/release.js";
 
@@ -178,22 +179,7 @@ describe("requiredNotPassed (F9)", () => {
   });
 });
 
-describe("payout op keys", () => {
-  const mid = "mst_1";
-  it("keeps the plain milestone id for the first attempt (what executeRelease asks for)", () => {
-    expect(payoutOpKey(mid, 1)).toBe(mid);
-    expect(payoutOpKey(mid, 2)).toBe("mst_1:2");
-  });
-  it("round-trips and rejects foreign keys", () => {
-    for (const n of [1, 2, 7]) expect(payoutAttempt(mid, payoutOpKey(mid, n))).toBe(n);
-    expect(payoutAttempt(mid, "mst_10")).toBeNull();
-    expect(payoutAttempt(mid, "mst_1:x")).toBeNull();
-    expect(payoutAttempt(mid, "mst_1:1")).toBeNull();
-    expect(payoutAttempt(mid, "mst_1:partner")).toBeNull();
-  });
-});
-
-describe("item outcomes and re-pay shares", () => {
+describe("item outcomes", () => {
   const ok = { status: "succeeded", amountMinor: 100, eventId: "e1" };
   const bad = { status: "failed", amountMinor: 100, eventId: "e2", reason: "RECEIVER_UNREGISTERED" };
   it("reads stored item outcomes and ignores junk", () => {
@@ -201,21 +187,26 @@ describe("item outcomes and re-pay shares", () => {
     expect(itemOutcomes({ items: { freelancer: { status: "weird" } } })).toEqual({});
     expect(itemOutcomes(null)).toEqual({});
   });
-  it("knows which parties any attempt paid", () => {
-    expect(paidParties([{ items: { partner: ok, freelancer: bad } }, null])).toEqual({ partner: true, freelancer: false });
-    expect(paidParties([{ items: { freelancer: bad } }, { items: { freelancer: ok } }])).toEqual({ partner: false, freelancer: true });
+  it("reads stored reversals and ignores junk", () => {
+    const rv = { eventId: "e3", eventType: "PAYMENT.PAYOUTS-ITEM.RETURNED", amountMinor: 100 };
+    expect(itemReversals({ reversals: { freelancer: rv, partner: { eventId: 1 } } })).toEqual({ freelancer: rv });
+    expect(itemReversals(undefined)).toEqual({});
   });
-  it("never pays an already-paid party again", () => {
-    expect(planShares(50_000, 40_320, { partner: false, freelancer: false })).toEqual({ partnerShareMinor: 40_320, freelancerShareMinor: 9_680 });
-    expect(planShares(50_000, 40_320, { partner: true, freelancer: false })).toEqual({ partnerShareMinor: 0, freelancerShareMinor: 9_680 });
-    expect(planShares(50_000, 40_320, { partner: true, freelancer: true })).toEqual({ partnerShareMinor: 0, freelancerShareMinor: 0 });
+});
+
+describe("canHold", () => {
+  it("follows the transition table", () => {
+    expect(canHold("review")).toBe(true);
+    expect(canHold("needs_client")).toBe(true);
+    expect(canHold("held")).toBe(true);
+    expect(canHold("released")).toBe(false);
+    expect(canHold("partial_released")).toBe(false);
   });
 });
 
 describe("release claims", () => {
   const claim: ReleaseClaim = {
     deliveryId: "d1",
-    attempt: 2,
     action: "partial",
     ruleIds: ["P5", "CL-partial"],
     reason: "2 of 3",
@@ -233,6 +224,9 @@ describe("release claims", () => {
     expect(parseClaim({ claim: { ...claim, refundMinor: -1 } })).toBeNull();
     expect(parseClaim(null)).toBeNull();
   });
+  it("still reads a legacy claim that carries an attempt number", () => {
+    expect(parseClaim({ claim: { ...claim, attempt: 2 } })).toEqual(claim);
+  });
   it("splits into a payout-only and a refund-only plan", () => {
     const p = payoutPlan("m1", claim);
     expect(p).toMatchObject({ decision: { action: "partial", amountMinor: 30_000 }, milestoneAmountMinor: 30_000, partner: { email: "p@x.test", amountMinor: 10_000 } });
@@ -242,5 +236,101 @@ describe("release claims", () => {
   });
   it("leaves the partner out when only the freelancer is paid", () => {
     expect(payoutPlan("m1", { ...claim, shares: { partnerShareMinor: 0, freelancerShareMinor: 9_000 } }).partner).toBeUndefined();
+  });
+});
+
+const claimFor = (deliveryId: string, over: Partial<ReleaseClaim> = {}): ReleaseClaim => ({
+  deliveryId,
+  action: "release",
+  ruleIds: ["P6"],
+  reason: "ok",
+  releaseMinor: 10_000,
+  refundMinor: 0,
+  currency: "USD",
+  captureId: "CAP1",
+  freelancerEmail: "f@x.test",
+  partnerEmail: null,
+  shares: { partnerShareMinor: 0, freelancerShareMinor: 10_000 },
+  ...over,
+});
+const payoutOp = (deliveryId: string, status: string, paypalId: string | null, response: unknown = null): OpView => ({ kind: "payout", status, paypalId, request: { claim: claimFor(deliveryId) }, response });
+
+describe("releaseGate (one payout attempt per milestone)", () => {
+  const gate = (over: Partial<Parameters<typeof releaseGate>[0]>) =>
+    releaseGate({ jobDeliveryId: "d2", decisionDeliveryId: "d2", status: "review", needsOperator: false, ops: [], ...over });
+
+  it("starts a new release only when no op was ever claimed", () => {
+    expect(gate({})).toEqual({ kind: "new" });
+    expect(gate({ ops: [{ ...payoutOp("d1", "pending", null) }] })).toEqual({ kind: "new" });
+    expect(gate({ jobDeliveryId: "d1" }).kind).toBe("skip");
+  });
+
+  it("R4: a new decision on a milestone with any op sent is refused for an operator, never re-paid", () => {
+    for (const op of [payoutOp("d1", "sent", "B1"), payoutOp("d1", "succeeded", "B1"), payoutOp("d1", "failed", "B1"), payoutOp("d1", "sent", null)]) {
+      const g = gate({ ops: [op] });
+      expect(g.kind).toBe("refuse");
+    }
+    const refund: OpView = { kind: "refund", status: "sent", paypalId: "R1", request: { claim: claimFor("d1", { refundMinor: 10_000 }) } };
+    expect(gate({ ops: [refund], status: "needs_client" }).kind).toBe("refuse");
+  });
+
+  it("refuses forever once the milestone was flagged for an operator, even for the claimed delivery", () => {
+    expect(gate({ needsOperator: true }).kind).toBe("refuse");
+    expect(gate({ needsOperator: true, jobDeliveryId: "d1", decisionDeliveryId: "d1", ops: [payoutOp("d1", "sent", null)] }).kind).toBe("refuse");
+  });
+
+  it("resumes only the claimed delivery's unanswered op (a retry after a crash or a failed refund call)", () => {
+    const g = gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", ops: [payoutOp("d1", "sent", null)] });
+    expect(g).toMatchObject({ kind: "resume", claim: { deliveryId: "d1" } });
+    const refundPending: OpView = { kind: "refund", status: "sent", paypalId: null, request: { claim: claimFor("d1", { refundMinor: 4_000 }) } };
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "released", ops: [payoutOp("d1", "succeeded", "B1"), refundPending] }).kind).toBe("resume");
+  });
+
+  it("R11: a duplicate job for an op already answered by PayPal just stops (no waiting, no re-enqueue)", () => {
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", ops: [payoutOp("d1", "sent", "B1")] })).toEqual({ kind: "skip", reason: "this release was already sent to PayPal" });
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "released", ops: [payoutOp("d1", "succeeded", "B1")] }).kind).toBe("skip");
+  });
+
+  it("does not resume while the milestone is held", () => {
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "held", ops: [payoutOp("d1", "sent", null)] }).kind).toBe("refuse");
+  });
+
+  it("skips a stale job (its delivery is not the current decision) whatever the ops say", () => {
+    expect(gate({ jobDeliveryId: "d0", ops: [payoutOp("d1", "sent", "B1")] }).kind).toBe("skip");
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d2", ops: [payoutOp("d1", "sent", null)] }).kind).toBe("skip");
+  });
+});
+
+describe("operatorSummary", () => {
+  it("reports what was paid, failed, reversed, is pending and was refunded", () => {
+    const claim = claimFor("d1", { action: "partial", releaseMinor: 6_000, refundMinor: 4_000, partnerEmail: "p@x.test", shares: { partnerShareMinor: 5_000, freelancerShareMinor: 1_000 } });
+    const payout: OpView = {
+      kind: "payout",
+      status: "failed",
+      paypalId: "B1",
+      request: { claim },
+      response: {
+        items: { partner: { status: "succeeded", amountMinor: 5_000, eventId: "e1" }, freelancer: { status: "failed", amountMinor: 1_000, eventId: "e2", reason: "BLOCKED" } },
+        reversals: { partner: { eventId: "e3", eventType: "PAYMENT.PAYOUTS-ITEM.REVERSED", amountMinor: 5_000 } },
+      },
+    };
+    const refund: OpView = { kind: "refund", status: "succeeded", paypalId: "R1", request: { claim }, response: { webhook: { amountMinor: 4_000 } } };
+    expect(operatorSummary(claim, payout, refund)).toEqual({
+      deliveryId: "d1",
+      action: "partial",
+      currency: "USD",
+      payoutBatchId: "B1",
+      payoutOpStatus: "failed",
+      paid: { partner: 5_000 },
+      failed: { freelancer: "BLOCKED" },
+      reversed: { partner: { eventType: "PAYMENT.PAYOUTS-ITEM.REVERSED", amountMinor: 5_000 } },
+      pending: [],
+      refunded: { claimedMinor: 4_000, opStatus: "succeeded", refundId: "R1", settledMinor: 4_000 },
+    });
+  });
+  it("lists parties without an outcome as pending and no refund when there is none", () => {
+    const claim = claimFor("d1", { shares: { partnerShareMinor: 3_000, freelancerShareMinor: 7_000 } });
+    const s = operatorSummary(claim, { kind: "payout", status: "sent", paypalId: "B1", request: { claim }, response: { items: { partner: { status: "failed", amountMinor: 3_000, eventId: "e" } } } }, undefined);
+    expect(s).toMatchObject({ paid: {}, failed: { partner: "failed" }, pending: ["freelancer"], refunded: null });
   });
 });

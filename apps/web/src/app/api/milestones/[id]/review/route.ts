@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { audit, criteria, deliveries, enqueue, milestones, paypalOps, transition, type Db } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { getActor } from "@/lib/session";
@@ -22,6 +22,13 @@ type Outcome = { refused: Refusal } | { queued: string } | { held: boolean };
 /** The delivery the decision was made for (the verify job writes decision.deliveryId). */
 function decisionDeliveryId(decision: unknown): string | null {
   const v = decision && typeof decision === "object" ? (decision as Record<string, unknown>).deliveryId : undefined;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/** The delivery a claimed paypal_ops row was claimed for (the release job stores request.claim.deliveryId). */
+function claimDeliveryId(request: unknown): string | null {
+  const claim = request && typeof request === "object" ? (request as { claim?: unknown }).claim : undefined;
+  const v = claim && typeof claim === "object" ? (claim as Record<string, unknown>).deliveryId : undefined;
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
@@ -68,29 +75,24 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       return refuse("there is no proposed partial amount to confirm");
     }
 
-    // Has a payout (any attempt) or the refund already been claimed or sent? Then nothing can stop or change it.
-    const started = await tx
-      .select({ kind: paypalOps.kind, status: paypalOps.status })
+    // One payout attempt per milestone. An op claimed for this decision's delivery means the payout (or refund) has
+    // started and nothing can stop or change it; an op claimed for any other delivery means an earlier attempt went
+    // wrong and the milestone needs an operator (the release job refuses to run for it again).
+    const deliveryId = decisionDeliveryId(m.decision);
+    const claimed = await tx
+      .select({ kind: paypalOps.kind, status: paypalOps.status, request: paypalOps.request })
       .from(paypalOps)
-      .where(
-        and(
-          inArray(paypalOps.status, ["sent", "succeeded"]),
-          or(
-            and(eq(paypalOps.kind, "payout"), or(eq(paypalOps.key, m.id), sql`starts_with(${paypalOps.key}, ${`${m.id}:`})`)),
-            and(eq(paypalOps.kind, "refund"), eq(paypalOps.key, m.id)),
-          ),
-        ),
-      )
-      .limit(1);
-    if (started[0]) {
-      return refuse(`cannot ${action}: the ${started[0].kind} has already been sent to PayPal`, 409, { reason: `${started[0].kind}_${started[0].status}` });
+      .where(and(eq(paypalOps.key, m.id), inArray(paypalOps.kind, ["payout", "refund"]), inArray(paypalOps.status, ["sent", "succeeded", "failed"])));
+    if (claimed.length > 0) {
+      const mine = claimed.find((o) => claimDeliveryId(o.request) === deliveryId);
+      if (mine) return refuse(`cannot ${action}: the ${mine.kind} has already been sent to PayPal`, 409, { reason: `${mine.kind}_${mine.status}` });
+      return refuse(`cannot ${action}: an earlier payout or refund for this milestone needs an operator`, 409, { reason: "needs_operator" });
     }
     const now = new Date();
     if (stops && m.reviewEndsAt && m.reviewEndsAt.getTime() <= now.getTime()) {
       return refuse(`cannot ${action}: the review window closed at ${m.reviewEndsAt.toISOString()}`, 409, { reason: "review_window_closed" });
     }
 
-    const deliveryId = decisionDeliveryId(m.decision);
     if (!stops) {
       if (!deliveryId) return refuse("the decision is not tied to a delivery; re-run verification");
       const delivery = await tx.query.deliveries.findFirst({ where: eq(deliveries.id, deliveryId) });

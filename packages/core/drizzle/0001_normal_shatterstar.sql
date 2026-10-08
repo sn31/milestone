@@ -1,0 +1,1 @@
+ALTER TABLE "milestones" ADD COLUMN "baseline_sha" text;

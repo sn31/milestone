@@ -22,15 +22,20 @@ interface DeliveryPayload {
   body: string;
   branch: string;
   clone_url: string;
+  /** The pull request's base commit when the delivery was merged (GitHub webhook), if recorded. */
+  base_sha: string | null;
 }
 
-/** One setup step; the deterministic stage clones the repo itself, so the lockfile check runs in the checkout. */
-const SETUP = [["sh", "-c", "if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; fi"]];
+/**
+ * One setup step; the deterministic stage clones the repo itself, so the lockfile check runs in the checkout.
+ * Lifecycle scripts never run (--ignore-scripts here, npm_config_ignore_scripts in the stage's environment).
+ */
+const SETUP = [["sh", "-c", "if [ -f package-lock.json ]; then npm ci --ignore-scripts; elif [ -f package.json ]; then npm install --ignore-scripts; fi"]];
 
 function payloadOf(raw: Record<string, unknown> | null): DeliveryPayload {
   const p = raw ?? {};
   const str = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
-  const out = { sha: str("sha"), title: str("title"), body: str("body"), branch: str("branch"), clone_url: str("clone_url") };
+  const out = { sha: str("sha"), title: str("title"), body: str("body"), branch: str("branch"), clone_url: str("clone_url"), base_sha: str("base_sha") || null };
   if (!out.sha || !out.clone_url) throw new Error("delivery payload has no sha or clone_url");
   return out;
 }
@@ -62,22 +67,32 @@ async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): 
   });
 }
 
+/**
+ * The tamper check's baseline: the default branch head recorded at funding, else the PR's base commit. With
+ * neither, the stage falls back to the first parent and says so in its evidence.
+ */
+export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pick<DeliveryPayload, "base_sha">): { baselineSha: string; baselineSource: string } | null {
+  if (milestoneBaselineSha) return { baselineSha: milestoneBaselineSha, baselineSource: "funding-time default branch" };
+  if (payload.base_sha) return { baselineSha: payload.base_sha, baselineSource: "pull request base" };
+  return null;
+}
+
 /** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
-async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[]): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null }> {
+async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
   try {
-    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP });
+    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, ...tamperBaseline(baselineSha, payload) });
   } catch (e) {
     const msg = (e as Error).message;
     if (!msg.startsWith("setup failed")) throw e; // clone/fetch problems are retried by pg-boss
     const evidence: EvidenceSummary[] = criteria
       .filter((c) => c.kind === "test" || c.kind === "build" || c.kind === "file")
       .map((c) => ({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log" as const, status: c.kind === "file" ? ("unclear" as const) : ("fail" as const), summary: `${msg}; the delivery could not be installed` }));
-    return { evidence, workdir: null };
+    return { evidence, workdir: null, baseline: null };
   }
 }
 
-async function produceVerdict(deliveryId: string, payload: DeliveryPayload, criteria: CriterionSpec[]) {
-  const stage = await deterministic(payload, criteria);
+async function produceVerdict(deliveryId: string, payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null) {
+  const stage = await deterministic(payload, criteria, baselineSha);
   try {
     const commitMessage = stage.workdir ? await git(stage.workdir, ["log", "-1", "--format=%B", payload.sha]).catch(() => "") : "";
     const deliveryTexts = [
@@ -87,7 +102,7 @@ async function produceVerdict(deliveryId: string, payload: DeliveryPayload, crit
     ].filter((t) => t.text.trim() !== "");
 
     if (process.env.ANTHROPIC_API_KEY) {
-      const reader = createEvidenceReader({ workdir: stage.workdir, sha: payload.sha, repoUrl: payload.clone_url, evidence: stage.evidence });
+      const reader = createEvidenceReader({ workdir: stage.workdir, sha: payload.sha, baseline: stage.baseline, repoUrl: payload.clone_url, evidence: stage.evidence });
       const r = await judge({ deliveryId, criteria, evidence: stage.evidence, deliveryTexts, reader });
       return { evidence: stage.evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: r.injectionHits };
     }
@@ -133,7 +148,7 @@ export async function verify(job: Job<JobData>): Promise<void> {
       console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
       return;
     }
-    const v = await produceVerdict(deliveryId, payload, criteria);
+    const v = await produceVerdict(deliveryId, payload, criteria, milestone.baselineSha);
     const stored = await db
       .update(deliveries)
       .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })
