@@ -8,13 +8,27 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const calls: Array<{ method: string; path: string; body: unknown; requestId: string | undefined }> = [];
 let failNextRefund = false;
+/** When set, the next payout / refund POST fails with a PayPalError of this HTTP status (or a plain network error for 0). */
+const reject: { payout: number | null; refund: number | null } = { payout: null, refund: null };
+const throwFor = async (kind: "payout" | "refund") => {
+  const status = reject[kind];
+  if (status === null) return;
+  reject[kind] = null;
+  if (status === 0) throw new Error(`${kind} socket hang up`);
+  const { PayPalError } = await import("@milestone/money");
+  throw new PayPalError(status, { name: "UNPROCESSABLE_ENTITY", message: `${kind} rejected` });
+};
 vi.mock("../src/lib/paypal.js", () => ({
   paypal: () => ({
     request: async (method: string, path: string, body: unknown, opts?: { requestId?: string }) => {
       calls.push({ method, path, body, requestId: opts?.requestId });
-      if (path === "/v1/payments/payouts") return { batch_header: { payout_batch_id: `BATCH-${opts?.requestId}`, batch_status: "PENDING", sender_batch_header: { sender_batch_id: opts?.requestId } } };
+      if (path === "/v1/payments/payouts") {
+        await throwFor("payout");
+        return { batch_header: { payout_batch_id: `BATCH-${opts?.requestId}`, batch_status: "PENDING", sender_batch_header: { sender_batch_id: opts?.requestId } } };
+      }
       if (path.endsWith("/refund")) {
         if (failNextRefund) { failNextRefund = false; throw new Error("refund refused"); }
+        await throwFor("refund");
         return { id: `REF-${opts?.requestId}`, status: "PENDING" };
       }
       throw new Error(`unexpected PayPal call ${method} ${path}`);
@@ -31,7 +45,11 @@ const run = process.env.MILESTONE_E2E === "1";
 try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
 
 type AnyJob = Job<{ milestoneId: string } & Record<string, unknown>>;
-const job = (data: Record<string, unknown> & { milestoneId: string }) => ({ id: randomUUID(), name: "x", data }) as unknown as AnyJob;
+const job = (data: Record<string, unknown> & { milestoneId: string }, meta: { id?: string; retryCount?: number; retryLimit?: number } = {}) =>
+  ({ id: meta.id ?? randomUUID(), name: "x", data, ...(meta.retryCount !== undefined ? { retryCount: meta.retryCount } : {}), ...(meta.retryLimit !== undefined ? { retryLimit: meta.retryLimit } : {}) }) as unknown as AnyJob;
+/** Fixed clocks for the lease tests (no wall-clock dependence). */
+const T0 = new Date("2026-10-08T12:00:00.000Z");
+const at = (ms: number) => () => new Date(T0.getTime() + ms);
 
 describe.skipIf(!run)("release and settle end to end", async () => {
   const { advances, contracts, milestones, users, criteria, deliveries, webhookEvents } = await import("@milestone/core");
@@ -160,8 +178,14 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     const t = await setup(4, { status: "needs_client", decision: { action: "ask_client", amountMinor: 0, ruleIds: ["P4"], reason: "cap" }, clientResponse: "confirm_partial" });
     calls.length = 0;
     failNextRefund = true;
-    await expect(release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }))).rejects.toThrow("refund refused");
+    const claiming = job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId });
+    await expect(release(claiming)).rejects.toThrow("refund refused");
+    // R7: another job for the same delivery does not touch the claim while the claiming job's lease is live.
     await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    expect(calls.filter((c) => c.path.endsWith("/refund"))).toHaveLength(1);
+    expect((await t.state()).audits).toContain("release.skipped_in_flight");
+    // The pg-boss retry keeps the job id, so it resumes.
+    await release(claiming);
     const refunds = calls.filter((c) => c.path.endsWith("/refund"));
     expect(refunds).toHaveLength(2);
     expect(refunds[0]!.requestId).toBe(refunds[1]!.requestId);
@@ -318,5 +342,222 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     expect(s2.m.status).toBe("partial_released");
     expect(s2.ops).toMatchObject([{ kind: "refund", status: "succeeded", paypal_id: "REF-X" }]);
     expect(s2.ledger.map((l) => [l.ref, l.amount, l.direction])).toEqual([[`refund:${t.milestoneId}`, 10_000, "credit"], [`refund:${t.milestoneId}`, 10_000, "debit"]]);
+  });
+
+  // ---------- R3: a payout or refund PayPal rejects outright reaches an operator ----------
+
+  it("R3: a payout PayPal rejects with a 4xx is recorded failed, holds the milestone for an operator and is never retried", async () => {
+    const t = await setup(11, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    calls.length = 0;
+    reject.payout = 422;
+    const j = job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId });
+    await release(j); // final: not thrown, so pg-boss does not retry
+    const s = await t.state();
+    expect(s.m.status).toBe("held");
+    expect(s.ops).toMatchObject([{ kind: "payout", status: "failed", paypal_id: null }]);
+    expect(s.audits).toContain("paypal.payout_error");
+    expect(s.operator).toHaveLength(1);
+    expect(s.operator[0]).toMatchObject({ status: "review", final: "rejected", httpStatus: 422, payoutOpStatus: "failed", pending: ["freelancer"] });
+
+    await release(j);
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    expect(payouts()).toHaveLength(1);
+    expect((await t.state()).audits.filter((a) => a === "release.refused_needs_operator")).toHaveLength(2);
+  });
+
+  it("R3: 409 / 429 and network errors are retried; on the last retry the failure is final", async () => {
+    const t = await setup(12, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    calls.length = 0;
+    const id = randomUUID();
+    reject.payout = 429;
+    await expect(release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }, { id, retryCount: 0, retryLimit: 2 }))).rejects.toThrow("PayPal 429");
+    reject.payout = 0;
+    await expect(release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }, { id, retryCount: 1, retryLimit: 2 }))).rejects.toThrow("socket hang up");
+    expect((await t.state()).ops).toMatchObject([{ status: "sent", paypal_id: null }]);
+    reject.payout = 0;
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }, { id, retryCount: 2, retryLimit: 2 }));
+    const s = await t.state();
+    expect(payouts()).toHaveLength(3);
+    expect(new Set(payouts().map((c) => c.requestId)).size).toBe(1); // one PayPal-Request-Id throughout
+    expect(s.m.status).toBe("held");
+    expect(s.ops).toMatchObject([{ status: "failed" }]);
+    expect(s.operator[0]).toMatchObject({ final: "last_attempt" });
+  });
+
+  it("R3/R5: a refund PayPal rejects after the payout went out holds the milestone; the paid item is booked but it never ends partial_released", async () => {
+    const t = await setup(13, { status: "needs_client", decision: { action: "partial", amountMinor: 6_000, ruleIds: ["P5"], reason: "2 of 3" }, clientResponse: "confirm_partial" });
+    calls.length = 0;
+    reject.refund = 422;
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const s1 = await t.state();
+    expect(s1.m.status).toBe("held");
+    const op = (s: { ops: Array<{ kind: string; status: string; paypal_id: string | null }> }, kind: string) => s.ops.find((o) => o.kind === kind)!;
+    expect(op(s1, "payout")).toMatchObject({ status: "sent" });
+    expect(op(s1, "refund")).toMatchObject({ status: "failed", paypal_id: null });
+    expect(s1.operator).toHaveLength(1);
+    expect(s1.operator[0]).toMatchObject({ final: "rejected", refunded: { opStatus: "failed" } });
+
+    const batch = op(s1, "payout").paypal_id!;
+    const e = await webhook("PAYMENT.PAYOUTS-ITEM.SUCCEEDED", item(t.milestoneId, "freelancer", batch, "60.00"));
+    await settle(job({ milestoneId: t.milestoneId, eventId: e }));
+    const s2 = await t.state();
+    expect(s2.m.status).toBe("held");
+    expect(op(s2, "payout").status).toBe("succeeded");
+    expect(s2.ledger.map((l) => [l.ref, l.amount, l.direction])).toEqual([[`release:${t.milestoneId}`, 6_000, "credit"], [`release:${t.milestoneId}`, 6_000, "debit"]]);
+    expect(s2.audits).not.toContain("milestone.partial_released");
+  });
+
+  // ---------- R4: failure events PayPal can send ----------
+
+  it("R4: an item DENIED holds for an operator; HELD is audit only", async () => {
+    const t = await setup(14, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const batch = (await t.state()).ops[0]!.paypal_id!;
+    const h = await webhook("PAYMENT.PAYOUTS-ITEM.HELD", { ...item(t.milestoneId, "freelancer", batch), transaction_status: "ONHOLD" });
+    await settle(job({ milestoneId: t.milestoneId, eventId: h }));
+    const s1 = await t.state();
+    expect(s1.audits).toContain("paypal.payout_held");
+    expect(s1.m.status).toBe("review");
+    expect(s1.ops[0]!.status).toBe("sent");
+
+    const d = await webhook("PAYMENT.PAYOUTS-ITEM.DENIED", { ...item(t.milestoneId, "freelancer", batch), transaction_status: "DENIED", errors: { name: "RISK_DENIED" } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: d }));
+    const s2 = await t.state();
+    expect(s2.m.status).toBe("held");
+    expect(s2.ops).toMatchObject([{ status: "failed", response: { items: { freelancer: { status: "failed" } } } }]);
+    expect(s2.ledger).toEqual([]);
+    expect(s2.operator[0]).toMatchObject({ failed: { freelancer: "RISK_DENIED" } });
+  });
+
+  it("R4: an item CANCELED holds for an operator", async () => {
+    const t = await setup(15, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const batch = (await t.state()).ops[0]!.paypal_id!;
+    const c = await webhook("PAYMENT.PAYOUTS-ITEM.CANCELED", { ...item(t.milestoneId, "freelancer", batch), transaction_status: "CANCELED" });
+    await settle(job({ milestoneId: t.milestoneId, eventId: c }));
+    const s = await t.state();
+    expect(s.m.status).toBe("held");
+    expect(s.ops[0]!.status).toBe("failed");
+    expect(s.audits).toContain("milestone.needs_operator");
+  });
+
+  it("R4: PAYMENT.PAYOUTSBATCH.DENIED marks the op failed and flags an operator, matched by sender_batch_id before the batch id is recorded", async () => {
+    const t = await setup(16, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const batch = (await t.state()).ops[0]!.paypal_id!;
+    const requestId = batch.replace(/^BATCH-/, "");
+    // Someone else's denied batch: audited, nothing changes.
+    const other = await webhook("PAYMENT.PAYOUTSBATCH.DENIED", { batch_header: { payout_batch_id: "BATCH-OTHER", batch_status: "DENIED", sender_batch_header: { sender_batch_id: "not-ours" } } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: other }));
+    expect((await t.state()).ops[0]!.status).toBe("sent");
+
+    // PayPal's batch id not recorded yet: our sender_batch_id still identifies the op, and the id is written (R8).
+    await db.$client.query(`update paypal_ops set paypal_id = null where kind = 'payout' and key = $1`, [t.milestoneId]);
+    const e = await webhook("PAYMENT.PAYOUTSBATCH.DENIED", { batch_header: { payout_batch_id: batch, batch_status: "DENIED", sender_batch_header: { sender_batch_id: requestId } } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: e }));
+    const s = await t.state();
+    expect(s.m.status).toBe("held");
+    expect(s.ops).toMatchObject([{ status: "failed", paypal_id: batch }]);
+    expect(s.audits).toContain("paypal.payout_batch_denied");
+    expect(s.operator).toHaveLength(1);
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    expect((await t.state()).audits).toContain("release.refused_needs_operator");
+  });
+
+  // ---------- R5: a partial is final only when both halves succeeded ----------
+
+  it("R5: payout first, refund second -> partial_released only on the refund", async () => {
+    const t = await setup(17, { status: "needs_client", decision: { action: "partial", amountMinor: 6_000, ruleIds: ["P5"], reason: "2 of 3" }, clientResponse: "confirm_partial" });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const s0 = await t.state();
+    const batch = s0.ops.find((o) => o.kind === "payout")!.paypal_id!;
+    const refundId = s0.ops.find((o) => o.kind === "refund")!.paypal_id!;
+    const p = await webhook("PAYMENT.PAYOUTS-ITEM.SUCCEEDED", item(t.milestoneId, "freelancer", batch, "60.00"));
+    await settle(job({ milestoneId: t.milestoneId, eventId: p }));
+    const s1 = await t.state();
+    expect(s1.m.status).toBe("needs_client");
+    expect(s1.audits).toContain("settle.waiting");
+
+    const r = await webhook("PAYMENT.CAPTURE.REFUNDED", { id: refundId, status: "COMPLETED", amount: { value: "40.00", currency_code: "USD" } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: r }));
+    const s2 = await t.state();
+    expect(s2.m.status).toBe("partial_released");
+    expect(s2.audits.filter((a) => a === "milestone.partial_released")).toHaveLength(1);
+    expect(s2.ledger.map((l) => [l.ref, l.amount])).toEqual([
+      [`refund:${t.milestoneId}`, 4_000], [`refund:${t.milestoneId}`, 4_000],
+      [`release:${t.milestoneId}`, 6_000], [`release:${t.milestoneId}`, 6_000],
+    ]);
+  });
+
+  it("R5: refund first, payout second -> partial_released only on the payout", async () => {
+    const t = await setup(18, { status: "needs_client", decision: { action: "partial", amountMinor: 6_000, ruleIds: ["P5"], reason: "2 of 3" }, clientResponse: "confirm_partial" });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const s0 = await t.state();
+    const r = await webhook("PAYMENT.CAPTURE.REFUNDED", { id: s0.ops.find((o) => o.kind === "refund")!.paypal_id!, status: "COMPLETED", amount: { value: "40.00", currency_code: "USD" } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: r }));
+    expect((await t.state()).m.status).toBe("needs_client");
+    const p = await webhook("PAYMENT.PAYOUTS-ITEM.SUCCEEDED", item(t.milestoneId, "freelancer", s0.ops.find((o) => o.kind === "payout")!.paypal_id!, "60.00"));
+    await settle(job({ milestoneId: t.milestoneId, eventId: p }));
+    expect((await t.state()).m.status).toBe("partial_released");
+  });
+
+  it("R5: a refund that FAILS after the payout succeeded holds the milestone for an operator", async () => {
+    const t = await setup(19, { status: "needs_client", decision: { action: "partial", amountMinor: 6_000, ruleIds: ["P5"], reason: "2 of 3" }, clientResponse: "confirm_partial" });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const s0 = await t.state();
+    const p = await webhook("PAYMENT.PAYOUTS-ITEM.SUCCEEDED", item(t.milestoneId, "freelancer", s0.ops.find((o) => o.kind === "payout")!.paypal_id!, "60.00"));
+    await settle(job({ milestoneId: t.milestoneId, eventId: p }));
+    const r = await webhook("PAYMENT.CAPTURE.REFUNDED", { id: s0.ops.find((o) => o.kind === "refund")!.paypal_id!, status: "FAILED", amount: { value: "40.00", currency_code: "USD" } });
+    await settle(job({ milestoneId: t.milestoneId, eventId: r }));
+    const s = await t.state();
+    expect(s.m.status).toBe("held");
+    expect(s.ops.find((o) => o.kind === "refund")!.status).toBe("failed");
+    expect(s.ledger.filter((l) => l.ref.startsWith("refund:"))).toEqual([]);
+    expect(s.audits).toContain("paypal.refund_failed");
+    expect(s.audits).not.toContain("milestone.partial_released");
+    expect(s.operator).toHaveLength(1);
+  });
+
+  // ---------- R6: a flagged milestone never reaches a final state ----------
+
+  it("R6: settle does not finalise a milestone flagged for an operator", async () => {
+    const { audit } = await import("@milestone/core");
+    const t = await setup(20, { status: "review", decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "ok" } });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const batch = (await t.state()).ops[0]!.paypal_id!;
+    await audit(db, { actor: "operator", event: "milestone.needs_operator", milestoneId: t.milestoneId, contractId, detail: { reason: "e2e" } });
+    const e = await webhook("PAYMENT.PAYOUTS-ITEM.SUCCEEDED", item(t.milestoneId, "freelancer", batch));
+    await settle(job({ milestoneId: t.milestoneId, eventId: e }));
+    const s = await t.state();
+    expect(s.m.status).toBe("review");
+    expect(s.audits).toContain("milestone.settle_conflict");
+    expect(s.audits).not.toContain("milestone.released");
+  });
+
+  // ---------- R7: only the claiming job resumes ----------
+
+  it("R7: another job skips an in-flight claim until the lease expires, then takes it over with the same PayPal-Request-Id", async () => {
+    const t = await setup(21, { status: "needs_client", decision: { action: "ask_client", amountMinor: 0, ruleIds: ["P4"], reason: "cap" }, clientResponse: "confirm_partial" });
+    calls.length = 0;
+    const a = job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId });
+    failNextRefund = true;
+    await expect(release(a, at(0))).rejects.toThrow("refund refused");
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }), at(119_999));
+    expect(calls).toHaveLength(1);
+    expect((await t.state()).audits.filter((x) => x === "release.skipped_in_flight")).toHaveLength(1);
+
+    const b = job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId });
+    await release(b, at(120_000));
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.requestId).toBe(calls[0]!.requestId);
+    const s = await t.state();
+    expect(s.audits).toContain("release.lease_taken_over");
+    expect(s.ops).toMatchObject([{ kind: "refund", status: "sent", paypal_id: `REF-${calls[0]!.requestId}` }]);
+    const [row] = (await db.$client.query(`select request from paypal_ops where kind = 'refund' and key = $1`, [t.milestoneId])).rows as Array<{ request: { claim: { jobId: string; claimedAt: string } } }>;
+    expect(row!.request.claim).toMatchObject({ jobId: b.id, claimedAt: new Date(T0.getTime() + 120_000).toISOString() });
+
+    // The original job's retry finds the op answered and stops.
+    await release(a, at(130_000));
+    expect(calls).toHaveLength(2);
   });
 });

@@ -15,7 +15,7 @@ import {
   type Db,
   type MilestoneStatus,
 } from "@milestone/core";
-import { applyReviewWindow, executeRelease, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
+import { PayPalError, applyReviewWindow, executeRelease, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
 import type { JobData } from "../handlers.js";
 import { getDb } from "../lib/db.js";
 import { paypal } from "../lib/paypal.js";
@@ -26,6 +26,11 @@ import { paypal } from "../lib/paypal.js";
  * item of the attempt fails, is blocked, returned, reversed or refunded, the milestone goes to held with an audit
  * "milestone.needs_operator", and the release job refuses to run for that milestone again
  * ("release.refused_needs_operator"). An operator resolves it by hand.
+ *
+ * The claim records the claiming pg-boss job id and when it was claimed (a lease). Only that job (pg-boss retries keep
+ * the id) resumes an op that was claimed but never answered by PayPal; any other job waits until the lease expired
+ * (LEASE_MS), then takes the lease over. A payout or refund PayPal rejects outright (a 4xx other than 409 / 429), or
+ * one still failing on the job's last retry, is recorded as failed and flagged for an operator.
  */
 
 // ---------- Pure helpers (unit-tested in apps/worker/test) ----------
@@ -38,6 +43,13 @@ export const RESUMABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review
 
 export const NEEDS_OPERATOR_EVENT = "milestone.needs_operator";
 export const REFUSED_NEEDS_OPERATOR_EVENT = "release.refused_needs_operator";
+export const SKIPPED_IN_FLIGHT_EVENT = "release.skipped_in_flight";
+
+/** How long a claim belongs to the job that made it before another job may resume its unanswered PayPal calls. */
+export const LEASE_MS = 120_000;
+
+/** enqueue() in @milestone/core sends every job with retryLimit 5; used when the job carries no retryLimit metadata. */
+export const DEFAULT_RETRY_LIMIT = 5;
 
 /** Client responses that count as approval before the review window closes. */
 const EARLY_APPROVALS = new Set(["approve", "confirm_partial"]);
@@ -230,6 +242,10 @@ export interface ReleaseClaim {
   freelancerEmail: string;
   partnerEmail: string | null;
   shares: { partnerShareMinor: number; freelancerShareMinor: number };
+  /** The pg-boss job that holds the claim (its retries keep the id). Missing on claims written before leases. */
+  jobId?: string;
+  /** When that job took the claim (ISO 8601); the lease runs LEASE_MS from here. */
+  claimedAt?: string;
 }
 
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
@@ -253,7 +269,39 @@ export function parseClaim(request: unknown): ReleaseClaim | null {
     freelancerEmail: r.freelancerEmail,
     partnerEmail: typeof r.partnerEmail === "string" ? r.partnerEmail : null,
     shares: { partnerShareMinor: shares.partnerShareMinor, freelancerShareMinor: shares.freelancerShareMinor },
+    ...(typeof r.jobId === "string" && r.jobId ? { jobId: r.jobId } : {}),
+    ...(typeof r.claimedAt === "string" && r.claimedAt ? { claimedAt: r.claimedAt } : {}),
   };
+}
+
+/**
+ * Who may resume a claim's unanswered PayPal calls: "own" for the claiming job, "expired" once LEASE_MS has passed
+ * since claimedAt (or for a claim written before leases), "held" while another job's lease is live.
+ */
+export function leaseState(claim: Pick<ReleaseClaim, "jobId" | "claimedAt">, jobId: string | null, now: Date, leaseMs = LEASE_MS): "own" | "expired" | "held" {
+  if (claim.jobId && jobId && claim.jobId === jobId) return "own";
+  if (!claim.jobId || !claim.claimedAt) return "expired";
+  const at = Date.parse(claim.claimedAt);
+  if (!Number.isFinite(at)) return "expired";
+  return now.getTime() - at >= leaseMs ? "expired" : "held";
+}
+
+/** True on the job's last pg-boss attempt (retryCount counts retries; retryLimit falls back to enqueue's default). */
+export function isLastAttempt(job: { retryCount?: unknown; retryLimit?: unknown }, defaultLimit = DEFAULT_RETRY_LIMIT): boolean {
+  const count = typeof job.retryCount === "number" ? job.retryCount : 0;
+  const limit = typeof job.retryLimit === "number" ? job.retryLimit : defaultLimit;
+  return count >= limit;
+}
+
+/**
+ * Whether a failed PayPal call is final. "rejected": PayPal answered with a 4xx other than 409 (in progress / conflict)
+ * or 429 (rate limited), so the request was refused and retrying it cannot succeed. "last_attempt": any other error on
+ * the job's last retry. null: throw, and pg-boss retries with the same PayPal-Request-Id.
+ */
+export function paypalFailure(err: unknown, lastAttempt: boolean): "rejected" | "last_attempt" | null {
+  // 401/403 are our credentials or config, not PayPal rejecting this payout: retry, do not flag the milestone for good.
+  if (err instanceof PayPalError && err.status >= 400 && err.status < 500 && ![401, 403, 409, 429].includes(err.status)) return "rejected";
+  return lastAttempt ? "last_attempt" : null;
 }
 
 /** The payout half of a claim as an executeRelease plan (no refund: the payout result is recorded before the refund call). */
@@ -293,16 +341,26 @@ export interface OpView {
 
 export type ReleaseGate =
   | { kind: "new" }
-  | { kind: "resume"; claim: ReleaseClaim }
+  | { kind: "resume"; claim: ReleaseClaim; takeover: boolean }
   | { kind: "skip"; reason: string }
+  | { kind: "in_flight"; reason: string; claim: ReleaseClaim }
   | { kind: "refuse"; reason: string };
 
 /**
  * The one-attempt rule. "new" only when no payout or refund op was ever claimed for the milestone; "resume" only for the
- * job of the claimed delivery while one of its ops was claimed but never answered by PayPal; "refuse" (audited as
+ * job of the claimed delivery while one of its ops was claimed but never answered by PayPal, and only by the claiming
+ * job or after its lease expired ("in_flight" otherwise, audited as release.skipped_in_flight); "refuse" (audited as
  * release.refused_needs_operator) once the milestone needs an operator or for any new decision after an op was sent.
  */
-export function releaseGate(input: { jobDeliveryId: string | null; decisionDeliveryId: string | null; status: MilestoneStatus; needsOperator: boolean; ops: readonly OpView[] }): ReleaseGate {
+export function releaseGate(input: {
+  jobDeliveryId: string | null;
+  decisionDeliveryId: string | null;
+  status: MilestoneStatus;
+  needsOperator: boolean;
+  ops: readonly OpView[];
+  jobId: string | null;
+  now: Date;
+}): ReleaseGate {
   if (input.needsOperator) return { kind: "refuse", reason: "the milestone needs an operator; the release job never runs for it again" };
   const claimed = input.ops.filter((o) => o.status !== "pending");
   if (claimed.length === 0) {
@@ -312,9 +370,13 @@ export function releaseGate(input: { jobDeliveryId: string | null; decisionDeliv
   const claim = claimed.map((o) => parseClaim(o.request)).find((c): c is ReleaseClaim => c !== null) ?? null;
   if (claim && claim.deliveryId === input.jobDeliveryId) {
     if (input.decisionDeliveryId !== input.jobDeliveryId) return { kind: "skip", reason: "the claimed release belongs to an older decision" };
-    if (!claimed.some((o) => o.status === "sent" && !o.paypalId)) return { kind: "skip", reason: "this release was already sent to PayPal" };
+    const unanswered = claimed.filter((o) => o.status === "sent" && !o.paypalId);
+    if (unanswered.length === 0) return { kind: "skip", reason: "this release was already sent to PayPal" };
     if (!RESUMABLE_STATUSES.has(input.status)) return { kind: "refuse", reason: `the claimed release cannot resume while the milestone is ${input.status}` };
-    return { kind: "resume", claim };
+    const held = unanswered.map((o) => parseClaim(o.request)).find((c): c is ReleaseClaim => c !== null && c.deliveryId === claim.deliveryId) ?? claim;
+    const lease = leaseState(held, input.jobId, input.now);
+    if (lease === "held") return { kind: "in_flight", reason: `job ${held.jobId} claimed this release at ${held.claimedAt} and its lease has not expired`, claim: held };
+    return { kind: "resume", claim: held, takeover: lease === "expired" };
   }
   if (!input.jobDeliveryId || input.decisionDeliveryId !== input.jobDeliveryId) return { kind: "skip", reason: staleReason(input) ?? "stale job" };
   const kinds = [...new Set(claimed.map((o) => o.kind))].join(" and ");
@@ -446,7 +508,7 @@ interface Claimed {
  * and claims the paypal_ops rows (status "sent") in the same transaction. The review route takes the same lock and
  * refuses veto / hold once a claimed op exists, so a veto either lands before the claim (and this job skips) or is refused.
  */
-async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string | null): Promise<Claimed | null> {
+async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string | null, jobId: string | null, now: Date): Promise<Claimed | null> {
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
     const [m] = await tx.select().from(milestones).where(eq(milestones.id, milestoneId)).for("update");
@@ -460,14 +522,26 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
     const ops = await releaseOps(tx, milestoneId);
     const opList = [ops.payout, ops.refund].filter((o): o is OpRow => o !== undefined);
 
-    const gate = releaseGate({ jobDeliveryId, decisionDeliveryId: decId, status: m.status, needsOperator: await isFlaggedForOperator(tx, milestoneId), ops: opList });
+    const gate = releaseGate({ jobDeliveryId, decisionDeliveryId: decId, status: m.status, needsOperator: await isFlaggedForOperator(tx, milestoneId), ops: opList, jobId, now });
     if (gate.kind === "refuse") return note(REFUSED_NEEDS_OPERATOR_EVENT, gate.reason, { ops: opList.map((o) => ({ kind: o.kind, status: o.status, paypalId: o.paypalId })) });
     if (gate.kind === "skip") return skip(gate.reason);
-    if (gate.kind === "resume") return { claim: gate.claim, contractId: m.contractId };
+    if (gate.kind === "in_flight") return note(SKIPPED_IN_FLIGHT_EVENT, gate.reason, { jobId, claimJobId: gate.claim.jobId ?? null, claimedAt: gate.claim.claimedAt ?? null });
+    if (gate.kind === "resume") {
+      if (!gate.takeover) return { claim: gate.claim, contractId: m.contractId };
+      // The claiming job's lease expired: this job takes the claim over (same ops, same PayPal-Request-Ids).
+      const claim: ReleaseClaim = { ...gate.claim, ...(jobId ? { jobId } : {}), claimedAt: now.toISOString() };
+      for (const op of opList) {
+        if (op.status === "sent" && !op.paypalId && parseClaim(op.request)?.deliveryId === claim.deliveryId) {
+          await tx.update(paypalOps).set({ request: { ...obj(op.request), claim }, updatedAt: now }).where(and(eq(paypalOps.id, op.id), eq(paypalOps.status, "sent")));
+        }
+      }
+      await note("release.lease_taken_over", "the claiming job's lease expired", { jobId, previousJobId: gate.claim.jobId ?? null, previousClaimedAt: gate.claim.claimedAt ?? null });
+      return { claim, contractId: m.contractId };
+    }
 
     const stored = parseDecision(m.decision);
     if (!stored) return skip("milestone has no policy decision");
-    const outcome = clientOutcome(stored, m, new Date());
+    const outcome = clientOutcome(stored, m, now);
     if (outcome.action === "hold") {
       await transition(t, milestoneId, "held", { actor: "policy", event: "milestone.held", detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
       return null;
@@ -518,6 +592,8 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       freelancerEmail: freelancer.paypalEmail,
       partnerEmail,
       shares,
+      ...(jobId ? { jobId } : {}),
+      claimedAt: now.toISOString(),
     };
     // Both ops are claimed before any PayPal call, so a retry of this job can finish either and nothing else can start one.
     if (releaseMinor > 0) await claimOp(tx, "payout", milestoneId, claim);
@@ -536,21 +612,32 @@ function unsent(op: OpRow | undefined, claim: ReleaseClaim): op is OpRow {
  * Runs when the review window closes, or right away on early approval / client confirmation of a partial.
  * Sends the payout (and the refund of an unverified share) but never marks the milestone released:
  * the settle job does that when PayPal's webhook confirms the payout (CLAUDE.md rule 7).
- * A throw makes pg-boss retry this same job, which resumes the same claim with the same PayPal-Request-Id; nothing
- * else ever re-enqueues a release.
+ * A throw makes pg-boss retry this same job (same job id, so it keeps the lease), which resumes the same claim with the
+ * same PayPal-Request-Id; nothing else ever re-enqueues a release. A call PayPal rejected outright, or one still failing
+ * on the last retry, is recorded as failed and flagged for an operator instead of thrown.
+ * `clock` exists for tests; production uses the wall clock.
  */
-export async function release(job: Job<JobData>): Promise<void> {
+export async function release(job: Job<JobData>, clock: () => Date = () => new Date()): Promise<void> {
   const db = getDb();
   const milestoneId = job.data.milestoneId;
   const jobDeliveryId = typeof job.data.deliveryId === "string" && job.data.deliveryId ? job.data.deliveryId : null;
+  const jobId = typeof job.id === "string" && job.id ? job.id : null;
 
-  const claimed = await claimRelease(db, milestoneId, jobDeliveryId);
+  const claimed = await claimRelease(db, milestoneId, jobDeliveryId, jobId, clock());
   if (!claimed) return;
   const { claim, contractId } = claimed;
   const ctx: MoneyContext = { client: paypal(), requestIdFor: (kind, key) => requestIdFor(db, kind, key) };
-  const fail = async (event: string, err: unknown) => {
-    await audit(db, { actor: "paypal", event, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, error: err instanceof Error ? err.message : String(err) } });
-    throw err; // pg-boss retries with the same PayPal-Request-Id
+  const lastAttempt = isLastAttempt(job as { retryCount?: unknown; retryLimit?: unknown });
+  /** Retries (throws) a transient failure; records a final one as failed and flags an operator. Returns only when final. */
+  const fail = async (kind: "payout" | "refund", err: unknown): Promise<void> => {
+    const error = err instanceof Error ? err.message : String(err);
+    const httpStatus = err instanceof PayPalError ? err.status : null;
+    const final = paypalFailure(err, lastAttempt);
+    await audit(db, { actor: "paypal", event: `paypal.${kind}_error`, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, error, httpStatus, final, retryCount: job.retryCount ?? null } });
+    if (!final) throw err; // pg-boss retries with the same PayPal-Request-Id
+    await recordResponse(db, kind, milestoneId, { status: "failed", response: { error: { message: error, httpStatus, body: err instanceof PayPalError ? err.body : null, final } } });
+    const why = final === "rejected" ? `PayPal rejected the ${kind} (HTTP ${httpStatus})` : `The ${kind} call still failed on the last retry; PayPal may or may not have received it`;
+    await flagFromJob(db, milestoneId, why, { error, httpStatus, final });
   };
 
   const ops = await releaseOps(db, milestoneId);
@@ -559,7 +646,8 @@ export async function release(job: Job<JobData>): Promise<void> {
     try {
       results = (await executeRelease(ctx, payoutPlan(milestoneId, claim))) as typeof results;
     } catch (err) {
-      return fail("paypal.payout_error", err);
+      // A final payout failure stops here: the refund half is not sent, the operator decides.
+      return fail("payout", err);
     }
     const batch = results.payout?.batch_header;
     const denied = batch?.batch_status === "DENIED";
@@ -593,7 +681,7 @@ export async function release(job: Job<JobData>): Promise<void> {
     try {
       results = (await executeRelease(ctx, refundPlan(milestoneId, claim))) as typeof results;
     } catch (err) {
-      return fail("paypal.refund_error", err);
+      return fail("refund", err);
     }
     const r = results.refund;
     const status = r?.status === "COMPLETED" ? "succeeded" : r?.status === "FAILED" || r?.status === "CANCELLED" ? "failed" : undefined;

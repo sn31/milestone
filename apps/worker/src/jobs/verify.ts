@@ -7,6 +7,7 @@ import { detectInjection, enforce, formatVerdictComment, judge, overall, postVer
 import type { JobData } from "../handlers.js";
 import { getDb } from "../lib/db.js";
 import { createEvidenceReader, git } from "../lib/evidence.js";
+import { isFlaggedForOperator } from "./release.js";
 
 /** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
 export type StoredDecision = PolicyDecision & { deliveryId: string };
@@ -54,13 +55,18 @@ function decisionDeliveryId(decision: unknown): string | null {
 /**
  * Enters "verifying" under a row lock and clears everything that belonged to the previous delivery
  * (client response, review window, decision), so a stale decision can never be released for this one.
- * Returns the status found when the milestone could not enter verifying.
+ * Returns the status found when the milestone could not enter verifying. A milestone flagged for an operator
+ * (milestone.needs_operator) never leaves held through a new delivery: an operator resolves it by hand.
  */
 async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): Promise<MilestoneStatus | null> {
   return db.transaction(async (tx) => {
-    const [row] = await tx.select({ status: milestones.status }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
+    const [row] = await tx.select({ status: milestones.status, contractId: milestones.contractId }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!row) throw new Error(`milestone ${milestoneId} not found`);
     if (!VERIFIABLE.includes(row.status)) return row.status;
+    if (await isFlaggedForOperator(tx, milestoneId)) {
+      await audit(tx as unknown as Db, { actor: "system", event: "verify.refused_needs_operator", milestoneId, contractId: row.contractId, detail: { deliveryId, status: row.status } });
+      return row.status;
+    }
     await transition(tx as unknown as Db, milestoneId, "verifying", { actor: "system", event: "milestone.verifying", detail: { deliveryId } });
     await tx.update(milestones).set({ clientResponse: null, reviewEndsAt: null, decision: null, decidedAt: null }).where(eq(milestones.id, milestoneId));
     return null;

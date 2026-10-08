@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   canHold,
   deriveOpStatus,
+  finalisation,
   isOurRefund,
   ledgerRef,
   matchPayoutOp,
   mergeItemOutcome,
   mergeItemReversal,
   paidTotal,
+  parsePayoutBatchEvent,
   parsePayoutItemEvent,
   parseRefundEvent,
   payoutEventKind,
@@ -113,6 +115,44 @@ describe("payoutEventKind", () => {
     expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.REVERSED")).toBe("reversed");
     expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.REFUNDED")).toBe("reversed");
     expect(payoutEventKind("PAYMENT.CAPTURE.REFUNDED")).toBeNull();
+  });
+  it("R4: DENIED and CANCELED never paid (failed); HELD is audit only; a batch event is not an item event", () => {
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.DENIED")).toBe("failed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.CANCELED")).toBe("failed");
+    expect(payoutEventKind("PAYMENT.PAYOUTS-ITEM.HELD")).toBe("held");
+    expect(payoutEventKind("PAYMENT.PAYOUTSBATCH.DENIED")).toBeNull();
+  });
+});
+
+describe("parsePayoutBatchEvent", () => {
+  it("reads the batch id, our sender_batch_id and the status", () => {
+    const e = parsePayoutBatchEvent({ event_type: "PAYMENT.PAYOUTSBATCH.DENIED", resource: { batch_header: { payout_batch_id: "B1", batch_status: "DENIED", sender_batch_header: { sender_batch_id: "rid-1" } } } });
+    expect(e).toEqual({ payoutBatchId: "B1", senderBatchId: "rid-1", batchStatus: "DENIED" });
+  });
+  it("survives junk", () => {
+    expect(parsePayoutBatchEvent(null)).toEqual({});
+    expect(parsePayoutBatchEvent({ resource: { batch_header: { payout_batch_id: 3, sender_batch_header: "x" } } })).toEqual({});
+  });
+});
+
+describe("finalisation (R5: a partial waits for its refund)", () => {
+  const partial = { releaseMinor: 6_000, refundMinor: 4_000 };
+  it("is final only when both halves succeeded", () => {
+    expect(finalisation(partial, "succeeded", "succeeded")).toBe("final");
+    expect(finalisation(partial, "succeeded", "sent")).toBe("wait");
+    expect(finalisation(partial, "sent", "succeeded")).toBe("wait");
+    expect(finalisation(partial, "succeeded", undefined)).toBe("wait");
+  });
+  it("is blocked when either half failed", () => {
+    expect(finalisation(partial, "succeeded", "failed")).toBe("blocked");
+    expect(finalisation(partial, "failed", "succeeded")).toBe("blocked");
+    expect(finalisation(partial, "failed", "sent")).toBe("blocked");
+  });
+  it("needs only the half the claim has", () => {
+    expect(finalisation({ releaseMinor: 10_000, refundMinor: 0 }, "succeeded", undefined)).toBe("final");
+    expect(finalisation({ releaseMinor: 0, refundMinor: 10_000 }, undefined, "succeeded")).toBe("final");
+    expect(finalisation({ releaseMinor: 0, refundMinor: 10_000 }, undefined, "failed")).toBe("blocked");
+    expect(finalisation({ releaseMinor: 0, refundMinor: 0 }, undefined, undefined)).toBe("wait");
   });
 });
 

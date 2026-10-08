@@ -25,6 +25,7 @@ import { paypal } from "../lib/paypal.js";
 import {
   advanceRepayment,
   flagNeedsOperator,
+  isFlaggedForOperator,
   itemOutcomes,
   itemReversals,
   parseClaim,
@@ -131,9 +132,10 @@ export function receiptInvoiceNumber(milestoneId: string): string {
 
 /**
  * What a PAYMENT.PAYOUTS-ITEM.* event means for the item. UNCLAIMED is still in flight (the receiver has 30 days to
- * claim it); RETURNED / REVERSED / REFUNDED take back money that may already have been booked as paid.
+ * claim it) and HELD is under PayPal review: both are audit only. FAILED / BLOCKED / DENIED / CANCELED never paid.
+ * RETURNED / REVERSED / REFUNDED take back money that may already have been booked as paid.
  */
-export type PayoutEventKind = "succeeded" | "failed" | "unclaimed" | "reversed";
+export type PayoutEventKind = "succeeded" | "failed" | "unclaimed" | "held" | "reversed";
 
 export function payoutEventKind(eventType: string): PayoutEventKind | null {
   switch (eventType) {
@@ -141,9 +143,13 @@ export function payoutEventKind(eventType: string): PayoutEventKind | null {
       return "succeeded";
     case PAYPAL_EVENTS.payoutItemFailed:
     case PAYPAL_EVENTS.payoutItemBlocked:
+    case PAYPAL_EVENTS.payoutItemDenied:
+    case PAYPAL_EVENTS.payoutItemCanceled:
       return "failed";
     case PAYPAL_EVENTS.payoutItemUnclaimed:
       return "unclaimed";
+    case PAYPAL_EVENTS.payoutItemHeld:
+      return "held";
     case PAYPAL_EVENTS.payoutItemReturned:
     case PAYPAL_EVENTS.payoutItemReversed:
     case PAYPAL_EVENTS.payoutItemRefunded:
@@ -151,6 +157,42 @@ export function payoutEventKind(eventType: string): PayoutEventKind | null {
     default:
       return null;
   }
+}
+
+export interface PayoutBatchEvent {
+  payoutBatchId?: string;
+  /** Our payout op's PayPal-Request-Id (executeRelease sends it as sender_batch_id). */
+  senderBatchId?: string;
+  batchStatus?: string;
+}
+
+/** Reads a PAYMENT.PAYOUTSBATCH.* event body (resource = the batch). */
+export function parsePayoutBatchEvent(payload: unknown): PayoutBatchEvent {
+  const header = obj(obj(obj(payload).resource).batch_header);
+  const out: PayoutBatchEvent = {};
+  const batch = str(header.payout_batch_id);
+  if (batch) out.payoutBatchId = batch;
+  const sender = str(obj(header.sender_batch_header).sender_batch_id);
+  if (sender) out.senderBatchId = sender;
+  const status = str(header.batch_status);
+  if (status) out.batchStatus = status;
+  return out;
+}
+
+/**
+ * Whether a release may reach its final state (released / partial_released). Every half the claim has must have
+ * succeeded: the payout op when something was released, the refund op when something was refunded. "blocked" when a
+ * half failed (an operator was flagged), "wait" while a half is still in flight.
+ */
+export function finalisation(
+  claim: Pick<ReleaseClaim, "releaseMinor" | "refundMinor">,
+  payoutStatus: string | undefined,
+  refundStatus: string | undefined,
+): "final" | "wait" | "blocked" {
+  const needed = [...(claim.releaseMinor > 0 ? [payoutStatus] : []), ...(claim.refundMinor > 0 ? [refundStatus] : [])];
+  if (needed.length === 0) return "wait";
+  if (needed.some((s) => s === "failed")) return "blocked";
+  return needed.every((s) => s === "succeeded") ? "final" : "wait";
 }
 
 /**
@@ -263,6 +305,23 @@ async function milestoneForRefund(db: Db, refund: RefundEvent, hint: string | un
   return undefined;
 }
 
+/** Resolves the milestone a payout batch event belongs to: our payout op by PayPal's batch id, then by sender_batch_id (= its request id), then the job's hint. */
+async function milestoneForBatch(db: Db, batch: PayoutBatchEvent, hint: string | undefined): Promise<string | undefined> {
+  if (batch.payoutBatchId) {
+    const op = await db.query.paypalOps.findFirst({ where: and(eq(paypalOps.kind, "payout"), eq(paypalOps.paypalId, batch.payoutBatchId)) });
+    if (op) return op.key;
+  }
+  if (batch.senderBatchId) {
+    const op = await db.query.paypalOps.findFirst({ where: and(eq(paypalOps.kind, "payout"), eq(paypalOps.requestId, batch.senderBatchId)) });
+    if (op) return op.key;
+  }
+  if (hint) {
+    const m = await db.query.milestones.findFirst({ where: eq(milestones.id, hint) });
+    if (m) return m.id;
+  }
+  return undefined;
+}
+
 /** A payout op written before claims existed: rebuild the shares from the stored decision. */
 function legacyClaim(m: MilestoneRow, contract: ContractRow, owedMinor: number): ReleaseClaim | null {
   const d = parseDecision(m.decision);
@@ -290,7 +349,7 @@ interface After {
 
 /**
  * Enqueued by the PayPal webhook route with { eventId, eventType } after the event was verified and stored once.
- * Handles PAYMENT.PAYOUTS-ITEM.* and PAYMENT.CAPTURE.REFUNDED. Each event is applied in one transaction that locks the
+ * Handles PAYMENT.PAYOUTS-ITEM.*, PAYMENT.PAYOUTSBATCH.DENIED and PAYMENT.CAPTURE.REFUNDED. Each event is applied in one transaction that locks the
  * milestone row and the webhook row, so concurrent runs cannot double-post the ledger. Nothing here ever enqueues a
  * release: one payout attempt per milestone, and anything that goes wrong is flagged for an operator.
  */
@@ -318,6 +377,11 @@ export async function settle(job: Job<JobData>): Promise<void> {
     const refund = parseRefundEvent(row.payload);
     milestoneId = await milestoneForRefund(db, refund, str(job.data.milestoneId));
     apply = (tx, m, contract) => settleRefund(tx, m, contract, eventId, refund);
+  } else if (eventType === PAYPAL_EVENTS.payoutsBatchDenied) {
+    const batch = parsePayoutBatchEvent(row.payload);
+    milestoneId = await milestoneForBatch(db, batch, str(job.data.milestoneId));
+    apply = (tx, m, contract) => settleBatchDenied(tx, m, contract, eventId, eventType, batch);
+    if (!milestoneId) await audit(db, { actor: "paypal", event: "paypal.payout_batch_unmatched", detail: { eventId, payoutBatchId: batch.payoutBatchId ?? null, senderBatchId: batch.senderBatchId ?? null } });
   }
   if (!milestoneId || !apply) {
     // Not a release item or refund of ours (e.g. an advance-funding payout): nothing for this job to settle.
@@ -374,9 +438,9 @@ async function settleItem(
   if (!claim) throw new Error(`payout op ${op.key} has no claim and milestone ${milestoneId} no usable decision`);
   const amountMinor = item.amountValue ? fromPayPalValue(item.amountValue, item.currency ?? contract.currency) : null;
 
-  if (kind === "unclaimed") {
-    // Still in flight: the receiver can claim it, or PayPal returns it later (PAYMENT.PAYOUTS-ITEM.RETURNED).
-    await audit(t, { ...base, event: "paypal.payout_unclaimed", detail: { ...detail, amountMinor } });
+  if (kind === "unclaimed" || kind === "held") {
+    // Still in flight: the receiver can claim it (UNCLAIMED) or PayPal is reviewing it (HELD); a final item event follows.
+    await audit(t, { ...base, event: `paypal.payout_${kind}`, detail: { ...detail, amountMinor } });
     return {};
   }
   if (kind === "reversed") return reverseItem(tx, m, contract, op, claim, { ...detail, amountMinor, advanceId: advance?.id ?? null }, item);
@@ -434,14 +498,74 @@ async function settleItem(
   }
   if (opStatus !== "succeeded") return {}; // wait for the other item
 
+  // A partial (or any release with a refunded share) is final only once the refund half succeeded too.
+  const refundOp = claim.refundMinor > 0 ? await lockOp(tx, "refund", milestoneId) : undefined;
+  return finalise(tx, m, contract, claim, { payout: opStatus, refund: refundOp?.status, items }, detail);
+}
+
+/**
+ * The one place a release reaches released / partial_released, called by the settle step that completed a half
+ * (payout items or refund). Waits for the other half; never moves a milestone that was flagged for an operator.
+ */
+async function finalise(
+  tx: Tx,
+  m: MilestoneRow,
+  contract: ContractRow,
+  claim: ReleaseClaim,
+  halves: { payout: string | undefined; refund: string | undefined; items: Partial<Record<PayoutParty, ItemOutcome>> },
+  detail: Record<string, unknown>,
+): Promise<After> {
+  const t = tx as unknown as Db;
+  const base = { actor: "paypal", milestoneId: m.id, contractId: m.contractId } as const;
   const target = settleTarget(claim.action);
-  if (m.status !== target && !TRANSITIONS[m.status].includes(target)) {
-    await audit(t, { ...base, event: "milestone.settle_conflict", detail: { ...detail, from: m.status, to: target, amountMinor: booked } });
+  const state = finalisation(claim, halves.payout, halves.refund);
+  if (state === "blocked") return {}; // the failed half flagged an operator; the milestone stays held
+  if (state === "wait") {
+    await audit(t, { ...base, event: "settle.waiting", detail: { ...detail, to: target, payoutOpStatus: halves.payout ?? null, refundOpStatus: halves.refund ?? null } });
     return {};
   }
-  const total = paidTotal(claim.shares, items);
-  const moved = await transition(t, milestoneId, target, { actor: "paypal", event: `milestone.${target}`, detail: { ...detail, amountMinor: total } });
-  return moved ? { receipt: { m, contract, amountMinor: total } } : {};
+  const total = paidTotal(claim.shares, halves.items);
+  if (m.status === target) return {};
+  const flagged = await isFlaggedForOperator(tx, m.id);
+  if (flagged || !TRANSITIONS[m.status].includes(target)) {
+    await audit(t, { ...base, event: "milestone.settle_conflict", detail: { ...detail, from: m.status, to: target, amountMinor: total, needsOperator: flagged } });
+    return {};
+  }
+  const moved = await transition(t, m.id, target, { actor: "paypal", event: `milestone.${target}`, detail: { ...detail, amountMinor: total, refundMinor: claim.refundMinor } });
+  return moved && total > 0 ? { receipt: { m, contract, amountMinor: total } } : {};
+}
+
+/**
+ * PAYMENT.PAYOUTSBATCH.DENIED: PayPal refused the whole batch, so no item was paid. The payout op (matched by the batch
+ * id as for items, or by sender_batch_id, which is the op's own PayPal-Request-Id) is marked failed and an operator is
+ * flagged. A repeat for an op the release job already recorded as denied only adds the audit entry.
+ */
+async function settleBatchDenied(tx: Tx, m: MilestoneRow, _contract: ContractRow, eventId: string, eventType: string, batch: PayoutBatchEvent): Promise<After> {
+  const t = tx as unknown as Db;
+  const base = { actor: "paypal", milestoneId: m.id, contractId: m.contractId } as const;
+  const detail = { eventId, eventType, payoutBatchId: batch.payoutBatchId ?? null, senderBatchId: batch.senderBatchId ?? null, batchStatus: batch.batchStatus ?? null };
+  const op = await lockOp(tx, "payout", m.id);
+  const ours = op !== undefined && op.status !== "pending" && batch.senderBatchId !== undefined && op.requestId === batch.senderBatchId;
+  const match = ours ? "match" : matchPayoutOp(op, batch.payoutBatchId);
+  if (match === "wait") throw new Error(`payout op for milestone ${m.id} has no batch id recorded yet; event ${eventId} will be retried`);
+  if (match === "unmatched" || !op) {
+    await audit(t, { ...base, event: op ? "paypal.unmatched_batch" : "paypal.payout_unmatched", detail: { ...detail, opBatchId: op?.paypalId ?? null } });
+    return {};
+  }
+  const wasFailed = op.status === "failed";
+  await tx
+    .update(paypalOps)
+    .set({
+      status: "failed",
+      paypalId: op.paypalId ?? batch.payoutBatchId ?? null,
+      response: { ...obj(op.response), batchDenied: { eventId, batchStatus: batch.batchStatus ?? "DENIED" } },
+      updatedAt: new Date(),
+    })
+    .where(eq(paypalOps.id, op.id));
+  await audit(t, { ...base, event: "paypal.payout_batch_denied", detail: { ...detail, opStatus: op.status } });
+  if (wasFailed && (await isFlaggedForOperator(tx, m.id))) return {};
+  await flagNeedsOperator(t, m, { actor: "paypal", reason: "PayPal denied the payout batch", detail: { eventId, payoutBatchId: batch.payoutBatchId ?? op.paypalId ?? null } });
+  return {};
 }
 
 /**
@@ -501,6 +625,9 @@ async function reverseItem(
   return {};
 }
 
+/** Refund statuses that mean the money did not go back to the client. */
+const REFUND_FAILED = new Set(["FAILED", "CANCELLED"]);
+
 async function settleRefund(tx: Tx, m: MilestoneRow, contract: ContractRow, eventId: string, refund: RefundEvent): Promise<After> {
   const t = tx as unknown as Db;
   const milestoneId = m.id;
@@ -514,6 +641,22 @@ async function settleRefund(tx: Tx, m: MilestoneRow, contract: ContractRow, even
     return {};
   }
   const amountMinor = eventMinor ?? claim?.refundMinor ?? 0;
+
+  if (refund.status && REFUND_FAILED.has(refund.status)) {
+    // The refund half failed: nothing is booked, the milestone stays out of its final state (held) for an operator.
+    await tx
+      .update(paypalOps)
+      .set({
+        status: op.status === "succeeded" ? op.status : "failed",
+        paypalId: op.paypalId ?? refund.refundId ?? null,
+        response: { ...obj(op.response), webhook: { eventId, status: refund.status, amountMinor } },
+        updatedAt: new Date(),
+      })
+      .where(eq(paypalOps.id, op.id));
+    await audit(t, { ...base, event: "paypal.refund_failed", detail: { eventId, refundId: refund.refundId ?? op.paypalId ?? null, status: refund.status, amountMinor } });
+    await flagNeedsOperator(t, m, { actor: "paypal", reason: `PayPal refund ${refund.status}`, detail: { eventId, refundId: refund.refundId ?? op.paypalId ?? null } });
+    return {};
+  }
 
   await tx
     .update(paypalOps)
@@ -538,15 +681,10 @@ async function settleRefund(tx: Tx, m: MilestoneRow, contract: ContractRow, even
   }
   await audit(t, { ...base, event: "paypal.refund_settled", detail: { eventId, refundId: refund.refundId ?? op.paypalId ?? null, amountMinor, currency: contract.currency } });
 
-  // A refund-only partial (nothing released) settles on the refund.
-  if (claim && claim.action === "partial" && claim.releaseMinor === 0) {
-    if (m.status !== "partial_released" && TRANSITIONS[m.status].includes("partial_released")) {
-      await transition(t, milestoneId, "partial_released", { actor: "paypal", event: "milestone.partial_released", detail: { eventId, refundMinor: amountMinor, amountMinor: 0 } });
-    } else if (m.status !== "partial_released") {
-      await audit(t, { ...base, event: "milestone.settle_conflict", detail: { eventId, from: m.status, to: "partial_released", refundMinor: amountMinor } });
-    }
-  }
-  return {};
+  // The refund half is done: final now when nothing was released (a refund-only partial) or the payout already succeeded.
+  if (!claim) return {};
+  const payoutOp = claim.releaseMinor > 0 ? await lockOp(tx, "payout", milestoneId) : undefined;
+  return finalise(tx, m, contract, claim, { payout: payoutOp?.status, refund: "succeeded", items: itemOutcomes(payoutOp?.response) }, { eventId, refundMinor: amountMinor });
 }
 
 async function issueReceipt(db: Db, m: MilestoneRow, contract: ContractRow, amountMinor: number): Promise<void> {

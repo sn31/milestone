@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { applyReviewWindow } from "@milestone/money";
+import { PayPalError, applyReviewWindow } from "@milestone/money";
 import type { PolicyDecision } from "@milestone/core";
 import {
   advanceRepayment,
   canHold,
   clientOutcome,
   decisionDeliveryId,
+  isLastAttempt,
   itemOutcomes,
+  LEASE_MS,
+  leaseState,
   itemReversals,
   operatorSummary,
   parseClaim,
   parseDecision,
   payoutPlan,
   payoutShares,
+  paypalFailure,
   refundPlan,
   releaseGate,
   requiredNotPassed,
@@ -227,6 +231,11 @@ describe("release claims", () => {
   it("still reads a legacy claim that carries an attempt number", () => {
     expect(parseClaim({ claim: { ...claim, attempt: 2 } })).toEqual(claim);
   });
+  it("keeps the claiming job id and the lease start", () => {
+    const leased = { ...claim, jobId: "job-1", claimedAt: "2026-10-17T12:00:00.000Z" };
+    expect(parseClaim(JSON.parse(JSON.stringify({ claim: leased })))).toEqual(leased);
+    expect(parseClaim({ claim: { ...claim, jobId: 7, claimedAt: "" } })).toEqual(claim);
+  });
   it("splits into a payout-only and a refund-only plan", () => {
     const p = payoutPlan("m1", claim);
     expect(p).toMatchObject({ decision: { action: "partial", amountMinor: 30_000 }, milestoneAmountMinor: 30_000, partner: { email: "p@x.test", amountMinor: 10_000 } });
@@ -257,7 +266,13 @@ const payoutOp = (deliveryId: string, status: string, paypalId: string | null, r
 
 describe("releaseGate (one payout attempt per milestone)", () => {
   const gate = (over: Partial<Parameters<typeof releaseGate>[0]>) =>
-    releaseGate({ jobDeliveryId: "d2", decisionDeliveryId: "d2", status: "review", needsOperator: false, ops: [], ...over });
+    releaseGate({ jobDeliveryId: "d2", decisionDeliveryId: "d2", status: "review", needsOperator: false, ops: [], jobId: "job-2", now, ...over });
+  const leased = (jobId: string, claimedAt: Date, status = "sent", paypalId: string | null = null): OpView => ({
+    kind: "payout",
+    status,
+    paypalId,
+    request: { claim: { ...claimFor("d1"), jobId, claimedAt: claimedAt.toISOString() } },
+  });
 
   it("starts a new release only when no op was ever claimed", () => {
     expect(gate({})).toEqual({ kind: "new" });
@@ -289,6 +304,20 @@ describe("releaseGate (one payout attempt per milestone)", () => {
   it("R11: a duplicate job for an op already answered by PayPal just stops (no waiting, no re-enqueue)", () => {
     expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", ops: [payoutOp("d1", "sent", "B1")] })).toEqual({ kind: "skip", reason: "this release was already sent to PayPal" });
     expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "released", ops: [payoutOp("d1", "succeeded", "B1")] }).kind).toBe("skip");
+  });
+
+  it("R7: only the claiming job resumes an unanswered op while its lease is live; another job waits, then takes over", () => {
+    const at = new Date(now.getTime() - 1_000);
+    const mine = gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-1", ops: [leased("job-1", at)] });
+    expect(mine).toMatchObject({ kind: "resume", takeover: false, claim: { jobId: "job-1" } });
+    const other = gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [leased("job-1", at)] });
+    expect(other).toMatchObject({ kind: "in_flight", claim: { jobId: "job-1" } });
+    const expired = new Date(now.getTime() - LEASE_MS);
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [leased("job-1", expired)] })).toMatchObject({ kind: "resume", takeover: true });
+    // A claim written before leases has no job id: any job of the claimed delivery may resume it.
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [payoutOp("d1", "sent", null)] })).toMatchObject({ kind: "resume", takeover: true });
+    // Already answered by PayPal: a skip, whoever holds the lease.
+    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [leased("job-1", at, "sent", "B1")] }).kind).toBe("skip");
   });
 
   it("does not resume while the milestone is held", () => {
@@ -332,5 +361,44 @@ describe("operatorSummary", () => {
     const claim = claimFor("d1", { shares: { partnerShareMinor: 3_000, freelancerShareMinor: 7_000 } });
     const s = operatorSummary(claim, { kind: "payout", status: "sent", paypalId: "B1", request: { claim }, response: { items: { partner: { status: "failed", amountMinor: 3_000, eventId: "e" } } } }, undefined);
     expect(s).toMatchObject({ paid: {}, failed: { partner: "failed" }, pending: ["freelancer"], refunded: null });
+  });
+});
+
+describe("leaseState (R7)", () => {
+  const claimedAt = "2026-10-17T12:00:00.000Z";
+  const t = (ms: number) => new Date(Date.parse(claimedAt) + ms);
+  it("belongs to the claiming job whatever the time", () => {
+    expect(leaseState({ jobId: "j1", claimedAt }, "j1", t(10 * LEASE_MS))).toBe("own");
+  });
+  it("is held for any other job until LEASE_MS has passed, then expired", () => {
+    expect(LEASE_MS).toBe(120_000);
+    expect(leaseState({ jobId: "j1", claimedAt }, "j2", t(0))).toBe("held");
+    expect(leaseState({ jobId: "j1", claimedAt }, "j2", t(LEASE_MS - 1))).toBe("held");
+    expect(leaseState({ jobId: "j1", claimedAt }, "j2", t(LEASE_MS))).toBe("expired");
+    expect(leaseState({ jobId: "j1", claimedAt }, null, t(1))).toBe("held");
+  });
+  it("treats a claim without a lease (written before leases, or junk) as expired", () => {
+    expect(leaseState({}, "j2", t(0))).toBe("expired");
+    expect(leaseState({ jobId: "j1" }, "j2", t(0))).toBe("expired");
+    expect(leaseState({ jobId: "j1", claimedAt: "not a date" }, "j2", t(0))).toBe("expired");
+  });
+});
+
+describe("final PayPal failures (R3)", () => {
+  it("knows the last pg-boss attempt, falling back to enqueue's retryLimit", () => {
+    expect(isLastAttempt({ retryCount: 0, retryLimit: 5 })).toBe(false);
+    expect(isLastAttempt({ retryCount: 5, retryLimit: 5 })).toBe(true);
+    expect(isLastAttempt({ retryCount: 2, retryLimit: 2 })).toBe(true);
+    expect(isLastAttempt({ retryCount: 4 })).toBe(false);
+    expect(isLastAttempt({ retryCount: 5 })).toBe(true);
+    expect(isLastAttempt({})).toBe(false);
+  });
+  it("treats a 4xx other than 401, 403, 409 and 429 as a rejection, everything else as retryable until the last attempt", () => {
+    for (const status of [400, 404, 422]) expect(paypalFailure(new PayPalError(status, {}), false)).toBe("rejected");
+    for (const status of [401, 403, 409, 429, 500, 503]) expect(paypalFailure(new PayPalError(status, {}), false)).toBeNull();
+    expect(paypalFailure(new Error("socket hang up"), false)).toBeNull();
+    expect(paypalFailure(new Error("socket hang up"), true)).toBe("last_attempt");
+    expect(paypalFailure(new PayPalError(503, {}), true)).toBe("last_attempt");
+    expect(paypalFailure(new PayPalError(422, {}), true)).toBe("rejected");
   });
 });

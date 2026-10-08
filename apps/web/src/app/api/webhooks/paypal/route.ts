@@ -98,7 +98,10 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
     case PAYPAL_EVENTS.payoutItemUnclaimed:
     case PAYPAL_EVENTS.payoutItemReturned:
     case PAYPAL_EVENTS.payoutItemReversed:
-    case PAYPAL_EVENTS.payoutItemRefunded: {
+    case PAYPAL_EVENTS.payoutItemRefunded:
+    case PAYPAL_EVENTS.payoutItemDenied:
+    case PAYPAL_EVENTS.payoutItemCanceled:
+    case PAYPAL_EVENTS.payoutItemHeld: {
       // sender_item_id is "<milestoneId>:<party>" (see executeRelease); the settle job marks the event processed.
       const item = (resource.payout_item as { sender_item_id?: string } | undefined) ?? (resource as { sender_item_id?: string });
       const milestoneId = item.sender_item_id?.split(":")[0];
@@ -107,6 +110,26 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
         return "ignored";
       }
       await enqueue("settle", milestoneId, { eventId: event.id, eventType: event.event_type }, { dedupe: event.id });
+      return "enqueued";
+    }
+    case PAYPAL_EVENTS.payoutsBatchDenied: {
+      // The whole batch was denied. Our payout op is found by PayPal's batch id or by sender_batch_id (= the op's
+      // PayPal-Request-Id, see executeRelease); the settle job marks it failed, flags an operator and marks the event processed.
+      const header = (resource.batch_header ?? {}) as { payout_batch_id?: unknown; sender_batch_header?: { sender_batch_id?: unknown } };
+      const batchId = typeof header.payout_batch_id === "string" && header.payout_batch_id ? header.payout_batch_id : null;
+      const senderBatchId = typeof header.sender_batch_header?.sender_batch_id === "string" && header.sender_batch_header.sender_batch_id ? header.sender_batch_header.sender_batch_id : null;
+      const op =
+        batchId || senderBatchId
+          ? await db.query.paypalOps.findFirst({
+              where: (o, { and, eq, or }) => and(eq(o.kind, "payout"), or(...(batchId ? [eq(o.paypalId, batchId)] : []), ...(senderBatchId ? [eq(o.requestId, senderBatchId)] : []))),
+            })
+          : undefined;
+      if (!op) {
+        await audit(db, { actor: "paypal", event: "paypal.payout_batch_unmatched", detail: { eventId: event.id, payoutBatchId: batchId, senderBatchId } });
+        await markProcessed(db, event.id);
+        return "ignored";
+      }
+      await enqueue("settle", op.key, { eventId: event.id, eventType: event.event_type }, { dedupe: event.id });
       return "enqueued";
     }
     default:

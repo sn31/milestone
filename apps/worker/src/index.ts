@@ -7,7 +7,7 @@ try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); }
 const boss = await jobs();
 boss.on("error", (err) => console.error("pg-boss:", err));
 for (const name of JobName.options) {
-  await boss.work<JobData>(name, { batchSize: 1 }, async (batch: Job<JobData>[]) => {
+  await boss.work<JobData>(name, { batchSize: 1, includeMetadata: true }, async (batch: Job<JobData>[]) => {
     for (const job of batch) {
       await handlers[name](job);
       console.log(`[${name}] ${job.id} done`);

@@ -212,4 +212,18 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.decision).toMatchObject({ action: "ask_client", deliveryId: t.deliveryId });
     expect(s.m.decidedAt!.getTime()).toBeLessThan(future.getTime());
   });
+
+  it("R6: a milestone flagged for an operator never leaves held through a new delivery", { timeout: 120_000 }, async () => {
+    const { audit } = await import("@milestone/core");
+    const stale = { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "earlier attempt", deliveryId: "dlv_previous" };
+    const t = await setup(10, [{ kind: "test", spec: { command: "npm test" }, required: true }], { milestone: { status: "held", decision: stale } });
+    await audit(getDb(), { actor: "paypal", event: "milestone.needs_operator", milestoneId: t.milestoneId, contractId, detail: { reason: "e2e: payout item failed" } });
+    await verify(t.job);
+    const s = await t.state();
+    expect(s.m.status).toBe("held");
+    expect(s.m.decision).toMatchObject({ deliveryId: "dlv_previous" });
+    expect(s.d.verdict).toBeNull();
+    expect(s.audits).toEqual(["milestone.needs_operator", "verify.refused_needs_operator"]);
+    expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
+  });
 });
