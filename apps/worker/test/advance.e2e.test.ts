@@ -51,6 +51,7 @@ describe.skipIf(!run)("advance job end to end", async () => {
   const clientId = `usr_e2e_adv_c_${tag}`;
   const freelancerId = `usr_e2e_adv_f_${tag}`;
   const partnerId = `usr_e2e_adv_p_${tag}`;
+  const partnerNoEmailId = `usr_e2e_adv_p2_${tag}`;
   const advanceIds: string[] = [];
 
   beforeAll(async () => {
@@ -58,6 +59,7 @@ describe.skipIf(!run)("advance job end to end", async () => {
       { id: clientId, role: "client", name: "c", email: `c-${tag}@e2e.test` },
       { id: freelancerId, role: "freelancer", name: "f", email: `f-${tag}@e2e.test`, paypalEmail: `f-${tag}@e2e.test` },
       { id: partnerId, role: "partner", name: "p", email: `p-${tag}@e2e.test`, paypalEmail: `p-${tag}@e2e.test` },
+      { id: partnerNoEmailId, role: "partner", name: "p2", email: `p2-${tag}@e2e.test` },
     ]);
     await db.insert(contracts).values({ id: contractId, clientId, freelancerId, title: "e2e advance", scopeText: "e2e", currency: "USD", totalMinor: 50_000, status: "active" });
   });
@@ -71,15 +73,15 @@ describe.skipIf(!run)("advance job end to end", async () => {
     await q(`delete from advances where milestone_id in ${ms}`, [contractId]);
     await q(`delete from milestones where contract_id = $1`, [contractId]);
     await q(`delete from contracts where id = $1`, [contractId]);
-    await q(`delete from users where id = any($1)`, [[clientId, freelancerId, partnerId]]);
+    await q(`delete from users where id = any($1)`, [[clientId, freelancerId, partnerId, partnerNoEmailId]]);
   });
 
-  async function setup(seq: number, status: "funded" | "review" = "funded") {
+  async function setup(seq: number, status: "funded" | "review" = "funded", partner = partnerId) {
     const milestoneId = `mst_e2e_adv_${tag}_${seq}`;
     const advanceId = `adv_e2e_${tag}_${seq}`;
     advanceIds.push(advanceId);
     await db.insert(milestones).values({ id: milestoneId, contractId, seq, title: `m${seq}`, amountMinor: 10_000, status, advanceEligible: true, paypalCaptureId: `CAP-${tag}-${seq}` });
-    await db.insert(advances).values({ id: advanceId, milestoneId, partnerId, principalMinor: 5_833, feeBpsPerDay: 10, status: "offered", offer: { eligible: true, principalMinor: 5_833, expectedFeeMinor: 81 } });
+    await db.insert(advances).values({ id: advanceId, milestoneId, partnerId: partner, principalMinor: 5_833, feeBpsPerDay: 10, status: "offered", offer: { eligible: true, principalMinor: 5_833, expectedFeeMinor: 81 } });
     const state = async () => ({
       advance: await db.query.advances.findFirst({ where: (t, { eq }) => eq(t.id, advanceId) }),
       ops: (await db.$client.query(`select status, request_id, paypal_id from paypal_ops where kind = 'advance-payout' and key = $1`, [advanceId])).rows as Array<{ status: string; request_id: string; paypal_id: string | null }>,
@@ -132,6 +134,8 @@ describe.skipIf(!run)("advance job end to end", async () => {
     let s = await t.state();
     expect(s.advance?.status).toBe("offered");
     expect(s.ledger).toHaveLength(0);
+    // The claim was committed before the call, so it survived the rollback.
+    expect(s.ops).toMatchObject([{ status: "sent" }]);
 
     await advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }, { retryCount: 1 }), deps);
     s = await t.state();
@@ -140,6 +144,54 @@ describe.skipIf(!run)("advance job end to end", async () => {
     expect(s.advance?.status).toBe("funded");
     expect(s.ledger).toHaveLength(2);
     expect(s.audits).toContain("paypal.advance_payout_error");
+  });
+
+  it("a retry after a lost answer never withdraws: it flags an operator and a second accept pays nothing", async () => {
+    const t = await setup(5);
+    calls.length = 0;
+    failNext = 0;
+    await expect(advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }), deps)).rejects.toThrow(/socket hang up/);
+    expect((await t.state()).ops).toMatchObject([{ status: "sent" }]);
+
+    // Withdraw-eligible now (the old code deleted the advance here): the milestone moved on.
+    await db.$client.query(`update milestones set status = 'review' where id = $1`, [t.milestoneId]);
+    await advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }, { retryCount: 1 }), deps);
+    let s = await t.state();
+    expect(payouts()).toHaveLength(1);
+    expect(s.advance?.status).toBe("offered"); // not deleted: PayPal may have paid it
+    expect(s.ops).toMatchObject([{ status: "sent" }]);
+    expect(s.audits).toContain("advance.needs_operator");
+    expect(s.audits).not.toContain("advance.withdrawn");
+
+    // The milestone is fundable again and the freelancer accepts again: the accept route finds the existing advance
+    // (one per milestone) and re-enqueues its job, which refuses because it was flagged. Nothing is paid.
+    await db.$client.query(`update milestones set status = 'funded' where id = $1`, [t.milestoneId]);
+    const existing = await db.query.advances.findMany({ where: (a, { eq }) => eq(a.milestoneId, t.milestoneId) });
+    expect(existing.map((a) => a.id)).toEqual([t.advanceId]);
+    await advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }), deps);
+    s = await t.state();
+    expect(payouts()).toHaveLength(1);
+    expect(s.advance?.status).toBe("offered");
+    expect(s.ledger).toHaveLength(0);
+    expect(s.audits).toContain("advance.refused");
+  });
+
+  it("refuses with needs_operator, and pays nothing, when the partner has no PayPal email", async () => {
+    const mode = process.env.PAYPAL_MODE;
+    process.env.PAYPAL_MODE = "sandbox";
+    try {
+      const t = await setup(6, "funded", partnerNoEmailId);
+      calls.length = 0;
+      await advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }), deps);
+      const s = await t.state();
+      expect(payouts()).toHaveLength(0);
+      expect(s.ops).toHaveLength(0);
+      expect(s.advance?.status).toBe("offered");
+      expect(s.audits).toContain("advance.needs_operator");
+    } finally {
+      if (mode === undefined) delete process.env.PAYPAL_MODE;
+      else process.env.PAYPAL_MODE = mode;
+    }
   });
 
   it("a rejected payout is recorded as failed, flagged, and never retried", async () => {

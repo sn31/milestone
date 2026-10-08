@@ -52,7 +52,7 @@ const T0 = new Date("2026-10-08T12:00:00.000Z");
 const at = (ms: number) => () => new Date(T0.getTime() + ms);
 
 describe.skipIf(!run)("release and settle end to end", async () => {
-  const { advances, contracts, milestones, users, criteria, deliveries, webhookEvents } = await import("@milestone/core");
+  const { advances, contracts, milestones, users, criteria, deliveries, webhookEvents, postTransaction } = await import("@milestone/core");
   const { getDb } = await import("../src/lib/db.ts");
   const { release } = await import("../src/jobs/release.ts");
   const { settle } = await import("../src/jobs/settle.ts");
@@ -81,6 +81,7 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     await q(`delete from audit_log where contract_id = $1 or milestone_id in ${ms}`, [contractId]);
     // Every posting of these milestones touches their held account (release, partner release, refund, reversal).
     await q(`delete from ledger_entries where txn_id in (select txn_id from ledger_entries where account in (select 'held:' || id from milestones where contract_id = $1))`, [contractId]);
+    await q(`delete from ledger_entries where ref in (select 'advance:' || id from advances where milestone_id in ${ms})`, [contractId]);
     await q(`delete from advances where milestone_id in ${ms}`, [contractId]);
     await q(`delete from paypal_ops where key in ${ms} or exists (select 1 from milestones m where m.contract_id = $1 and starts_with(paypal_ops.key, m.id || ':'))`, [contractId]);
     await q(`delete from webhook_events where event_id = any($1)`, [eventIds]);
@@ -103,7 +104,10 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     const verdict = (id: string) => ({ delivery_id: id, suspected_injection: false, criteria: [{ criterion_id: critId, status: m.required ?? "pass", confidence: 0.9, evidence_ids: ["e"], rationale: "" }] });
     await db.insert(deliveries).values({ id: deliveryId, milestoneId, source: "manual", ref: `e2e-${seq}`, verdict: verdict(deliveryId), result: "pass", verifiedAt: new Date() });
     if (m.advanceMinor) {
-      await db.insert(advances).values({ id: `adv_e2e_rs_${tag}_${seq}`, milestoneId, partnerId, principalMinor: m.advanceMinor, feeBpsPerDay: 10, status: "funded", offer: { expectedFeeMinor: 0 }, fundedAt: new Date() });
+      const advanceId = `adv_e2e_rs_${tag}_${seq}`;
+      await db.insert(advances).values({ id: advanceId, milestoneId, partnerId, principalMinor: m.advanceMinor, feeBpsPerDay: 10, status: "funded", offer: { expectedFeeMinor: 0 }, fundedAt: new Date() });
+      // As the advance job posts it: the release reads the balance from the ledger.
+      await postTransaction(db, { ref: `advance:${advanceId}`, currency: "USD", entries: [{ account: `partner:${partnerId}:receivable`, amountMinor: m.advanceMinor, direction: "debit" }, { account: `partner:${partnerId}:cash`, amountMinor: m.advanceMinor, direction: "credit" }] });
     }
     const state = async () => ({
       m: (await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, milestoneId) }))!,
@@ -559,5 +563,160 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     // The original job's retry finds the op answered and stops.
     await release(a, at(130_000));
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe.skipIf(!run)("advance repayment: shortfall and carry-over end to end", async () => {
+  const { advances, contracts, milestones, users, criteria, deliveries, webhookEvents, postTransaction } = await import("@milestone/core");
+  const { loadAdvanceBalances, loadRecords } = await import("@milestone/money");
+  const { getDb } = await import("../src/lib/db.ts");
+  const { release } = await import("../src/jobs/release.ts");
+  const { settle } = await import("../src/jobs/settle.ts");
+  const db = getDb();
+  const tag = randomUUID().slice(0, 8);
+  const contractId = `ctr_e2e_co_${tag}`;
+  const clientId = `usr_e2e_co_c_${tag}`;
+  const freelancerId = `usr_e2e_co_f_${tag}`;
+  const partnerId = `usr_e2e_co_p_${tag}`;
+  const otherPartnerId = `usr_e2e_co_q_${tag}`;
+  const eventIds: string[] = [];
+  const past = () => new Date(Date.now() - 60_000);
+  let fundedAt = Date.now() - 86_400_000;
+
+  beforeAll(async () => {
+    delete process.env.PAYPAL_CLIENT_ID;
+    await db.insert(users).values([
+      { id: clientId, role: "client", name: "c", email: `coc-${tag}@e2e.test` },
+      { id: freelancerId, role: "freelancer", name: "f", email: `cof-${tag}@e2e.test`, paypalEmail: `cof-${tag}@e2e.test` },
+      { id: partnerId, role: "partner", name: "p", email: `cop-${tag}@e2e.test`, paypalEmail: `cop-${tag}@e2e.test` },
+      { id: otherPartnerId, role: "partner", name: "q", email: `coq-${tag}@e2e.test`, paypalEmail: `coq-${tag}@e2e.test` },
+    ]);
+    await db.insert(contracts).values({ id: contractId, clientId, freelancerId, title: "e2e carry", scopeText: "e2e", currency: "USD", totalMinor: 80_000, status: "active" });
+  });
+
+  afterAll(async () => {
+    const q = (s: string, p: unknown[]) => db.$client.query(s, p);
+    const ms = `(select id from milestones where contract_id = $1)`;
+    await q(`delete from audit_log where contract_id = $1 or milestone_id in ${ms}`, [contractId]);
+    await q(`delete from ledger_entries where txn_id in (select txn_id from ledger_entries where account in (select 'held:' || id from milestones where contract_id = $1))`, [contractId]);
+    await q(`delete from ledger_entries where ref in (select 'advance:' || id from advances where milestone_id in ${ms})`, [contractId]);
+    await q(`delete from advances where milestone_id in ${ms}`, [contractId]);
+    await q(`delete from paypal_ops where key in ${ms}`, [contractId]);
+    await q(`delete from webhook_events where event_id = any($1)`, [eventIds]);
+    await q(`delete from deliveries where milestone_id in ${ms}`, [contractId]);
+    await q(`delete from criteria where milestone_id in ${ms}`, [contractId]);
+    await q(`delete from milestones where contract_id = $1`, [contractId]);
+    await q(`delete from contracts where id = $1`, [contractId]);
+    await q(`delete from users where id = any($1)`, [[clientId, freelancerId, partnerId, otherPartnerId]]);
+  });
+
+  /** A milestone of 100.00 ready to release (needs_client + confirm_partial for a partial), optionally with a funded advance. */
+  async function setup(seq: number, decision: { action: "release" | "partial"; amountMinor: number }, adv?: { principalMinor: number; feeMinor: number; partner?: string }) {
+    const milestoneId = `mst_e2e_co_${tag}_${seq}`;
+    const deliveryId = `dlv_e2e_co_${tag}_${seq}`;
+    const partial = decision.action === "partial";
+    await db.insert(milestones).values({
+      id: milestoneId, contractId, seq, title: `m${seq}`, amountMinor: 10_000, status: partial ? "needs_client" : "review", paypalCaptureId: `CAP-co-${tag}-${seq}`,
+      decision: { ...decision, ruleIds: ["P"], reason: "e2e", deliveryId } as never, decidedAt: new Date(), reviewEndsAt: partial ? null : past(), clientResponse: partial ? "confirm_partial" : null,
+    });
+    const critId = `crt_e2e_co_${tag}_${seq}`;
+    await db.insert(criteria).values({ id: critId, milestoneId, kind: "test", description: "tests", spec: {}, required: true });
+    await db.insert(deliveries).values({ id: deliveryId, milestoneId, source: "manual", ref: `co-${seq}`, verdict: { delivery_id: deliveryId, suspected_injection: false, criteria: [{ criterion_id: critId, status: "pass", confidence: 0.9, evidence_ids: ["e"], rationale: "" }] }, result: "pass", verifiedAt: new Date() });
+    const advanceId = `adv_e2e_co_${tag}_${seq}`;
+    if (adv) {
+      const p = adv.partner ?? partnerId;
+      fundedAt += 1_000;
+      await db.insert(advances).values({ id: advanceId, milestoneId, partnerId: p, principalMinor: adv.principalMinor, feeBpsPerDay: 10, status: "funded", offer: { expectedFeeMinor: adv.feeMinor }, fundedAt: new Date(fundedAt) });
+      await postTransaction(db, { ref: `advance:${advanceId}`, currency: "USD", entries: [{ account: `partner:${p}:receivable`, amountMinor: adv.principalMinor, direction: "debit" }, { account: `partner:${p}:cash`, amountMinor: adv.principalMinor, direction: "credit" }] });
+    }
+    return { milestoneId, deliveryId, advanceId };
+  }
+  const claimOf = async (milestoneId: string) =>
+    ((await db.$client.query(`select request->'claim' as claim, paypal_id from paypal_ops where kind = 'payout' and key = $1`, [milestoneId])).rows[0] ?? null) as { claim: { shares: { partnerShareMinor: number; freelancerShareMinor: number }; advances: Array<{ advanceId: string; principalMinor: number; feeMinor: number }> }; paypal_id: string } | null;
+  const advanceRow = (id: string) => db.query.advances.findFirst({ where: (t, { eq }) => eq(t.id, id) });
+  const balance = async (id: string, milestoneId: string, p = partnerId) => (await loadAdvanceBalances(db, [{ id, milestoneId, partnerId: p }])).get(id)!;
+  async function payPartner(milestoneId: string, batch: string, value: string) {
+    const eventId = `WH-co-${tag}-${randomUUID().slice(0, 8)}`;
+    eventIds.push(eventId);
+    await db.insert(webhookEvents).values({ id: randomUUID(), source: "paypal", eventId, type: "PAYMENT.PAYOUTS-ITEM.SUCCEEDED", payload: { id: eventId, resource: { payout_batch_id: batch, payout_item_id: `I-${randomUUID().slice(0, 6)}`, transaction_status: "SUCCESS", payout_item: { sender_item_id: `${milestoneId}:partner`, amount: { value, currency: "USD" } } } } });
+    await settle(job({ milestoneId, eventId }));
+  }
+  const partnerItems = (milestoneId: string) =>
+    calls.filter((c) => c.path === "/v1/payments/payouts").flatMap((c) => (c.body as { items: Array<{ receiver: string; amount: { value: string }; sender_item_id: string }> }).items).filter((i) => i.sender_item_id.startsWith(milestoneId));
+
+  let shortAdvance = "";
+  let shortMilestone = "";
+
+  it("a short repayment leaves the advance in shortfall with the remaining balance, still counted as outstanding", async () => {
+    const t = await setup(1, { action: "partial", amountMinor: 3_000 }, { principalMinor: 5_000, feeMinor: 100 });
+    shortAdvance = t.advanceId;
+    shortMilestone = t.milestoneId;
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const c = (await claimOf(t.milestoneId))!;
+    expect(c.claim.shares).toEqual({ partnerShareMinor: 3_000, freelancerShareMinor: 0 });
+    expect(c.claim.advances).toEqual([{ advanceId: t.advanceId, milestoneId: t.milestoneId, principalMinor: 5_000, feeMinor: 100 }]);
+    expect(partnerItems(t.milestoneId).map((i) => i.sender_item_id)).toEqual([`${t.milestoneId}:partner`]);
+
+    await payPartner(t.milestoneId, c.paypal_id, "30.00");
+    expect((await advanceRow(t.advanceId))?.status).toBe("shortfall");
+    const audit = (await db.$client.query(`select detail from audit_log where milestone_id = $1 and event = 'advance.shortfall'`, [t.milestoneId])).rows[0]?.detail;
+    expect(audit).toMatchObject({ advanceId: t.advanceId, owedMinor: 5_100, paidMinor: 3_000, remainingMinor: 2_100 });
+    expect(await balance(t.advanceId, t.milestoneId)).toMatchObject({ fundedMinor: 5_000, principalRepaidMinor: 3_000, outstandingMinor: 2_000, feeRepaidMinor: 0 });
+    const rec = await loadRecords(db, freelancerId, clientId);
+    expect(rec.freelancer.outstandingMinor).toBe(5_000);
+  });
+
+  it("the next release repays the carried balance before the freelancer; a concurrent claim does not collect it twice", async () => {
+    const t = await setup(2, { action: "release", amountMinor: 10_000 });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const c = (await claimOf(t.milestoneId))!;
+    expect(c.claim.shares).toEqual({ partnerShareMinor: 2_100, freelancerShareMinor: 7_900 });
+    expect(c.claim.advances).toEqual([{ advanceId: shortAdvance, milestoneId: shortMilestone, principalMinor: 2_000, feeMinor: 100 }]);
+    expect(partnerItems(t.milestoneId)).toEqual(expect.arrayContaining([expect.objectContaining({ receiver: `cop-${tag}@e2e.test`, amount: expect.objectContaining({ value: "21.00" }) })]));
+
+    // Another release while that repayment is still in flight: the balance is already claimed, nothing is double-collected.
+    const u = await setup(3, { action: "release", amountMinor: 10_000 });
+    await release(job({ milestoneId: u.milestoneId, deliveryId: u.deliveryId }));
+    expect((await claimOf(u.milestoneId))!.claim).toMatchObject({ shares: { partnerShareMinor: 0, freelancerShareMinor: 10_000 }, advances: [] });
+
+    await payPartner(t.milestoneId, c.paypal_id, "21.00");
+    expect((await advanceRow(shortAdvance))?.status).toBe("repaid");
+    expect(await balance(shortAdvance, shortMilestone)).toMatchObject({ outstandingMinor: 0, principalRepaidMinor: 5_000, feeRepaidMinor: 100 });
+    const ledger = (await db.$client.query(`select account, amount_minor::int as amount, direction from ledger_entries where ref = $1 order by account`, [`release:${t.milestoneId}:partner:${shortAdvance}`])).rows;
+    expect(ledger).toEqual([
+      { account: `held:${t.milestoneId}`, amount: 2_100, direction: "debit" },
+      { account: `partner:${partnerId}:fees`, amount: 100, direction: "credit" },
+      { account: `partner:${partnerId}:receivable`, amount: 2_000, direction: "credit" },
+    ]);
+  });
+
+  it("a funded advance on a fully refunded milestone is collected from the next release; the freelancer gets nothing while it is owed", async () => {
+    const r = await setup(4, { action: "partial", amountMinor: 0 }, { principalMinor: 4_000, feeMinor: 0 });
+    // End state of a full refund that was then held: refund:<m> booked in full, the advance never repaid.
+    await db.$client.query(`update milestones set status = 'held' where id = $1`, [r.milestoneId]);
+    await postTransaction(db, { ref: `refund:${r.milestoneId}`, currency: "USD", entries: [{ account: `held:${r.milestoneId}`, amountMinor: 10_000, direction: "debit" }, { account: `client:${clientId}`, amountMinor: 10_000, direction: "credit" }] });
+
+    const t = await setup(5, { action: "partial", amountMinor: 3_000 });
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    const c = (await claimOf(t.milestoneId))!;
+    expect(c.claim.shares).toEqual({ partnerShareMinor: 3_000, freelancerShareMinor: 0 });
+    expect(partnerItems(t.milestoneId).map((i) => i.sender_item_id)).toEqual([`${t.milestoneId}:partner`]);
+    await payPartner(t.milestoneId, c.paypal_id, "30.00");
+    expect((await advanceRow(r.advanceId))?.status).toBe("shortfall");
+    expect(await balance(r.advanceId, r.milestoneId)).toMatchObject({ outstandingMinor: 1_000 });
+  });
+
+  it("a balance owed to another partner stops a release that would pay the freelancer and flags an operator", async () => {
+    const o = await setup(6, { action: "partial", amountMinor: 0 }, { principalMinor: 2_000, feeMinor: 0, partner: otherPartnerId });
+    await db.$client.query(`update milestones set status = 'partial_released' where id = $1`, [o.milestoneId]);
+    const t = await setup(7, { action: "release", amountMinor: 10_000 });
+    const before = calls.length;
+    await release(job({ milestoneId: t.milestoneId, deliveryId: t.deliveryId }));
+    expect(calls.length).toBe(before);
+    expect(await claimOf(t.milestoneId)).toBeNull();
+    const m = await db.query.milestones.findFirst({ where: (x, { eq }) => eq(x.id, t.milestoneId) });
+    expect(m?.status).toBe("held");
+    const flagged = (await db.$client.query(`select detail from audit_log where milestone_id = $1 and event = 'milestone.needs_operator'`, [t.milestoneId])).rows[0]?.detail;
+    expect(flagged?.blocked).toEqual([expect.objectContaining({ advanceId: o.advanceId, partnerId: otherPartnerId, remainingMinor: 2_000 })]);
   });
 });

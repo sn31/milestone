@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
 import { advances, audit, enqueue, milestones, users, type Db } from "@milestone/core";
-import { describeOffer, loadUnderwriting } from "@milestone/money";
+import { describeOffer, loadUnderwriting, paypalMode } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { getActor } from "@/lib/session";
 import { advanceView, json, partnerIdFor } from "../_shared";
@@ -57,6 +57,13 @@ export async function POST(req: Request) {
     if (!freelancer?.paypalEmail) return refuse("add a PayPal email to your profile before taking an advance", 409, "no_paypal_email");
     const partnerId = await partnerIdFor(t);
     if (!partnerId) return refuse("no capital partner is configured", 503, "no_partner");
+    // The release repays the partner by PayPal payout: without a receiver it could never be repaid. Simulated PayPal
+    // (local demo) pays the account email, as the release job does.
+    const partner = await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, partnerId) });
+    if (!partner) return refuse("the capital partner does not exist", 503, "no_partner");
+    if (!(partner.paypalEmail ?? (paypalMode() === "simulated" ? partner.email : null))) {
+      return refuse("the capital partner has no PayPal email, so an advance could not be repaid", 409, "no_partner_paypal_email");
+    }
 
     // Priced on a separate connection: it sees every advance committed by an accept that held these locks before us.
     const u = await loadUnderwriting(db, milestoneId);

@@ -3,18 +3,22 @@ import { paypal } from "./paypal.ts";
 
 let client: PayPalClient | null = null;
 
-/** True when advances are paid from the partner's own PayPal app rather than the platform's client. */
+/** True when both PAYPAL_PARTNER_CLIENT_ID and PAYPAL_PARTNER_CLIENT_SECRET are set. */
 export function hasPartnerCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !!env.PAYPAL_PARTNER_CLIENT_ID && paypalMode(env) !== "simulated";
+  return !!env.PAYPAL_PARTNER_CLIENT_ID && !!env.PAYPAL_PARTNER_CLIENT_SECRET;
 }
 
 /**
  * The capital partner's own PayPal app (PAYPAL_PARTNER_CLIENT_ID / PAYPAL_PARTNER_CLIENT_SECRET): advances are paid
- * out of the partner's account. Without partner credentials, or in simulated mode, it is the same client
- * ./paypal.ts exports, so a single sandbox app or the local simulator still runs the whole flow.
+ * out of the partner's account. Only in simulated mode (PAYPAL_MODE=simulated, or no PAYPAL_CLIENT_ID outside
+ * production) is it the platform client from ./paypal.ts, so the local simulator still runs the whole flow. In sandbox
+ * or live mode without partner credentials it throws: an advance is never paid from the platform's account.
  */
 export function partnerPaypal(env: NodeJS.ProcessEnv = process.env): PayPalClient {
-  if (!hasPartnerCredentials(env)) return paypal();
+  if (paypalMode(env) === "simulated") return paypal();
+  if (!hasPartnerCredentials(env)) {
+    throw new Error("PAYPAL_PARTNER_CLIENT_ID and PAYPAL_PARTNER_CLIENT_SECRET are required outside simulated mode; advances are never paid from the platform account");
+  }
   client ??= PayPalClient.fromEnv(env, "PAYPAL_PARTNER_");
   return client;
 }

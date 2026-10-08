@@ -112,8 +112,9 @@ const one = async (db: Db, text: string, values: unknown[]): Promise<number> => 
  *  - fails: `milestone.held` audit rows on the freelancer's contracts (or naming them in detail.freelancerId);
  *  - vetoes: `client.veto` audit rows by the client or on the client's contracts;
  *  - open disputes: `dispute.opened` minus `dispute.resolved` audit rows on the client's contracts;
- *  - outstanding: principal of advances that are offered (accepted, awaiting funding) or funded, through
- *    milestones -> contracts. An accepted advance counts so two accepts cannot both use the same headroom.
+ *  - outstanding: principal of advances that are offered (accepted, awaiting funding), funded, or in shortfall
+ *    (repaid short, the rest still owed), through milestones -> contracts. An accepted advance counts so two accepts
+ *    cannot both use the same headroom; a shortfall counts until it is collected in full.
  * Limits default to DEFAULT_LIMITS.
  */
 export async function loadRecords(db: Db, freelancerId: string, clientId: string, limits: { freelancerMinor?: number; clientMinor?: number } = {}): Promise<Records> {
@@ -135,7 +136,7 @@ export async function loadRecords(db: Db, freelancerId: string, clientId: string
     db,
     `select coalesce(sum(ad.principal_minor), 0) as n from advances ad
        join milestones m on m.id = ad.milestone_id join contracts c on c.id = m.contract_id
-      where c.freelancer_id = $1 and ad.status in ('offered', 'funded')`,
+      where c.freelancer_id = $1 and ad.status in ('offered', 'funded', 'shortfall')`,
     [freelancerId],
   );
   const vetoes = one(
@@ -154,7 +155,7 @@ export async function loadRecords(db: Db, freelancerId: string, clientId: string
     db,
     `select coalesce(sum(ad.principal_minor), 0) as n from advances ad
        join milestones m on m.id = ad.milestone_id join contracts c on c.id = m.contract_id
-      where c.client_id = $1 and ad.status in ('offered', 'funded')`,
+      where c.client_id = $1 and ad.status in ('offered', 'funded', 'shortfall')`,
     [clientId],
   );
   const [p, f, fo, v, d, co] = await Promise.all([passes, fails, fOut, vetoes, disputes, cOut]);
@@ -199,4 +200,96 @@ export async function loadUnderwriting(db: Db, milestoneId: string, now: Date = 
   if (!m.advanceEligible) return { ...base, offer: { eligible: false, reason: "milestone is not eligible for an advance" }, terms: null };
   if (m.status !== "draft" && !pricing.funded) return { ...base, offer: { eligible: false, reason: `milestone is ${m.status}; advances are offered only before delivery` }, terms: null };
   return { ...base, ...underwrite({ freelancer: records.freelancer, client: records.client, milestone: pricing }, params) };
+}
+
+// ---------- Advance balances from the ledger ----------
+
+/**
+ * Ledger refs that move an advance's balance. The funding posting debits the partner's receivable; repayments credit
+ * the receivable (principal) and the partner's fee account. A repayment out of the advance's own milestone uses
+ * release:<milestoneId>:partner; a repayment carried to a later release of another milestone uses
+ * release:<thatMilestoneId>:partner:<advanceId>. Reversals mirror them under reversal:...
+ */
+export const advanceRefs = {
+  funding: (advanceId: string) => `advance:${advanceId}`,
+  repayment: (releaseMilestoneId: string, a: { id: string; milestoneId: string }) =>
+    a.milestoneId === releaseMilestoneId ? `release:${releaseMilestoneId}:partner` : `release:${releaseMilestoneId}:partner:${a.id}`,
+  reversal: (releaseMilestoneId: string, a: { id: string; milestoneId: string }) =>
+    a.milestoneId === releaseMilestoneId ? `reversal:${releaseMilestoneId}:partner` : `reversal:${releaseMilestoneId}:partner:${a.id}`,
+} as const;
+
+export interface AdvanceKey {
+  id: string;
+  milestoneId: string;
+  partnerId: string;
+}
+
+export interface AdvanceLedgerRow {
+  ref: string;
+  account: string;
+  amountMinor: number;
+  direction: "debit" | "credit";
+  createdAt?: Date | null;
+}
+
+export interface AdvanceBalance {
+  /** Principal the partner paid out (debit on the receivable under advance:<id>). */
+  fundedMinor: number;
+  /** Principal credited back to the receivable by repayments, net of reversals. */
+  principalRepaidMinor: number;
+  /** Fees credited to the partner's fee account by repayments, net of reversals. */
+  feeRepaidMinor: number;
+  /** The receivable's balance for this advance: funded minus principal repaid. */
+  outstandingMinor: number;
+  /** Principal and fees credited on or after `since` (net), when a since date was given. */
+  repaidSinceMinor: number;
+}
+
+/** True when this ledger ref belongs to the advance (its funding, its own repayment or reversal, or a carried one). */
+export function isAdvanceRef(ref: string, a: { id: string; milestoneId: string }): boolean {
+  if (ref === advanceRefs.funding(a.id)) return true;
+  if (ref === `release:${a.milestoneId}:partner` || ref === `reversal:${a.milestoneId}:partner`) return true;
+  return (ref.startsWith("release:") || ref.startsWith("reversal:")) && ref.endsWith(`:partner:${a.id}`);
+}
+
+/** Pure. Each advance's balance from the ledger rows of its refs, on its partner's receivable and fee accounts. */
+export function advanceBalances(advs: readonly AdvanceKey[], rows: readonly AdvanceLedgerRow[], since?: Date): Map<string, AdvanceBalance> {
+  const out = new Map<string, AdvanceBalance>();
+  for (const a of advs) {
+    const receivable = `partner:${a.partnerId}:receivable`;
+    const fees = `partner:${a.partnerId}:fees`;
+    const b: AdvanceBalance = { fundedMinor: 0, principalRepaidMinor: 0, feeRepaidMinor: 0, outstandingMinor: 0, repaidSinceMinor: 0 };
+    for (const r of rows) {
+      if ((r.account !== receivable && r.account !== fees) || !isAdvanceRef(r.ref, a)) continue;
+      const credit = r.direction === "credit" ? r.amountMinor : -r.amountMinor;
+      if (r.ref === advanceRefs.funding(a.id)) {
+        if (r.account === receivable) b.fundedMinor -= credit;
+        continue;
+      }
+      if (r.account === receivable) b.principalRepaidMinor += credit;
+      else b.feeRepaidMinor += credit;
+      if (since && r.createdAt && r.createdAt.getTime() >= since.getTime()) b.repaidSinceMinor += credit;
+    }
+    b.outstandingMinor = b.fundedMinor - b.principalRepaidMinor;
+    out.set(a.id, b);
+  }
+  return out;
+}
+
+/** What the partner can still collect on an advance: the receivable balance plus the part of the fee due not yet paid. */
+export function remainingOwed(b: Pick<AdvanceBalance, "outstandingMinor" | "feeRepaidMinor">, feeDueMinor: number): { principalMinor: number; feeMinor: number } {
+  return { principalMinor: Math.max(0, b.outstandingMinor), feeMinor: Math.max(0, feeDueMinor - Math.max(0, b.feeRepaidMinor)) };
+}
+
+const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/** Reads the ledger rows of these advances (inside a transaction when `db` is one) and returns their balances. Never writes. */
+export async function loadAdvanceBalances(db: Db, advs: readonly AdvanceKey[], since?: Date): Promise<Map<string, AdvanceBalance>> {
+  if (advs.length === 0) return new Map();
+  const exact = advs.flatMap((a) => [advanceRefs.funding(a.id), `release:${a.milestoneId}:partner`, `reversal:${a.milestoneId}:partner`]);
+  const rows = await db.query.ledgerEntries.findMany({
+    columns: { ref: true, account: true, amountMinor: true, direction: true, createdAt: true },
+    where: (t, { inArray, like, or }) => or(inArray(t.ref, exact), ...advs.map((a) => like(t.ref, `%:partner:${likeEscape(a.id)}`))),
+  });
+  return advanceBalances(advs, rows, since);
 }

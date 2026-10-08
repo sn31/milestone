@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { DEFAULT_PRICING } from "../src/policy/pricing.ts";
-import { criteriaCounts, daysUntil, describeOffer, underwrite, DEFAULT_HORIZON_DAYS, type UnderwriteInput } from "../src/policy/advance.ts";
+import { advanceBalances, advanceRefs, criteriaCounts, daysUntil, describeOffer, isAdvanceRef, remainingOwed, underwrite, DEFAULT_HORIZON_DAYS, type AdvanceLedgerRow, type UnderwriteInput } from "../src/policy/advance.ts";
 
 const base = (): UnderwriteInput => ({
   freelancer: { verifiedPasses: 5, verifiedFails: 0, outstandingMinor: 0, limitMinor: 50_000 },
@@ -105,5 +105,68 @@ describe("helpers", () => {
     expect(daysUntil(new Date("2026-10-10T01:00:00Z"), now)).toBe(3);
     expect(daysUntil(new Date("2026-10-01T00:00:00Z"), now)).toBe(0);
     expect(daysUntil(null, now)).toBe(DEFAULT_HORIZON_DAYS);
+  });
+});
+
+describe("advance balances from the ledger", () => {
+  const a = { id: "adv_1", milestoneId: "m1", partnerId: "p" };
+  const b = { id: "adv_2", milestoneId: "m2", partnerId: "p" };
+  const row = (ref: string, account: string, amountMinor: number, direction: "debit" | "credit", createdAt?: Date): AdvanceLedgerRow => ({ ref, account, amountMinor, direction, ...(createdAt ? { createdAt } : {}) });
+  const funding = (x: typeof a, minor: number) => [row(advanceRefs.funding(x.id), "partner:p:receivable", minor, "debit"), row(advanceRefs.funding(x.id), "partner:p:cash", minor, "credit")];
+
+  it("names own and carried repayment refs and attributes them to the right advance", () => {
+    expect(advanceRefs.repayment("m1", a)).toBe("release:m1:partner");
+    expect(advanceRefs.repayment("m3", a)).toBe("release:m3:partner:adv_1");
+    expect(advanceRefs.reversal("m3", a)).toBe("reversal:m3:partner:adv_1");
+    expect(isAdvanceRef("release:m1:partner", a)).toBe(true);
+    expect(isAdvanceRef("release:m3:partner:adv_1", a)).toBe(true);
+    expect(isAdvanceRef("release:m3:partner:adv_2", a)).toBe(false);
+    expect(isAdvanceRef("release:m2:partner", a)).toBe(false);
+    expect(isAdvanceRef("release:m1", a)).toBe(false);
+  });
+
+  it("outstanding = funding debit minus principal credits; repaid counts only what was booked", () => {
+    const week = new Date("2026-10-01T00:00:00Z");
+    const rows = [
+      ...funding(a, 5_000),
+      ...funding(b, 3_000),
+      // m1 released short: 3 000 principal, no fee.
+      row("release:m1:partner", "held:m1", 3_000, "debit"),
+      row("release:m1:partner", "partner:p:receivable", 3_000, "credit", new Date("2026-09-01T00:00:00Z")),
+      // m3 collected the rest of adv_1 (2 000 + 80 fee) this week.
+      row("release:m3:partner:adv_1", "held:m3", 2_080, "debit"),
+      row("release:m3:partner:adv_1", "partner:p:receivable", 2_000, "credit", new Date("2026-10-05T00:00:00Z")),
+      row("release:m3:partner:adv_1", "partner:p:fees", 80, "credit", new Date("2026-10-05T00:00:00Z")),
+      // The freelancer's own posting never counts.
+      row("release:m1", "freelancer:f", 1_000, "credit"),
+    ];
+    const bal = advanceBalances([a, b], rows, week);
+    expect(bal.get("adv_1")).toEqual({ fundedMinor: 5_000, principalRepaidMinor: 5_000, feeRepaidMinor: 80, outstandingMinor: 0, repaidSinceMinor: 2_080 });
+    expect(bal.get("adv_2")).toEqual({ fundedMinor: 3_000, principalRepaidMinor: 0, feeRepaidMinor: 0, outstandingMinor: 3_000, repaidSinceMinor: 0 });
+  });
+
+  it("a reversal re-opens the balance", () => {
+    const rows = [
+      ...funding(a, 5_000),
+      row("release:m1:partner", "partner:p:receivable", 5_000, "credit"),
+      row("reversal:m1:partner", "partner:p:receivable", 5_000, "debit"),
+    ];
+    expect(advanceBalances([a], rows).get("adv_1")?.outstandingMinor).toBe(5_000);
+  });
+
+  it("remaining owed adds the unpaid fee and never goes negative", () => {
+    expect(remainingOwed({ outstandingMinor: 2_000, feeRepaidMinor: 0 }, 80)).toEqual({ principalMinor: 2_000, feeMinor: 80 });
+    expect(remainingOwed({ outstandingMinor: 0, feeRepaidMinor: 50 }, 80)).toEqual({ principalMinor: 0, feeMinor: 30 });
+    expect(remainingOwed({ outstandingMinor: -5, feeRepaidMinor: 100 }, 80)).toEqual({ principalMinor: 0, feeMinor: 0 });
+  });
+
+  it("property: funded minus repaid always equals outstanding", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 1_000_000 }), fc.array(fc.integer({ min: 1, max: 100_000 }), { maxLength: 5 }), (funded, pays) => {
+        const rows = [...funding(a, funded), ...pays.map((p, i) => row(`release:m${i + 10}:partner:adv_1`, "partner:p:receivable", p, "credit"))];
+        const x = advanceBalances([a], rows).get("adv_1")!;
+        return x.outstandingMinor === funded - pays.reduce((s, p) => s + p, 0) && x.principalRepaidMinor + x.outstandingMinor === x.fundedMinor;
+      }),
+    );
   });
 });

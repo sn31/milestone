@@ -22,15 +22,20 @@ export interface LenderRow {
   feeBpsPerDay: number;
   status: "offered" | "funded" | "repaid" | "shortfall";
   daysOutstanding: number | null;
+  /** From the ledger: the partner receivable's balance for this advance (funded principal minus principal repaid). */
+  outstandingMinor: number;
+  /** From the ledger: principal and fees actually credited to the partner for this advance. */
+  repaidMinor: number;
+  /** The part of repaidMinor booked in the last seven days. */
+  repaidThisWeekMinor: number;
   pFail: number | null;
+  /** pFail x outstandingMinor; null without a pFail. */
   expectedLossMinor: number | null;
   repaymentStatus: string;
   createdAt: string;
   fundedAt: string | null;
   repaidAt: string | null;
 }
-
-const WEEK_MS = 7 * 86_400_000;
 
 export interface BookSummary {
   currency: string;
@@ -45,23 +50,22 @@ export interface BookSummary {
   otherCurrencies: string[];
 }
 
-/** Pure. Totals for the book's main currency (the one with the most advances); funded advances are outstanding. */
-export function summarize(rows: LenderRow[], now: Date): BookSummary {
+/** Pure. Totals for the book's main currency (the one with the most advances), from the rows' ledger figures. */
+export function summarize(rows: LenderRow[], _now?: Date): BookSummary {
   const byCurrency = new Map<string, number>();
   for (const r of rows) byCurrency.set(r.currency, (byCurrency.get(r.currency) ?? 0) + 1);
   const currency = [...byCurrency.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
   const mine = rows.filter((r) => r.currency === currency);
-  const open = mine.filter((r) => r.status === "funded");
-  const outstandingMinor = open.reduce((s, r) => s + r.principalMinor, 0);
+  const open = mine.filter((r) => r.outstandingMinor > 0);
+  const outstandingMinor = open.reduce((s, r) => s + r.outstandingMinor, 0);
   const byClient = new Map<string, { name: string; minor: number }>();
   for (const r of open) {
     const c = byClient.get(r.clientId) ?? { name: r.client, minor: 0 };
-    c.minor += r.principalMinor;
+    c.minor += r.outstandingMinor;
     byClient.set(r.clientId, c);
   }
   const top = [...byClient.values()].sort((a, b) => b.minor - a.minor)[0];
-  const weekAgo = now.getTime() - WEEK_MS;
-  const repaid = mine.filter((r) => r.status === "repaid" && r.repaidAt && new Date(r.repaidAt).getTime() >= weekAgo);
+  const repaid = mine.filter((r) => r.repaidThisWeekMinor > 0);
   return {
     currency,
     outstandingMinor,
@@ -70,7 +74,7 @@ export function summarize(rows: LenderRow[], now: Date): BookSummary {
     expectedLossMinor: open.reduce((s, r) => s + (r.expectedLossMinor ?? 0), 0),
     topClient: top && outstandingMinor > 0 ? { name: top.name, shareOfOutstanding: top.minor / outstandingMinor } : null,
     clientCount: byClient.size,
-    repaidThisWeekMinor: repaid.reduce((s, r) => s + r.principalMinor + r.feeMinor, 0),
+    repaidThisWeekMinor: repaid.reduce((s, r) => s + r.repaidThisWeekMinor, 0),
     repaidThisWeekCount: repaid.length,
     otherCurrencies: [...byCurrency.keys()].filter((c) => c !== currency),
   };
@@ -123,6 +127,8 @@ export function LenderBook({ rows, now }: { rows: LenderRow[]; now: string }) {
       { field: "principalMinor", headerName: "Principal", width: 115, type: "rightAligned", valueFormatter: moneyFmt, filter: "agNumberColumnFilter" },
       { field: "feeMinor", headerName: "Fee", width: 95, type: "rightAligned", valueFormatter: moneyFmt, filter: "agNumberColumnFilter" },
       { field: "status", headerName: "Status", width: 110, cellRenderer: StatusCell },
+      { field: "outstandingMinor", headerName: "Outstanding", width: 125, type: "rightAligned", valueFormatter: moneyFmt, filter: "agNumberColumnFilter" },
+      { field: "repaidMinor", headerName: "Repaid", width: 110, type: "rightAligned", valueFormatter: moneyFmt, filter: "agNumberColumnFilter" },
       { field: "daysOutstanding", headerName: "Days out", width: 100, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: (p) => (p.value === null || p.value === undefined ? "" : String(p.value)) },
       { field: "pFail", headerName: "pFail", width: 90, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: (p) => (typeof p.value === "number" ? `${(p.value * 100).toFixed(1)}%` : "") },
       { field: "expectedLossMinor", headerName: "Expected loss", width: 125, type: "rightAligned", valueFormatter: moneyFmt, filter: "agNumberColumnFilter" },
@@ -137,7 +143,7 @@ export function LenderBook({ rows, now }: { rows: LenderRow[]; now: string }) {
         <Card
           label="Outstanding principal"
           value={money(s.outstandingMinor)}
-          note={`${s.openCount} funded advance${s.openCount === 1 ? "" : "s"}${s.pendingPayoutMinor > 0 ? `, ${money(s.pendingPayoutMinor)} awaiting payout` : ""}`}
+          note={`${s.openCount} open advance${s.openCount === 1 ? "" : "s"}${s.pendingPayoutMinor > 0 ? `, ${money(s.pendingPayoutMinor)} awaiting payout` : ""}`}
         />
         <Card
           label="Expected loss"

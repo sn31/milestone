@@ -14,7 +14,11 @@ const noStore = { "Cache-Control": "no-store" };
 export async function POST(req: Request) {
   const blocked = notSimulated();
   if (blocked) return blocked;
-  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  // JSON from scripts, or a plain form post from the /ops "Simulate payout failure" button.
+  const form = /^(application\/x-www-form-urlencoded|multipart\/form-data)/i.test(req.headers.get("content-type") ?? "");
+  const body = (form
+    ? await req.formData().then((f) => Object.fromEntries(f.entries())).catch(() => null)
+    : await req.json().catch(() => null)) as Record<string, unknown> | null;
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
   const party = str(body?.party) ?? "freelancer";
   const senderItemId =

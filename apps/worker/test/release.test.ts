@@ -3,6 +3,7 @@ import { PayPalError, applyReviewWindow } from "@milestone/money";
 import type { PolicyDecision } from "@milestone/core";
 import {
   advanceRepayment,
+  allocateRepayment,
   canHold,
   clientOutcome,
   decisionDeliveryId,
@@ -400,5 +401,33 @@ describe("final PayPal failures (R3)", () => {
     expect(paypalFailure(new Error("socket hang up"), true)).toBe("last_attempt");
     expect(paypalFailure(new PayPalError(503, {}), true)).toBe("last_attempt");
     expect(paypalFailure(new PayPalError(422, {}), true)).toBe("rejected");
+  });
+});
+
+describe("allocateRepayment", () => {
+  it("pays each advance's principal, then its fee, then the next advance", () => {
+    const dues = [{ principalMinor: 4_000, feeMinor: 100 }, { principalMinor: 2_000, feeMinor: 50 }];
+    expect(allocateRepayment(10_000, dues)).toEqual([{ principalMinor: 4_000, feeMinor: 100 }, { principalMinor: 2_000, feeMinor: 50 }]);
+    expect(allocateRepayment(4_050, dues)).toEqual([{ principalMinor: 4_000, feeMinor: 50 }, { principalMinor: 0, feeMinor: 0 }]);
+    expect(allocateRepayment(5_000, dues)).toEqual([{ principalMinor: 4_000, feeMinor: 100 }, { principalMinor: 900, feeMinor: 0 }]);
+    expect(allocateRepayment(0, dues)).toEqual([{ principalMinor: 0, feeMinor: 0 }, { principalMinor: 0, feeMinor: 0 }]);
+  });
+  it("never allocates more than the amount or than is owed", () => {
+    for (const amount of [0, 1, 99, 4_100, 6_150, 99_999]) {
+      const dues = [{ principalMinor: 4_000, feeMinor: 100 }, { principalMinor: 2_000, feeMinor: 50 }];
+      const total = allocateRepayment(amount, dues).reduce((s, x) => s + x.principalMinor + x.feeMinor, 0);
+      expect(total).toBe(Math.min(amount, 6_150));
+    }
+  });
+});
+
+describe("parseClaim advances", () => {
+  const raw = { deliveryId: "d", action: "release", releaseMinor: 1, refundMinor: 0, currency: "USD", captureId: "c", freelancerEmail: "f", shares: { partnerShareMinor: 1, freelancerShareMinor: 0 } };
+  it("keeps the advances a claim repays and drops malformed entries", () => {
+    const c = parseClaim({ claim: { ...raw, advances: [{ advanceId: "a1", milestoneId: "m1", principalMinor: 10, feeMinor: 1 }, { advanceId: 5 }] } });
+    expect(c?.advances).toEqual([{ advanceId: "a1", milestoneId: "m1", principalMinor: 10, feeMinor: 1 }]);
+  });
+  it("leaves advances undefined on a claim written before carry-over", () => {
+    expect(parseClaim({ claim: raw })?.advances).toBeUndefined();
   });
 });

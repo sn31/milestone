@@ -1,5 +1,5 @@
 import type { Job } from "pg-boss";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   PAYPAL_EVENTS,
   TRANSITIONS,
@@ -18,12 +18,13 @@ import {
   webhookEvents,
   type Db,
 } from "@milestone/core";
-import { issuePaidReceipt } from "@milestone/money";
+import { advanceRefs, issuePaidReceipt } from "@milestone/money";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { paypal } from "../lib/paypal.ts";
 import {
   advanceRepayment,
+  allocateRepayment,
   flagNeedsOperator,
   isFlaggedForOperator,
   itemOutcomes,
@@ -31,6 +32,7 @@ import {
   parseClaim,
   parseDecision,
   payoutShares,
+  type ClaimAdvance,
   type ItemOutcome,
   type ItemReversal,
   type OpRow,
@@ -431,8 +433,8 @@ async function settleItem(
     return {};
   }
 
-  // "repaid" too: the partner's item may settle before the freelancer's, and the ledger still needs the advance.
-  const advance = await tx.query.advances.findFirst({ where: (a, { and, eq, inArray }) => and(eq(a.milestoneId, milestoneId), inArray(a.status, ["funded", "repaid"])) });
+  // "repaid" / "shortfall" too: the partner's item may settle before the freelancer's, and the ledger still needs the advance.
+  const advance = await tx.query.advances.findFirst({ where: (a, { and, eq, inArray }) => and(eq(a.milestoneId, milestoneId), inArray(a.status, ["funded", "repaid", "shortfall"])) });
   const owed = advance ? advanceRepayment(advance, m.decidedAt) : undefined;
   const claim = parseClaim(op.request) ?? legacyClaim(m, contract, owed ? owed.principalMinor + owed.feeMinor : 0);
   if (!claim) throw new Error(`payout op ${op.key} has no claim and milestone ${milestoneId} no usable decision`);
@@ -472,24 +474,13 @@ async function settleItem(
   // Money moved: book exactly what PayPal paid for this item, once.
   const booked = amountMinor ?? (item.party === "partner" ? claim.shares.partnerShareMinor : claim.shares.freelancerShareMinor);
   const ref = ledgerRef.release(milestoneId, item.party);
-  if (booked > 0 && !(await hasLedgerRef(tx, ref))) {
-    if (item.party === "partner") {
-      if (advance && owed) {
-        await postTransaction(t, {
-          ref,
-          currency: contract.currency,
-          entries: releaseEntries({ milestoneId, freelancerId: contract.freelancerId, amountMinor: booked, advance: { partnerId: advance.partnerId, principalMinor: owed.principalMinor, feeMinor: owed.feeMinor } }),
-        });
-      } else {
-        await audit(t, { ...base, event: "ledger.skipped", detail: { ...detail, reason: "partner item paid but the milestone has no advance", amountMinor: booked } });
-      }
-    } else {
-      await postTransaction(t, { ref, currency: contract.currency, entries: releaseEntries({ milestoneId, freelancerId: contract.freelancerId, amountMinor: booked }) });
-    }
-  }
-  if (item.party === "partner" && advance?.status === "funded") {
-    const done = await tx.update(advances).set({ status: "repaid", repaidAt: new Date() }).where(and(eq(advances.id, advance.id), eq(advances.status, "funded"))).returning({ id: advances.id });
-    if (done.length > 0) await audit(t, { ...base, event: "advance.repaid", detail: { advanceId: advance.id, eventId, payoutItemId: item.payoutItemId ?? null, amountMinor: booked, ...owed } });
+  if (item.party === "partner") {
+    // The claim names the advances this payment repays (the milestone's own, then balances carried from earlier ones).
+    const dues: ClaimAdvance[] | undefined =
+      claim.advances ?? (advance && owed ? [{ advanceId: advance.id, milestoneId: advance.milestoneId, principalMinor: owed.principalMinor, feeMinor: owed.feeMinor }] : undefined);
+    if (booked > 0) await bookPartnerRepayment(tx, m, contract, dues ?? [], booked, { ...detail, payoutItemId: item.payoutItemId ?? null });
+  } else if (booked > 0 && !(await hasLedgerRef(tx, ref))) {
+    await postTransaction(t, { ref, currency: contract.currency, entries: releaseEntries({ milestoneId, freelancerId: contract.freelancerId, amountMinor: booked }) });
   }
   if (opStatus === "failed") {
     // The other item already failed: the milestone is held; refresh the operator's picture with this payment.
@@ -501,6 +492,56 @@ async function settleItem(
   // A partial (or any release with a refunded share) is final only once the refund half succeeded too.
   const refundOp = claim.refundMinor > 0 ? await lockOp(tx, "refund", milestoneId) : undefined;
   return finalise(tx, m, contract, claim, { payout: opStatus, refund: refundOp?.status, items }, detail);
+}
+
+/**
+ * Books a succeeded partner item: splits what PayPal paid across the claimed advances in order (allocateRepayment, the
+ * same split the release job claimed), posts one balanced transaction per advance (held -> partner receivable for the
+ * principal, -> partner fees for the fee) under its own ref, each once, and sets each advance "repaid" when it got all
+ * it owed, else "shortfall" with the remaining balance in the audit detail (the next release collects it).
+ */
+async function bookPartnerRepayment(tx: Tx, m: MilestoneRow, contract: ContractRow, dues: readonly ClaimAdvance[], booked: number, detail: Record<string, unknown>): Promise<void> {
+  const t = tx as unknown as Db;
+  const base = { actor: "paypal", milestoneId: m.id, contractId: m.contractId } as const;
+  if (dues.length === 0) {
+    await audit(t, { ...base, event: "ledger.skipped", detail: { ...detail, reason: "partner item paid but the claim names no advance", amountMinor: booked } });
+    return;
+  }
+  const rows = await tx.select().from(advances).where(inArray(advances.id, dues.map((d) => d.advanceId)));
+  const allocation = allocateRepayment(booked, dues);
+  let allocated = 0;
+  for (const [i, d] of dues.entries()) {
+    const a = rows.find((r) => r.id === d.advanceId);
+    const x = allocation[i]!;
+    const paidMinor = x.principalMinor + x.feeMinor;
+    allocated += paidMinor;
+    if (!a) {
+      await audit(t, { ...base, event: "ledger.skipped", detail: { ...detail, reason: "claimed advance not found", advanceId: d.advanceId, amountMinor: paidMinor } });
+      continue;
+    }
+    const ref = advanceRefs.repayment(m.id, a);
+    if (paidMinor > 0 && !(await hasLedgerRef(tx, ref))) {
+      await postTransaction(t, {
+        ref,
+        currency: contract.currency,
+        entries: releaseEntries({ milestoneId: m.id, freelancerId: contract.freelancerId, amountMinor: paidMinor, advance: { partnerId: a.partnerId, principalMinor: x.principalMinor, feeMinor: x.feeMinor } }),
+      });
+    }
+    const owedMinor = d.principalMinor + d.feeMinor;
+    const remainingMinor = Math.max(0, owedMinor - paidMinor);
+    const info = { advanceId: a.id, advanceMilestoneId: a.milestoneId, carried: a.milestoneId !== m.id, partnerId: a.partnerId, owedMinor, paidMinor, principalPaidMinor: x.principalMinor, feePaidMinor: x.feeMinor, remainingMinor, ...detail };
+    if (remainingMinor === 0) {
+      const done = await tx.update(advances).set({ status: "repaid", repaidAt: new Date() }).where(and(eq(advances.id, a.id), inArray(advances.status, ["funded", "shortfall"]))).returning({ id: advances.id });
+      if (done.length > 0) await audit(t, { ...base, event: "advance.repaid", detail: info });
+    } else {
+      const done = await tx.update(advances).set({ status: "shortfall" }).where(and(eq(advances.id, a.id), inArray(advances.status, ["funded", "shortfall"]))).returning({ id: advances.id });
+      if (done.length > 0) await audit(t, { ...base, event: "advance.shortfall", detail: info });
+    }
+  }
+  if (booked > allocated) {
+    // More than every claimed balance: left in the milestone's held account for an operator, never credited to anyone.
+    await audit(t, { ...base, event: "ledger.partner_excess", detail: { ...detail, amountMinor: booked, allocatedMinor: allocated, excessMinor: booked - allocated } });
+  }
 }
 
 /**
@@ -611,6 +652,24 @@ async function reverseItem(
     if (posted.length > 0) {
       await postTransaction(t, { ref: reversalRef, currency: contract.currency, entries: reverseEntries(posted) });
       reversedMinor = posted.filter((r) => r.direction === "debit").reduce((s, r) => s + r.amountMinor, 0);
+    }
+  }
+  if (item.party === "partner") {
+    // Repayments of balances carried from earlier milestones were booked under their own refs: mirror them too. The
+    // advances keep their status: the money went back to the platform, not to the freelancer, so an operator re-sends it.
+    for (const d of claim.advances ?? []) {
+      if (d.milestoneId === milestoneId) continue;
+      const a = { id: d.advanceId, milestoneId: d.milestoneId };
+      const rRef = advanceRefs.repayment(milestoneId, a);
+      const vRef = advanceRefs.reversal(milestoneId, a);
+      if (await hasLedgerRef(tx, vRef)) continue;
+      const posted = await tx
+        .select({ account: ledgerEntries.account, amountMinor: ledgerEntries.amountMinor, direction: ledgerEntries.direction })
+        .from(ledgerEntries)
+        .where(eq(ledgerEntries.ref, rRef));
+      if (posted.length === 0) continue;
+      await postTransaction(t, { ref: vRef, currency: contract.currency, entries: reverseEntries(posted) });
+      reversedMinor += posted.filter((r) => r.direction === "debit").reduce((s, r) => s + r.amountMinor, 0);
     }
   }
   await audit(t, { ...base, event: "paypal.payout_reversed", detail: { ...detail, reversedMinor, opStatus } });
