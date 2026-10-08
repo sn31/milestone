@@ -1,5 +1,5 @@
 import type { Job } from "pg-boss";
-import type { JobData } from "../handlers.js";
+import type { JobData } from "../handlers.ts";
 
 /** Week 4: price, explain, fundAdvance, open the receivable */
 export async function advance(job: Job<JobData>): Promise<void> {

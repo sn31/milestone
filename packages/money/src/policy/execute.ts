@@ -3,8 +3,8 @@
  * Every call takes a `requestId` that the caller has already persisted in `paypal_ops`,
  * so a retried job replays the same PayPal-Request-Id and can never pay twice.
  */
-import { captureOrder, createPayout, refundCapture } from "../paypal/money.js";
-import type { PayPalClient } from "../paypal/client.js";
+import { captureOrder, createPayout, refundCapture } from "../paypal/money.ts";
+import type { PayPalClient } from "../paypal/client.ts";
 import type { PolicyDecision } from "@milestone/core";
 
 export interface MoneyContext {

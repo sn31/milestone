@@ -4,10 +4,10 @@ import type { Job } from "pg-boss";
 import { audit, deliveries, enqueue, milestones, transition, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
 import { decide } from "@milestone/money";
 import { detectInjection, enforce, formatVerdictComment, judge, overall, postVerdictComment, runDeterministicStage, type DeterministicOutput } from "@milestone/verify";
-import type { JobData } from "../handlers.js";
-import { getDb } from "../lib/db.js";
-import { createEvidenceReader, git } from "../lib/evidence.js";
-import { isFlaggedForOperator } from "./release.js";
+import type { JobData } from "../handlers.ts";
+import { getDb } from "../lib/db.ts";
+import { createEvidenceReader, git } from "../lib/evidence.ts";
+import { isFlaggedForOperator } from "./release.ts";
 
 /** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
 export type StoredDecision = PolicyDecision & { deliveryId: string };

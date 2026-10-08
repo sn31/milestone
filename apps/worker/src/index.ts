@@ -1,6 +1,6 @@
 import type { Job } from "pg-boss";
 import { JobName, jobs } from "@milestone/core";
-import { handlers, type JobData } from "./handlers.js";
+import { handlers, type JobData } from "./handlers.ts";
 
 try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
 

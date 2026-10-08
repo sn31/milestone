@@ -62,7 +62,7 @@ vi.mock("@/lib/paypal", async () => {
 });
 vi.mock("@/lib/session", () => ({ getActor: async () => fake.state.actor }));
 vi.mock("@/lib/db", async () => {
-  const { getDb } = await import("../src/lib/db.js");
+  const { getDb } = await import("../src/lib/db.ts");
   return { getDb };
 });
 vi.mock("@milestone/core", async (orig) => ({
@@ -89,9 +89,9 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
   const core = await import("@milestone/core");
   const { and, eq, inArray, like, or, sql } = await import("drizzle-orm");
   const { contracts, milestones, users, criteria, deliveries, webhookEvents, paypalOps, ledgerEntries, auditLog, accounts, postTransaction } = core;
-  const { getDb } = await import("../src/lib/db.js");
-  const { release } = await import("../src/jobs/release.js");
-  const { settle } = await import("../src/jobs/settle.js");
+  const { getDb } = await import("../src/lib/db.ts");
+  const { release } = await import("../src/jobs/release.ts");
+  const { settle } = await import("../src/jobs/settle.ts");
   // The review route's real POST handler. Kept out of the worker's typecheck (tsconfig includes src only).
   const routePath = new URL("../../web/src/app/api/milestones/[id]/review/route.ts", import.meta.url).pathname;
   const route = (await import(/* @vite-ignore */ routePath)) as { POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response> };

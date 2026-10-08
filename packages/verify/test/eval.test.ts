@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { VerdictOutput, type CriterionSpec, type EvidenceSummary, type PolicyAction, type VerdictResult } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection } from "../src/injection.js";
-import { enforce, overall } from "../src/verifier.js";
+import { detectInjection } from "../src/injection.ts";
+import { enforce, overall } from "../src/verifier.ts";
 
 interface EvalCase {
   id: string;

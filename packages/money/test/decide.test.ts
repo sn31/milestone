@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { applyReviewWindow, decide } from "../src/policy/decide.js";
+import { applyReviewWindow, decide } from "../src/policy/decide.ts";
 import type { CriterionSpec, CriterionVerdict } from "@milestone/core";
 
 const spec = (id: string, required = true, kind: CriterionSpec["kind"] = "test"): CriterionSpec => ({

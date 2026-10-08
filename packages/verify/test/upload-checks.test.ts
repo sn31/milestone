@@ -1,8 +1,8 @@
 import { crc32, deflateRawSync, deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
-import { countWords, docxText, jpegSize, patternMatcher, pdfPageCount, pdfText, pngSize, runUploadStage, sniffFormat } from "../src/upload-checks.js";
-import { toolResultContent } from "../src/llm.js";
+import { countWords, docxText, jpegSize, patternMatcher, pdfPageCount, pdfText, pngSize, runUploadStage, sniffFormat } from "../src/upload-checks.ts";
+import { toolResultContent } from "../src/llm.ts";
 
 // ---------- fixtures, generated ----------
 

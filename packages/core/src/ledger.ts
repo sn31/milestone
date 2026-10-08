@@ -1,7 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import type { Db } from "./db.js";
-import { ledgerEntries } from "./schema.js";
+import type { Db } from "./db.ts";
+import { ledgerEntries } from "./schema.ts";
 
 export type Direction = "debit" | "credit";
 export interface Entry { account: string; amountMinor: number; direction: Direction }

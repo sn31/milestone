@@ -1,4 +1,4 @@
-import type { PayPalClient } from "./client.js";
+import type { PayPalClient } from "./client.ts";
 
 export interface WebhookEvent {
   id: string;

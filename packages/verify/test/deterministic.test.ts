@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
-import { findTampering, manifestChanges, parseNameStatus, removeCommittedDependencies, runDeterministicStage, TAMPER_EVIDENCE_ID, type DeterministicInput } from "../src/deterministic.js";
-import { enforce, overall } from "../src/verifier.js";
+import { findTampering, manifestChanges, parseNameStatus, removeCommittedDependencies, runDeterministicStage, TAMPER_EVIDENCE_ID, type DeterministicInput } from "../src/deterministic.ts";
+import { enforce, overall } from "../src/verifier.ts";
 
 const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}) => JSON.stringify({ name: "x", version: "1.0.0", ...extra, scripts }, null, 2);
 

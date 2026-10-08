@@ -1,7 +1,7 @@
 import { CriterionStatus, VerdictOutput, type CriterionSpec, type EvidenceSummary, type VerdictOutput as VerdictT, type VerdictResult } from "@milestone/core";
 import { z } from "zod";
-import { detectInjection } from "./injection.js";
-import { generateJson, promptHash, wrapUntrusted, type Tool, type ToolOutput } from "./llm.js";
+import { detectInjection } from "./injection.ts";
+import { generateJson, promptHash, wrapUntrusted, type Tool, type ToolOutput } from "./llm.ts";
 
 const SYSTEM = `You are the judgment stage of a delivery verifier. Deterministic checks (tests, builds, files, and for file deliveries format, size, dimensions, page counts and required strings) have already run; their results are evidence you must respect, not re-decide.
 For every criterion return pass, fail or unclear with a confidence from 0 to 1, the evidence ids you relied on, and one or two sentences of rationale.

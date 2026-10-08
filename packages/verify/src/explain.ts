@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { generateJson, wrapUntrusted } from "./llm.js";
+import { generateJson, wrapUntrusted } from "./llm.ts";
 
 /** The model only explains numbers it is handed (advance offers, policy decisions); it never computes them. */
 export async function explain(kind: "advance_offer" | "policy_decision", numbers: Record<string, unknown>, audience: "freelancer" | "client"): Promise<string> {

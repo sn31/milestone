@@ -1,8 +1,8 @@
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import type { Db } from "./db.js";
-import { auditLog, milestones } from "./schema.js";
-import type { MilestoneStatus } from "./schemas.js";
+import type { Db } from "./db.ts";
+import { auditLog, milestones } from "./schema.ts";
+import type { MilestoneStatus } from "./schemas.ts";
 
 /** Legal transitions from the Implementation tab's state diagram. */
 export const TRANSITIONS: Record<MilestoneStatus, readonly MilestoneStatus[]> = {

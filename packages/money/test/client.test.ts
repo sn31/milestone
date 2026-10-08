@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PayPalClient, isMoneyPath } from "../src/paypal/client.js";
+import { PayPalClient, isMoneyPath } from "../src/paypal/client.ts";
 import { toPayPalValue, fromPayPalValue } from "@milestone/core";
 
 describe("PayPalClient", () => {

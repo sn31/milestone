@@ -1,5 +1,5 @@
 import { ContractSpec, DETERMINISTIC_KINDS, UploadCriterionSpec, type ContractSpec as ContractSpecT } from "@milestone/core";
-import { generateJson, promptHash, wrapUntrusted } from "./llm.js";
+import { generateJson, promptHash, wrapUntrusted } from "./llm.ts";
 
 const SYSTEM = `You turn a plain-English freelance scope into a contract of milestones with checkable acceptance criteria.
 Rules:

@@ -22,7 +22,7 @@ try { process.loadEnvFile(new URL("../../../../.env", import.meta.url).pathname)
 
 describe("review window", () => {
   it("is clamped to at least 30 seconds, so 0 cannot skip review", async () => {
-    const { reviewWindowSeconds } = await import("../jobs/verify.js");
+    const { reviewWindowSeconds } = await import("../jobs/verify.ts");
     expect(reviewWindowSeconds(172_800, "0")).toBe(30);
     expect(reviewWindowSeconds(172_800, "-5")).toBe(30);
     expect(reviewWindowSeconds(172_800, "90")).toBe(90);
@@ -34,8 +34,8 @@ describe("review window", () => {
 
 describe.skipIf(!run)("verify job end to end", async () => {
   const { auditLog, contracts, milestones, criteria, deliveries } = await import("@milestone/core");
-  const { getDb } = await import("./db.js");
-  const { verify } = await import("../jobs/verify.js");
+  const { getDb } = await import("./db.ts");
+  const { verify } = await import("../jobs/verify.ts");
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_${tag}`;
   let repo: string;

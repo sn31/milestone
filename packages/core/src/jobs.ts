@@ -1,6 +1,6 @@
 /** Jobs live in Postgres (pg-boss): no second service, delayed jobs for the review window, retries with backoff. */
 import { PgBoss, type SendOptions } from "pg-boss";
-import { JobName } from "./schemas.js";
+import { JobName } from "./schemas.ts";
 
 let boss: PgBoss | null = null;
 

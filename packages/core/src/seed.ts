@@ -2,8 +2,8 @@
 import { sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb } from "./db.js";
-import { auditLog, contracts, criteria, milestones, users } from "./schema.js";
+import { createDb } from "./db.ts";
+import { auditLog, contracts, criteria, milestones, users } from "./schema.ts";
 
 try {
   process.loadEnvFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env"));

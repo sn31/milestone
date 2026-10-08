@@ -24,7 +24,7 @@ import {
   staleReason,
   type OpView,
   type ReleaseClaim,
-} from "../src/jobs/release.js";
+} from "../src/jobs/release.ts";
 
 const release: PolicyDecision = { action: "release", amountMinor: 50_000, ruleIds: ["P6"], reason: "all passed" };
 const partial: PolicyDecision = { action: "partial", amountMinor: 30_000, ruleIds: ["P5"], reason: "2 of 3" };

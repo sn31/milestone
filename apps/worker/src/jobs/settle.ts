@@ -19,9 +19,9 @@ import {
   type Db,
 } from "@milestone/core";
 import { issuePaidReceipt } from "@milestone/money";
-import type { JobData } from "../handlers.js";
-import { getDb } from "../lib/db.js";
-import { paypal } from "../lib/paypal.js";
+import type { JobData } from "../handlers.ts";
+import { getDb } from "../lib/db.ts";
+import { paypal } from "../lib/paypal.ts";
 import {
   advanceRepayment,
   flagNeedsOperator,
@@ -36,9 +36,9 @@ import {
   type OpRow,
   type PayoutParty,
   type ReleaseClaim,
-} from "./release.js";
+} from "./release.ts";
 
-export { canHold, type PayoutParty } from "./release.js";
+export { canHold, type PayoutParty } from "./release.ts";
 
 // ---------- Pure helpers (unit-tested in apps/worker/test) ----------
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { DEFAULT_PRICING, priceAdvance } from "../src/policy/pricing.js";
+import { DEFAULT_PRICING, priceAdvance } from "../src/policy/pricing.ts";
 
 describe("priceAdvance", () => {
   it("refuses before the first verified pass", () => {

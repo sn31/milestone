@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertBalanced, releaseEntries, signed } from "../src/ledger.js";
+import { assertBalanced, releaseEntries, signed } from "../src/ledger.ts";
 
 describe("ledger invariants", () => {
   it("rejects an unbalanced transaction", () => {

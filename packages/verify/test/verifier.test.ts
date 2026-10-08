@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { enforce, overall } from "../src/verifier.js";
-import { detectInjection } from "../src/injection.js";
-import { validateContract } from "../src/compiler.js";
+import { enforce, overall } from "../src/verifier.ts";
+import { detectInjection } from "../src/injection.ts";
+import { validateContract } from "../src/compiler.ts";
 import type { CriterionSpec, EvidenceSummary } from "@milestone/core";
 
 const specs: CriterionSpec[] = [

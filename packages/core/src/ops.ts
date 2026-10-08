@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import type { Db } from "./db.js";
-import { paypalOps, webhookEvents } from "./schema.js";
+import type { Db } from "./db.ts";
+import { paypalOps, webhookEvents } from "./schema.ts";
 
 /**
  * Idempotency: one paypal_ops row per (kind, key). The row's request_id becomes PayPal-Request-Id,

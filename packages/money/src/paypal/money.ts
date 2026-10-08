@@ -3,8 +3,8 @@
  * Every function requires a requestId that was persisted first.
  */
 import { toPayPalValue } from "@milestone/core";
-import type { PayPalClient } from "./client.js";
-import type { Order } from "./orders.js";
+import type { PayPalClient } from "./client.ts";
+import type { Order } from "./orders.ts";
 
 export interface Capture {
   id: string;

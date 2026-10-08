@@ -53,9 +53,9 @@ const at = (ms: number) => () => new Date(T0.getTime() + ms);
 
 describe.skipIf(!run)("release and settle end to end", async () => {
   const { advances, contracts, milestones, users, criteria, deliveries, webhookEvents } = await import("@milestone/core");
-  const { getDb } = await import("../src/lib/db.js");
-  const { release } = await import("../src/jobs/release.js");
-  const { settle } = await import("../src/jobs/settle.js");
+  const { getDb } = await import("../src/lib/db.ts");
+  const { release } = await import("../src/jobs/release.ts");
+  const { settle } = await import("../src/jobs/settle.ts");
   const db = getDb();
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_rs_${tag}`;

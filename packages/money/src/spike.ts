@@ -8,9 +8,9 @@
 import { createInterface } from "node:readline/promises";
 import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { PayPalClient } from "./paypal/client.js";
-import { approveLink, createOrder, getOrder } from "./paypal/orders.js";
-import { captureFunding, executeRelease, type MoneyContext } from "./policy/execute.js";
+import { PayPalClient } from "./paypal/client.ts";
+import { approveLink, createOrder, getOrder } from "./paypal/orders.ts";
+import { captureFunding, executeRelease, type MoneyContext } from "./policy/execute.ts";
 
 try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
 

@@ -16,7 +16,7 @@ import {
   receiptInvoiceNumber,
   reverseEntries,
   settleTarget,
-} from "../src/jobs/settle.js";
+} from "../src/jobs/settle.ts";
 
 const mid = "3f0c2a5e-8f6b-4d1e-9a7c-0b1d2e3f4a5b";
 

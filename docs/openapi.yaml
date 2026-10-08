@@ -1,0 +1,425 @@
+openapi: 3.1.0
+info:
+  title: Milestone API
+  version: 0.1.0
+  summary: HTTP routes of apps/web
+  description: |
+    Routes under apps/web/src/app/api. Authentication is a role cookie, `milestone_actor`, set by the role switcher
+    in the UI. Values: usr_client, usr_freelancer, usr_partner. A missing or unknown cookie acts as the client.
+    This is a hackathon stand-in for real sign-in. The two webhook routes do not use the cookie; they verify a
+    signature instead.
+
+    Not implemented as HTTP routes yet: delivering work by manual or upload request, and advances. Deliveries
+    are created by the GitHub webhook. The `advance` job handler is planned.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:3000
+    description: Local development
+security:
+  - roleCookie: []
+tags:
+  - name: contracts
+  - name: milestones
+  - name: paypal
+  - name: webhooks
+  - name: ops
+paths:
+  /api/contracts:
+    post:
+      tags: [contracts]
+      operationId: createContract
+      summary: Compile a scope into a draft contract
+      description: |
+        Form post from the New contract page. With ANTHROPIC_API_KEY set, Claude compiles the scope; otherwise a
+        three-milestone demo contract is built. Responds with a 303 redirect to the contract page.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/CreateContractForm"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateContractForm"
+      responses:
+        "303":
+          description: Redirect to /contracts/{id}
+          headers:
+            Location: { schema: { type: string } }
+        "502":
+          description: The compiler failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/contracts/{id}/approve:
+    post:
+      tags: [contracts]
+      operationId: approveContract
+      summary: Approve a contract as the client or the freelancer
+      description: Records the caller's approval time. When both have approved, the contract becomes active.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: ctr_demo }
+      responses:
+        "303":
+          description: Redirect to /contracts/{id}
+        "403":
+          description: Only the client or freelancer can approve
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: Contract not found
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /api/milestones/{id}/order:
+    post:
+      tags: [milestones]
+      operationId: createFundingOrder
+      summary: Create or replay the PayPal order that funds a milestone
+      description: Client only. The contract must be active and the milestone in draft. Repeated calls return the same order.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
+      responses:
+        "200":
+          description: Order created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orderId]
+                properties:
+                  orderId: { type: string }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/milestones/{id}/capture:
+    post:
+      tags: [milestones]
+      operationId: captureFunding
+      summary: Capture the approved order and fund the milestone
+      description: Client only. Idempotent; a milestone already past draft returns its current status.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId]
+              properties:
+                orderId: { type: string }
+      responses:
+        "200":
+          description: Funded, or already past draft
+          content: { application/json: { schema: { $ref: "#/components/schemas/CaptureResult" } } }
+        "202":
+          description: PayPal holds the capture as pending; the capture-completed webhook finishes funding
+          content: { application/json: { schema: { $ref: "#/components/schemas/CaptureResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: Captured amount differs from the milestone, or the order or contract state does not allow funding
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/milestones/{id}/review:
+    post:
+      tags: [milestones]
+      operationId: reviewMilestone
+      summary: Client response during the review window or on a needs_client decision
+      description: |
+        Client only. approve (from review or needs_client) and confirm_partial (from needs_client) queue the release
+        job. veto (from review) and hold (from needs_client) move the milestone to held. Refused once the payout has
+        been claimed, after the window closed (veto and hold), or when a required criterion did not pass.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [approve, veto, confirm_partial, hold] }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [ok, queued]
+                    properties:
+                      ok: { type: boolean }
+                      queued: { type: string, const: release }
+                  - type: object
+                    required: [ok, status, changed]
+                    properties:
+                      ok: { type: boolean }
+                      status: { type: string, const: held }
+                      changed: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: Not allowed in the current state
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      reason:
+                        type: string
+                        description: For example review_window_closed, needs_operator, payout_sent, required_criteria_not_passed
+                      criteria:
+                        type: array
+                        items: { type: string }
+  /api/paypal/client-token:
+    get:
+      tags: [paypal]
+      operationId: getClientToken
+      summary: Browser token for PayPal JS SDK v6
+      responses:
+        "200":
+          description: Short-lived token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accessToken, expiresIn]
+                properties:
+                  accessToken: { type: string }
+                  expiresIn: { type: integer, description: Seconds }
+  /api/webhooks/paypal:
+    post:
+      tags: [webhooks]
+      operationId: receivePayPalWebhook
+      summary: PayPal webhook receiver
+      description: |
+        Verified with PayPal's verify-webhook-signature call against PAYPAL_WEBHOOK_ID, stored once by event id, then
+        routed. Handled events: CHECKOUT.ORDER.APPROVED, PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED,
+        PAYMENT.PAYOUTS-ITEM.* and PAYMENT.PAYOUTSBATCH.DENIED. Others are stored for the audit log. Returns 500
+        when an event is not processed yet so PayPal redelivers.
+      security: []
+      parameters:
+        - { name: PAYPAL-TRANSMISSION-ID, in: header, schema: { type: string } }
+        - { name: PAYPAL-TRANSMISSION-TIME, in: header, schema: { type: string } }
+        - { name: PAYPAL-TRANSMISSION-SIG, in: header, schema: { type: string } }
+        - { name: PAYPAL-CERT-URL, in: header, schema: { type: string } }
+        - { name: PAYPAL-AUTH-ALGO, in: header, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PayPalWebhookEvent" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  duplicate: { type: boolean }
+                  outcome: { type: string, description: "funded, already, pending, mismatch, rejected, enqueued, stored or ignored" }
+        "400": { description: Bad signature }
+        "500": { description: Not processed yet, or PAYPAL_WEBHOOK_ID not set }
+  /api/webhooks/github:
+    post:
+      tags: [webhooks]
+      operationId: receiveGitHubWebhook
+      summary: GitHub repository webhook receiver
+      description: |
+        Verified with the X-Hub-Signature-256 HMAC against GITHUB_WEBHOOK_SECRET and stored once by
+        X-GitHub-Delivery. A merged pull request from a branch named m<seq>-... on a contract's repository creates a
+        delivery and a verify job. Everything else is ignored.
+      security: []
+      parameters:
+        - { name: X-Hub-Signature-256, in: header, required: true, schema: { type: string } }
+        - { name: X-GitHub-Delivery, in: header, required: true, schema: { type: string } }
+        - { name: X-GitHub-Event, in: header, required: true, schema: { type: string, example: pull_request } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GitHubPullRequestEvent" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  duplicate: { type: boolean }
+                  ignored: { type: boolean }
+                  milestoneId: { type: string }
+                  deliveryId: { type: string }
+        "400": { description: Bad signature }
+        "500": { description: GITHUB_WEBHOOK_SECRET not set }
+  /api/ops/{milestoneId}/resolve:
+    post:
+      tags: [ops]
+      operationId: resolveOperatorCase
+      summary: Record that an operator resolved a flagged milestone
+      description: |
+        Partner or platform role only. Requires the latest operator event for the milestone to be
+        milestone.needs_operator. Writes an ops.resolved audit entry; it does not move money or change the status.
+      parameters:
+        - { name: milestoneId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    roleCookie:
+      type: apiKey
+      in: cookie
+      name: milestone_actor
+      description: One of usr_client, usr_freelancer, usr_partner. Demo stand-in for sign-in.
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayPalError:
+      description: PayPal call failed
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  debugId: { type: [string, "null"] }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    CreateContractForm:
+      type: object
+      required: [scope, total]
+      properties:
+        scope: { type: string, description: Plain-English scope }
+        currency: { type: string, minLength: 3, maxLength: 3, default: USD }
+        total: { type: number, description: Total in major units, for example 300.00 }
+        repo: { type: string, description: "owner/name of the delivery repository" }
+    CaptureResult:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: "#/components/schemas/MilestoneStatus" }
+        captureId: { type: [string, "null"] }
+        captureStatus: { type: string }
+    MilestoneStatus:
+      type: string
+      enum: [draft, funded, verifying, review, released, held, needs_client, partial_released]
+    CriterionKind:
+      type: string
+      enum: [test, build, file, visual, judgment, upload]
+    CriterionSpec:
+      type: object
+      required: [id, kind, description]
+      properties:
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/CriterionKind" }
+        description: { type: string }
+        spec: { type: object, additionalProperties: true }
+        required: { type: boolean, default: true }
+    MilestoneSpec:
+      type: object
+      required: [seq, title, amountMinor, criteria]
+      properties:
+        seq: { type: integer, minimum: 1 }
+        title: { type: string }
+        amountMinor: { type: integer, minimum: 1 }
+        dueAt: { type: string }
+        criteria:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CriterionSpec" }
+    ContractSpec:
+      type: object
+      description: The compiler's output (zod ContractSpec in packages/core)
+      required: [title, currency, totalMinor, milestones]
+      properties:
+        title: { type: string }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        totalMinor: { type: integer, minimum: 1 }
+        milestones:
+          type: array
+          items: { $ref: "#/components/schemas/MilestoneSpec" }
+    CriterionVerdict:
+      type: object
+      required: [criterion_id, status, confidence, evidence_ids, rationale]
+      properties:
+        criterion_id: { type: string }
+        status: { type: string, enum: [pass, fail, unclear] }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidence_ids: { type: array, items: { type: string } }
+        rationale: { type: string }
+    PolicyDecision:
+      type: object
+      required: [action, amountMinor, ruleIds, reason]
+      properties:
+        action: { type: string, enum: [release, partial, hold, ask_client] }
+        amountMinor: { type: integer, minimum: 0 }
+        ruleIds: { type: array, items: { type: string } }
+        reason: { type: string }
+    PayPalWebhookEvent:
+      type: object
+      required: [id, event_type, create_time]
+      properties:
+        id: { type: string }
+        event_type: { type: string, example: PAYMENT.CAPTURE.COMPLETED }
+        create_time: { type: string }
+        resource_type: { type: string }
+        resource: { type: object, additionalProperties: true }
+    GitHubPullRequestEvent:
+      type: object
+      properties:
+        action: { type: string, example: closed }
+        pull_request:
+          type: object
+          properties:
+            number: { type: integer }
+            merged: { type: boolean }
+            merge_commit_sha: { type: [string, "null"] }
+            title: { type: [string, "null"] }
+            body: { type: [string, "null"] }
+            head: { type: object, properties: { ref: { type: string, example: m1-pass } } }
+            base: { type: object, properties: { sha: { type: [string, "null"] } } }
+        repository:
+          type: object
+          properties:
+            full_name: { type: string }
+            clone_url: { type: string }

@@ -16,9 +16,9 @@ import {
   type MilestoneStatus,
 } from "@milestone/core";
 import { PayPalError, applyReviewWindow, executeRelease, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
-import type { JobData } from "../handlers.js";
-import { getDb } from "../lib/db.js";
-import { paypal } from "../lib/paypal.js";
+import type { JobData } from "../handlers.ts";
+import { getDb } from "../lib/db.ts";
+import { paypal } from "../lib/paypal.ts";
 
 /*
  * ONE payout attempt per milestone. Once a payout or refund op for a milestone has been claimed (status "sent"), no job

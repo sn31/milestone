@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { formatVerdictComment, postVerdictComment } from "@milestone/verify";
-import { createEvidenceReader } from "./evidence.js";
+import { createEvidenceReader } from "./evidence.ts";
 
 let root: string;
 let workdir: string;

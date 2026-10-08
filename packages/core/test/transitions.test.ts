@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TRANSITIONS } from "../src/milestones.js";
+import { TRANSITIONS } from "../src/milestones.ts";
 
 describe("milestone transitions", () => {
   it("has no way out of released or partial_released", () => {
