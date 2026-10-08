@@ -80,6 +80,7 @@ export default async function LenderPage() {
       id: a.id,
       contractId: c.id,
       freelancer: f.name,
+      partnerId: a.partnerId,
       clientId: cl.id,
       client: cl.name,
       milestone: `${m.seq}. ${m.title}`,

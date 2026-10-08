@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
-import { auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paypalOps, users } from "./schema.ts";
+import { advances, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paypalOps, users } from "./schema.ts";
 
 try {
   process.loadEnvFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env"));
@@ -143,7 +143,7 @@ if (process.argv.includes("--showcase")) {
   // Clear what a previous showcase (or a real run) left on these milestones, then rebuild it.
   await db.execute(sql.raw(`delete from audit_log where milestone_id in (${ids}) or id like 'aud_show_%'`));
   await db.execute(sql.raw(`delete from ledger_entries where id like 'led_show_%' or ref in (select paypal_capture_id from milestones where id in (${ids}) and paypal_capture_id is not null) or ref in (${all.flatMap((m) => [`'release:${m.id}'`, `'release:${m.id}:partner'`, `'refund:${m.id}'`]).join(",")})`));
-  await db.execute(sql.raw(`delete from paypal_ops where key in (${ids})`));
+  await db.execute(sql.raw(`delete from paypal_ops where key in (${ids}, 'adv_show_repaid', 'adv_show_open')`));
   await db.execute(sql.raw(`delete from advances where milestone_id in (${ids})`));
   await db.execute(sql.raw(`delete from deliveries where milestone_id in (${ids})`));
 
@@ -159,8 +159,26 @@ if (process.argv.includes("--showcase")) {
       await db.insert(ledgerEntries).values({ id: `led_show_${String(ledgerSeq).padStart(3, "0")}`, txnId, account: e.account, amountMinor: e.amountMinor, currency: "USD", direction: e.direction, ref, createdAt: at });
     }
   };
-  const op = async (kind: string, key: string, paypalId: string, at: Date, response: Record<string, unknown>) => {
-    await db.insert(paypalOps).values({ id: `op_show_${kind}_${key}`, kind, key, requestId: uuidFrom(`showcase:${kind}:${key}`), paypalId, status: "succeeded", response, createdAt: at, updatedAt: at });
+  const op = async (kind: string, key: string, paypalId: string, at: Date, response: Record<string, unknown>, extra: { status?: "succeeded" | "failed"; request?: Record<string, unknown> } = {}) => {
+    await db.insert(paypalOps).values({ id: `op_show_${kind}_${key}`, kind, key, requestId: uuidFrom(`showcase:${kind}:${key}`), paypalId, status: extra.status ?? "succeeded", request: extra.request ?? null, response, createdAt: at, updatedAt: at });
+  };
+
+  /** An accepted and funded advance, as the accept route and the advance job leave it (offer, ledger, op, audit rows). */
+  const advance = async (m: Ms, a: { id: string; principalMinor: number; feeBpsPerDay: number; days: number; pFail: number; expectedLossMinor: number; acceptedAgo: number; fundedAgo: number }) => {
+    const expectedFeeMinor = Math.floor((a.principalMinor * a.feeBpsPerDay * a.days) / 10_000);
+    const acceptedAt = min(-a.acceptedAgo);
+    const fundedAt = min(-a.fundedAgo);
+    const offer = { eligible: true, principalMinor: a.principalMinor, feeBpsPerDay: a.feeBpsPerDay, expectedFeeMinor, pFail: a.pFail, expectedLossMinor: a.expectedLossMinor, terms: { principalMinor: a.principalMinor, feeBpsPerDay: a.feeBpsPerDay, expectedFeeMinor, repaymentMinor: a.principalMinor + expectedFeeMinor, days: a.days }, currency: "USD", acceptedAt: acceptedAt.toISOString() };
+    await db.insert(advances).values({ id: a.id, milestoneId: m.id, partnerId: "usr_partner", principalMinor: a.principalMinor, feeBpsPerDay: a.feeBpsPerDay, status: "funded", offer, explanation: `Advance of ${(a.principalMinor / 100).toFixed(2)} USD at ${a.feeBpsPerDay} bps a day, repaid from the release of ${m.id}.`, fundedAt, createdAt: acceptedAt });
+    const batchId = `SIM-BATCH-${a.id.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
+    await op("advance-payout", a.id, batchId, fundedAt, { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" } }, { request: { advanceId: a.id, milestoneId: m.id, principalMinor: a.principalMinor, currency: "USD" } });
+    await post(`txn_show_adv_${a.id}`, `advance:${a.id}`, fundedAt, [
+      { account: "partner:usr_partner:receivable", amountMinor: a.principalMinor, direction: "debit" },
+      { account: "partner:usr_partner:cash", amountMinor: a.principalMinor, direction: "credit" },
+    ]);
+    await auditRow(m, "usr_partner", "advance.accepted", acceptedAt, { advanceId: a.id, partnerId: "usr_partner", principalMinor: a.principalMinor, feeBpsPerDay: a.feeBpsPerDay, expectedFeeMinor, repaymentMinor: a.principalMinor + expectedFeeMinor, currency: "USD" });
+    await auditRow(m, "paypal", "advance.funded", fundedAt, { advanceId: a.id, partnerId: "usr_partner", principalMinor: a.principalMinor, currency: "USD", payoutBatchId: batchId, requestId: uuidFrom(`showcase:advance-payout:${a.id}`), offer });
+    return { expectedFeeMinor, owedMinor: a.principalMinor + expectedFeeMinor };
   };
 
   /** Order + capture + ledger (client -> held) + funded audit, `ago` minutes in the past. */
@@ -218,6 +236,7 @@ if (process.argv.includes("--showcase")) {
 
   // mst_1: funded, waiting for a delivery.
   await fund(m1, 50, 1);
+  await advance(m1, { id: "adv_show_open", principalMinor: 4000, feeBpsPerDay: 10, days: 7, pFail: 0.12, expectedLossMinor: 240, acceptedAgo: 30, fundedAgo: 29 });
 
   // mst_2: delivered as PR #7, verified pass, in review with the window closing in 20 minutes.
   await fund(m2, 48, 2);
@@ -249,6 +268,10 @@ if (process.argv.includes("--showcase")) {
 
   // mst_3: released, payout confirmed by webhook, ledger held -> freelancer.
   await fund(m3, 46, 3);
+  const adv3 = await advance(m3, { id: "adv_show_repaid", principalMinor: 5000, feeBpsPerDay: 10, days: 8, pFail: 0.1, expectedLossMinor: 250, acceptedAgo: 44, fundedAgo: 43 });
+  const fee3 = adv3.expectedFeeMinor;
+  const partner3 = 5000 + fee3;
+  const freelancer3 = m3.amountMinor - partner3;
   const d3 = await deliver(m3, {
     deliveryId: "dlv_show_3",
     ago: 40,
@@ -273,13 +296,21 @@ if (process.argv.includes("--showcase")) {
   await auditRow(m3, "policy", "milestone.review", d3.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_3", action: "release", ruleIds: ["P6"], reviewEndsAt: ends3.toISOString() });
   const batchId = "SIM-BATCH-SHOW3X9QZ";
   const itemId = "SIM-ITEM-SHOW3L4MW";
-  await op("payout", m3.id, batchId, min(-11), { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" }, items: { freelancer: { status: "succeeded", amountMinor: 10000, payoutItemId: itemId } } });
-  await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: 10000, partnerShareMinor: 0, refundMinor: 0 });
+  await op("payout", m3.id, batchId, min(-11), { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" }, items: { partner: { status: "succeeded", amountMinor: partner3, payoutItemId: `${itemId}P`, eventId: "WH-SHOW3P" }, freelancer: { status: "succeeded", amountMinor: freelancer3, payoutItemId: itemId, eventId: "WH-SHOW3F" } } });
+  await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: freelancer3, partnerShareMinor: partner3, refundMinor: 0, advanceId: "adv_show_repaid" });
   await auditRow(m3, "paypal", "paypal.payout", min(-11), { deliveryId: "dlv_show_3", payoutBatchId: batchId, amountMinor: 10000, currency: "USD" });
-  await post("txn_show_release_mst_3", "release:mst_3", min(-10), [
-    { account: "held:mst_3", amountMinor: 10000, direction: "debit" },
-    { account: "freelancer:usr_freelancer", amountMinor: 10000, direction: "credit" },
+  // settle.ts books one transaction per paid item: the partner's (principal to receivable, fee to fees), then the freelancer's.
+  await post("txn_show_release_mst_3_partner", "release:mst_3:partner", min(-10), [
+    { account: "held:mst_3", amountMinor: partner3, direction: "debit" },
+    { account: "partner:usr_partner:receivable", amountMinor: 5000, direction: "credit" },
+    { account: "partner:usr_partner:fees", amountMinor: fee3, direction: "credit" },
   ]);
+  await post("txn_show_release_mst_3", "release:mst_3", min(-10), [
+    { account: "held:mst_3", amountMinor: freelancer3, direction: "debit" },
+    { account: "freelancer:usr_freelancer", amountMinor: freelancer3, direction: "credit" },
+  ]);
+  await db.update(advances).set({ status: "repaid", repaidAt: min(-10) }).where(sql`id = 'adv_show_repaid'`);
+  await auditRow(m3, "paypal", "advance.repaid", min(-10), { advanceId: "adv_show_repaid", advanceMilestoneId: "mst_3", carried: false, partnerId: "usr_partner", owedMinor: partner3, paidMinor: partner3, principalPaidMinor: 5000, feePaidMinor: fee3, remainingMinor: 0, payoutBatchId: batchId });
   await setStatus(m3.id, "released");
   await auditRow(m3, "paypal", "milestone.released", min(-10), { from: "review", to: "released", eventType: "PAYMENT.PAYOUTS-ITEM.SUCCEEDED", payoutBatchId: batchId, payoutItemId: itemId, amountMinor: 10000, refundMinor: 0, currency: "USD", freelancerId: "usr_freelancer", verifiedPass: true });
 
@@ -334,6 +365,32 @@ if (process.argv.includes("--showcase")) {
   });
   await setStatus(b2.id, "held");
   await auditRow(b2, "policy", "milestone.held", db2.verified, { from: "verifying", to: "held", deliveryId: "dlv_show_b2", action: "hold", ruleIds: ["P2"] });
+
+  // Operator case on mst_brand_2: a payout was sent anyway and PayPal failed the freelancer item, so the release job
+  // stopped and flagged it (release.ts flagNeedsOperator + operatorSummary). /ops lists it until an ops.resolved follows.
+  const failBatch = "SIM-BATCH-SHOWB2F7K";
+  const failReason = "Receiver is unregistered";
+  const claim2 = { deliveryId: "dlv_show_b2", action: "release", ruleIds: ["P2"], reason: "Operator-approved release of the held copy milestone", releaseMinor: 6000, refundMinor: 0, currency: "USD", captureId: "SIM-CAP-SHOW5" + b2.seq + "0K2F", freelancerEmail: "freelancer@milestone.test", partnerEmail: null, shares: { partnerShareMinor: 0, freelancerShareMinor: 6000 }, jobId: "job_show_b2", claimedAt: min(-14).toISOString() };
+  await op("payout", b2.id, failBatch, min(-12), { batch_header: { payout_batch_id: failBatch, batch_status: "DENIED" }, items: { freelancer: { status: "failed", amountMinor: 6000, payoutItemId: "SIM-ITEM-SHOWB2F", eventId: "WH-SHOWB2F", reason: failReason } } }, { status: "failed", request: { claim: claim2 } });
+  await auditRow(b2, "system", "release.claimed", min(-14), { deliveryId: "dlv_show_b2", action: "release", freelancerShareMinor: 6000, partnerShareMinor: 0, refundMinor: 0 });
+  await auditRow(b2, "paypal", "paypal.payout", min(-13), { deliveryId: "dlv_show_b2", payoutBatchId: failBatch, amountMinor: 6000, currency: "USD" });
+  await auditRow(b2, "paypal", "paypal.payout_failed", min(-12), { eventId: "WH-SHOWB2F", party: "freelancer", payoutBatchId: failBatch, amountMinor: 6000, reason: failReason, opStatus: "failed" });
+  await auditRow(b2, "paypal", "milestone.held", min(-11.9), { reason: "A payout item failed" });
+  await auditRow(b2, "paypal", "milestone.needs_operator", min(-11.8), {
+    reason: "A payout item failed",
+    status: "held",
+    deliveryId: "dlv_show_b2",
+    action: "release",
+    currency: "USD",
+    payoutBatchId: failBatch,
+    payoutOpStatus: "failed",
+    paid: {},
+    failed: { freelancer: failReason },
+    reversed: {},
+    pending: [],
+    refunded: null,
+    summary: { paid: 0, failed: 6000, reversed: 0, pending: 0, refunded: 0 },
+  });
 
   showcase = all.length;
 }

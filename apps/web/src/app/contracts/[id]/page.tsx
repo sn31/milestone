@@ -237,12 +237,20 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
           eyebrow="Audit trail"
           title={<span id="activity-title">Activity</span>}
           actions={
-            <Button href={`/contracts/${id}/activity`} variant="ghost" size="sm">
-              Full audit log
-              <svg aria-hidden viewBox="0 0 20 8" className="h-2 w-4" fill="none" stroke="currentColor" strokeWidth="1.2">
-                <path d="M0 4 H18 M15 1 L18 4 L15 7" />
-              </svg>
-            </Button>
+            <>
+              <Button href={`/contracts/${id}/ledger`} variant="ghost" size="sm">
+                Ledger
+                <svg aria-hidden viewBox="0 0 20 8" className="h-2 w-4" fill="none" stroke="currentColor" strokeWidth="1.2">
+                  <path d="M0 4 H18 M15 1 L18 4 L15 7" />
+                </svg>
+              </Button>
+              <Button href={`/contracts/${id}/activity`} variant="ghost" size="sm">
+                Full audit log
+                <svg aria-hidden viewBox="0 0 20 8" className="h-2 w-4" fill="none" stroke="currentColor" strokeWidth="1.2">
+                  <path d="M0 4 H18 M15 1 L18 4 L15 7" />
+                </svg>
+              </Button>
+            </>
           }
         />
         {activity.length === 0 ? (

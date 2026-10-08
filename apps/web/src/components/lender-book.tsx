@@ -3,8 +3,9 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, ValueFormatterParams } from "ag-grid-community";
-import { gridTheme } from "./ag-grid-theme";
+import type { ColDef, ICellRendererParams, IRowNode, ValueFormatterParams } from "ag-grid-community";
+import { gridThemeInset } from "./ag-grid-theme";
+import { useNarrow } from "./evidence-panel";
 import { formatMoney, formatNumber } from "@/lib/format";
 import { EmptyState, Money, Panel, SectionTitle, Stat, StateGlyph, StatePill, cx, inputClass, stateMeta, type ToneKey } from "@/components/ui";
 
@@ -12,6 +13,8 @@ export interface LenderRow {
   id: string;
   contractId: string;
   freelancer: string;
+  /** The capital partner who funded the advance; concentration is measured within a partner's own book. */
+  partnerId: string;
   clientId: string;
   client: string;
   milestone: string;
@@ -121,64 +124,72 @@ const pct = (share: number) => `${formatNumber(share * 100, share > 0 && share <
 /** Neutral ink steps for client segments: colour on this page means state, so clients are told apart by weight. */
 const CLIENT_INK = ["bg-fg/75", "bg-fg/45", "bg-fg/25", "bg-fg/15"];
 
-// The shared quartz theme (ag-grid-theme.ts) dressed in the design tokens. Every value is a CSS variable, so the grid
-// switches with the light and dark themes on its own.
-const bookTheme = gridTheme.withParams({
-  backgroundColor: "var(--surface)",
-  foregroundColor: "var(--fg)",
-  textColor: "var(--fg)",
-  chromeBackgroundColor: "var(--surface)",
-  headerBackgroundColor: "var(--surface)",
-  headerTextColor: "var(--fg-faint)",
-  headerFontFamily: "var(--font-mono)",
-  headerFontSize: 10.5,
-  headerFontWeight: 400,
-  headerHeight: 40,
-  headerColumnBorder: false,
-  headerRowBorder: { color: "var(--hairline)" },
-  headerColumnResizeHandleColor: "transparent",
-  fontFamily: "var(--font-sans)",
-  fontSize: 13,
+// The shared inset theme (ag-grid-theme.ts): every value a design token, so the grid follows light and dark on its own.
+// Taller rows for the stacked cells; the pinned book total sits in a sunken well above the advances.
+const bookTheme = gridThemeInset.withParams({
   rowHeight: 56,
-  borderColor: "var(--hairline)",
-  rowBorder: { color: "var(--hairline)" },
-  columnBorder: false,
-  wrapperBorder: false,
-  wrapperBorderRadius: 0,
-  borderRadius: 4,
-  rowHoverColor: "color-mix(in oklab, var(--state-funded) 5%, transparent)",
-  selectedRowBackgroundColor: "color-mix(in oklab, var(--state-funded) 10%, transparent)",
-  oddRowBackgroundColor: "var(--surface)",
-  accentColor: "var(--focus)",
-  iconColor: "var(--fg-faint)",
-  inputBackgroundColor: "var(--surface-sunken)",
-  inputBorder: { color: "var(--hairline-strong)" },
-  menuBackgroundColor: "var(--surface-raised)",
-  menuBorder: { color: "var(--hairline-strong)" },
-  menuShadow: "none",
-  popupShadow: "none",
-  cardShadow: "none",
-  dropdownShadow: "none",
-  focusShadow: "none",
+  pinnedRowBackgroundColor: "var(--surface-sunken)",
+  pinnedRowTextColor: "var(--fg)",
+  pinnedRowFontWeight: 400,
+  pinnedRowBorder: { color: "var(--hairline-strong)" },
 });
 
 const numCell = "font-mono tabular text-[12.5px]";
 
-function MoneyCell(p: ICellRendererParams<LenderRow, number | null>) {
+/** A client holding more than this share of its partner's outstanding principal reads amber. */
+const CONCENTRATION_LIMIT = 0.6;
+
+/** The pinned top row's extras: what the totals cover. */
+interface BookTotals {
+  count: number;
+  clients: number;
+  lossShare: number;
+  otherCurrencies: boolean;
+}
+
+type GridRow = LenderRow & { totals?: BookTotals };
+
+interface Ctx {
+  share: Map<string, number>;
+}
+
+const partnerKey = (r: { partnerId: string; currency: string }) => `${r.partnerId}|${r.currency}`;
+const shareKey = (r: { partnerId: string; currency: string; clientId: string }) => `${partnerKey(r)}|${r.clientId}`;
+
+/** Pure. Each client's share of its own partner's outstanding principal (per currency), keyed by shareKey. */
+function partnerShares(rows: LenderRow[]): Map<string, number> {
+  const partner = new Map<string, number>();
+  const client = new Map<string, number>();
+  for (const r of rows) {
+    if (r.outstandingMinor <= 0) continue;
+    partner.set(partnerKey(r), (partner.get(partnerKey(r)) ?? 0) + r.outstandingMinor);
+    client.set(shareKey(r), (client.get(shareKey(r)) ?? 0) + r.outstandingMinor);
+  }
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const total = partner.get(partnerKey(r)) ?? 0;
+    out.set(shareKey(r), total > 0 ? (client.get(shareKey(r)) ?? 0) / total : 0);
+  }
+  return out;
+}
+
+const isTotal = (p: { node: IRowNode<GridRow> }) => p.node.rowPinned === "top";
+
+function MoneyCell(p: ICellRendererParams<GridRow, number | null>) {
   if (p.value === null || p.value === undefined || !p.data) return <span className="text-fg-faint">none</span>;
   return <Money minor={p.value} currency={p.data.currency} className={p.value === 0 ? "opacity-50" : undefined} />;
 }
 
-/** An amount with a smaller second figure under it (principal + fee, outstanding + repaid). */
-function stackedMoney(second: keyof LenderRow, caption: string, tone?: ToneKey) {
-  return function StackedMoneyCell(p: ICellRendererParams<LenderRow, number | null>) {
+/** An amount with a smaller second figure under it (principal + fee). */
+function stackedMoney(second: keyof LenderRow, caption: string) {
+  return function StackedMoneyCell(p: ICellRendererParams<GridRow, number | null>) {
     if (!p.data) return null;
     const v = p.data[second];
     const n = typeof v === "number" ? v : 0;
     return (
       <div className="flex h-full flex-col items-end justify-center gap-1 leading-tight">
         <MoneyCell {...p} />
-        <span data-tone={n > 0 ? tone : undefined} className={cx("font-mono text-[11px] tabular", n > 0 && tone ? "text-tone" : "text-fg-faint")}>
+        <span className="font-mono text-[11px] text-fg-faint tabular">
           {caption} {formatMoney(n, p.data.currency)}
         </span>
       </div>
@@ -186,8 +197,20 @@ function stackedMoney(second: keyof LenderRow, caption: string, tone?: ToneKey) 
   };
 }
 
-function AdvanceCell(p: ICellRendererParams<LenderRow, string>) {
+function AdvanceCell(p: ICellRendererParams<GridRow, string>) {
   if (!p.data) return null;
+  if (isTotal(p) && p.data.totals) {
+    const t = p.data.totals;
+    return (
+      <div className="flex h-full min-w-0 flex-col justify-center leading-tight">
+        <span className="type-label text-fg-muted">Book total</span>
+        <span className="mt-1 truncate text-[12px] text-fg-faint">
+          <span className="font-mono tabular">{t.count}</span> advance{t.count === 1 ? "" : "s"}
+          {t.otherCurrencies ? <span className="font-mono"> · {p.data.currency} only</span> : null}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="flex h-full min-w-0 flex-col justify-center leading-tight">
       <Link
@@ -204,14 +227,86 @@ function AdvanceCell(p: ICellRendererParams<LenderRow, string>) {
   );
 }
 
-function StatusCell(p: ICellRendererParams<LenderRow, LenderRow["status"]>) {
-  if (!p.value) return null;
-  const pill = ADVANCE_PILL[p.value];
-  return <StatePill state={pill.state} label={pill.label} />;
+/** The client, and its share of this partner's outstanding principal as a bar: amber once it passes 60%. */
+function ExposureCell(p: ICellRendererParams<GridRow, string, Ctx>) {
+  if (!p.data) return null;
+  if (isTotal(p) && p.data.totals) {
+    const n = p.data.totals.clients;
+    return (
+      <span className="text-[12px] text-fg-faint">
+        <span className="font-mono tabular">{n}</span> client{n === 1 ? "" : "s"} owing
+      </span>
+    );
+  }
+  const sh = p.context.share.get(shareKey(p.data)) ?? 0;
+  const heavy = sh > CONCENTRATION_LIMIT;
+  return (
+    <div
+      data-tone={heavy ? "held" : "neutral"}
+      className="flex h-full min-w-0 flex-col justify-center gap-1.5 leading-tight"
+      title={`${p.value}: ${pct(sh)} of this partner's outstanding principal`}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="truncate text-fg-muted">{p.value}</span>
+        <span className={cx(numCell, "text-[11.5px]", heavy ? "text-tone" : "text-fg-faint")}>{pct(sh)}</span>
+      </div>
+      <span aria-hidden className="relative h-[3px] w-full overflow-hidden rounded-full bg-hairline">
+        <span className={cx("absolute inset-y-0 left-0 rounded-full", heavy ? "bg-tone" : "bg-fg/45")} style={{ width: `${Math.round(sh * 1000) / 10}%` }} />
+      </span>
+    </div>
+  );
 }
 
-function MilestoneStateCell(p: ICellRendererParams<LenderRow, string>) {
+/** Repaid so far against what the advance must bring back (principal + fee). */
+function RepaymentCell(p: ICellRendererParams<GridRow, number>) {
   if (!p.data) return null;
+  const r = p.data;
+  const due = r.principalMinor + r.feeMinor;
+  const share = due > 0 ? Math.min(1, r.repaidMinor / due) : 0;
+  const shortfall = r.status === "shortfall";
+  const done = share >= 1;
+  return (
+    <div
+      data-tone={shortfall ? "danger" : "released"}
+      className="flex h-full min-w-0 flex-col justify-center gap-1.5 leading-tight"
+      title={`${formatMoney(r.repaidMinor, r.currency)} of ${formatMoney(due, r.currency)} repaid`}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <Money minor={r.repaidMinor} currency={r.currency} className={cx("text-[12.5px]", r.repaidMinor === 0 && "opacity-50")} />
+        <span className={cx(numCell, "text-[11.5px]", shortfall || done ? "text-tone" : r.repaidMinor > 0 ? "text-fg-muted" : "text-fg-faint")}>{pct(share)}</span>
+      </div>
+      {/* A shortfall keeps its unpaid remainder visible in the danger tone. */}
+      <span aria-hidden className={cx("relative h-[3px] w-full overflow-hidden rounded-full", shortfall ? "bg-tone-soft" : "bg-hairline")}>
+        <span data-tone="released" className="absolute inset-y-0 left-0 rounded-full bg-tone" style={{ width: `${Math.round(share * 1000) / 10}%` }} />
+      </span>
+    </div>
+  );
+}
+
+/** Expected loss with the pFail it comes from; on the total, its share of outstanding. */
+function LossCell(p: ICellRendererParams<GridRow, number | null>) {
+  if (!p.data) return null;
+  const caption = isTotal(p) && p.data.totals ? `${pct(p.data.totals.lossShare)} of out` : typeof p.data.pFail === "number" ? `pFail ${(p.data.pFail * 100).toFixed(1)}%` : "no pFail";
+  return (
+    <div className="flex h-full flex-col items-end justify-center gap-1 leading-tight">
+      <MoneyCell {...p} />
+      <span className="font-mono text-[11px] text-fg-faint tabular">{caption}</span>
+    </div>
+  );
+}
+
+function StatusCell(p: ICellRendererParams<GridRow, LenderRow["status"]>) {
+  if (isTotal(p) || !p.value) return null;
+  const pill = ADVANCE_PILL[p.value];
+  return (
+    <div className="flex h-full items-center">
+      <StatePill state={pill.state} label={pill.label} />
+    </div>
+  );
+}
+
+function MilestoneStateCell(p: ICellRendererParams<GridRow, string>) {
+  if (!p.data || isTotal(p)) return null;
   const atRisk = p.data.milestoneStatus === "held";
   return (
     <div className="flex h-full min-w-0 flex-col justify-center gap-1 leading-tight">
@@ -223,19 +318,56 @@ function MilestoneStateCell(p: ICellRendererParams<LenderRow, string>) {
   );
 }
 
-/** The lender's book as an instrument panel, then one AG Grid row per advance. */
+/** The lender's book as an instrument panel, then one AG Grid row per advance under a pinned book total. */
 export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; kept for callers, the book reads only the ledger figures. */ now?: string }) {
   const [quick, setQuick] = useState("");
+  const narrow = useNarrow();
   const s = useMemo(() => summarize(rows), [rows]);
   const open = useMemo(() => rows.filter((r) => r.currency === s.currency && r.outstandingMinor > 0), [rows, s.currency]);
   const clients = useMemo(() => clientExposure(open), [open]);
   const states = useMemo(() => exposureByState(open), [open]);
-  const share = useMemo(() => new Map(clients.map((c) => [c.id, s.outstandingMinor > 0 ? c.minor / s.outstandingMinor : 0])), [clients, s.outstandingMinor]);
+  const share = useMemo(() => partnerShares(rows), [rows]);
   const concentrated = !!s.topClient && s.topClient.shareOfOutstanding > 0.5 && s.clientCount > 1;
   const lossShare = s.outstandingMinor > 0 ? s.expectedLossMinor / s.outstandingMinor : 0;
 
-  const cols = useMemo<ColDef<LenderRow>[]>(() => {
-    const money = (field: keyof LenderRow, headerName: string, width: number): ColDef<LenderRow> => ({
+  // Totals for the book's main currency; other currencies are listed but not added in (as in the stats above).
+  const pinned = useMemo<GridRow[]>(() => {
+    const mine = rows.filter((r) => r.currency === s.currency);
+    if (mine.length === 0) return [];
+    const sum = (f: (r: LenderRow) => number) => mine.reduce((t, r) => t + f(r), 0);
+    return [
+      {
+        id: "book-total",
+        contractId: "",
+        freelancer: "",
+        partnerId: "",
+        clientId: "",
+        client: "",
+        milestone: "Book total",
+        milestoneStatus: "",
+        currency: s.currency,
+        amountMinor: sum((r) => r.amountMinor),
+        principalMinor: sum((r) => r.principalMinor),
+        feeMinor: sum((r) => r.feeMinor),
+        feeBpsPerDay: 0,
+        status: "funded",
+        daysOutstanding: null,
+        outstandingMinor: s.outstandingMinor,
+        repaidMinor: sum((r) => r.repaidMinor),
+        repaidThisWeekMinor: s.repaidThisWeekMinor,
+        pFail: null,
+        expectedLossMinor: s.expectedLossMinor,
+        repaymentStatus: "",
+        createdAt: "",
+        fundedAt: null,
+        repaidAt: null,
+        totals: { count: mine.length, clients: s.clientCount, lossShare, otherCurrencies: s.otherCurrencies.length > 0 },
+      },
+    ];
+  }, [rows, s, lossShare]);
+
+  const cols = useMemo<ColDef<GridRow>[]>(() => {
+    const money = (field: keyof LenderRow, headerName: string, width: number): ColDef<GridRow> => ({
       field,
       headerName,
       width,
@@ -249,69 +381,63 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
       {
         field: "milestone",
         headerName: "Advance on",
-        flex: 1,
-        minWidth: 190,
+        flex: narrow ? undefined : 1,
+        width: narrow ? 168 : undefined,
+        minWidth: narrow ? 168 : 176,
+        // Phones scroll the grid sideways; the advance stays in view.
+        pinned: narrow ? "left" : undefined,
         cellRenderer: AdvanceCell,
         getQuickFilterText: (p) => `${p.value} ${p.data?.freelancer ?? ""}`,
       },
       {
         field: "client",
         headerName: "Client exposure",
-        width: 152,
-        cellRenderer: (p: ICellRendererParams<LenderRow, string>) => {
-          if (!p.data) return null;
-          const sh = share.get(p.data.clientId) ?? 0;
-          const heavy = sh > 0.5 && clients.length > 1;
-          return (
-            <div data-tone={heavy ? "held" : "neutral"} className="flex h-full min-w-0 flex-col justify-center gap-1.5 leading-tight">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="truncate text-fg-muted">{p.value}</span>
-                <span className={cx(numCell, "text-[11.5px]", heavy ? "text-tone" : "text-fg-faint")}>{sh > 0 ? pct(sh) : "0%"}</span>
-              </div>
-              <span aria-hidden className="relative h-[3px] w-full overflow-hidden rounded-full bg-hairline">
-                <span
-                  className={cx("absolute inset-y-0 left-0 rounded-full", heavy ? "bg-tone" : "bg-fg/45")}
-                  style={{ width: `${Math.round(sh * 1000) / 10}%` }}
-                />
-              </span>
-            </div>
-          );
-        },
+        width: 154,
+        cellRenderer: ExposureCell,
       },
       {
         field: "status",
         headerName: "Advance",
-        width: 112,
+        width: 108,
         cellRenderer: StatusCell,
         getQuickFilterText: (p) => (p.value ? ADVANCE_PILL[p.value as LenderRow["status"]].label : ""),
       },
       {
-        ...money("principalMinor", "Principal", 115),
+        ...money("principalMinor", "Principal", 112),
         cellRenderer: stackedMoney("feeMinor", "fee"),
       },
+      money("outstandingMinor", "Outstanding", 122),
       {
-        ...money("outstandingMinor", "Outstanding", 125),
-        cellRenderer: stackedMoney("repaidMinor", "back", "released"),
-      },
-      {
-        field: "pFail",
-        headerName: "pFail",
-        width: 75,
-        type: "rightAligned",
-        cellClass: numCell,
+        colId: "repayment",
+        headerName: "Repaid",
+        width: 136,
+        // Sorts and filters by the share repaid, 0 to 100.
+        valueGetter: (p) => (p.data ? Math.round((p.data.repaidMinor / Math.max(1, p.data.principalMinor + p.data.feeMinor)) * 100) : 0),
+        cellRenderer: RepaymentCell,
         filter: "agNumberColumnFilter",
-        valueFormatter: (p: ValueFormatterParams<LenderRow, number | null>) => (typeof p.value === "number" ? `${(p.value * 100).toFixed(1)}%` : ""),
       },
-      money("expectedLossMinor", "Exp. loss", 105),
+      {
+        ...money("expectedLossMinor", "Exp. loss", 104),
+        cellRenderer: LossCell,
+      },
       {
         field: "milestoneStatus",
         headerName: "Repays from",
-        width: 165,
+        width: 146,
         cellRenderer: MilestoneStateCell,
         getQuickFilterText: (p) => `${stateMeta(String(p.value)).label} ${p.data?.repaymentStatus ?? ""}`,
       },
       // Sortable and filterable from the column menu, folded into the cells above on screen.
-      { ...money("repaidMinor", "Repaid", 110), hide: true },
+      {
+        field: "pFail",
+        headerName: "pFail",
+        width: 75,
+        hide: true,
+        type: "rightAligned",
+        filter: "agNumberColumnFilter",
+        valueFormatter: (p: ValueFormatterParams<GridRow, number | null>) => (typeof p.value === "number" ? `${(p.value * 100).toFixed(1)}%` : ""),
+      },
+      { ...money("repaidMinor", "Repaid amount", 110), hide: true },
       { ...money("feeMinor", "Fee", 95), hide: true },
       {
         field: "daysOutstanding",
@@ -320,7 +446,7 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
         filter: "agNumberColumnFilter",
       },
     ];
-  }, [share, clients.length]);
+  }, [narrow]);
 
   const cell = "p-5 sm:p-6";
 
@@ -484,104 +610,31 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
             body="When a freelancer takes an advance on a funded milestone, it lands here: paid out from your PayPal account, repaid first out of that milestone's release."
           />
         ) : (
-          <>
-            {/* Phones: the same book as a stacked ledger; the grid's columns need a desktop width. */}
-            <Panel variant="solid" padded={false} className="md:hidden">
-              <ol className="divide-y divide-hairline">
-                {rows
-                  .filter(
-                    (r) => !quick || `${r.milestone} ${r.freelancer} ${r.client} ${r.repaymentStatus} ${r.status}`.toLowerCase().includes(quick.toLowerCase()),
-                  )
-                  .map((r) => {
-                    const sh = share.get(r.clientId) ?? 0;
-                    const pill = ADVANCE_PILL[r.status];
-                    return (
-                      <li key={r.id} className="grid grid-cols-[minmax(0,1fr)] gap-3 px-4 py-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <Link
-                              href={`/contracts/${r.contractId}`}
-                              className="block truncate text-fg underline decoration-hairline-strong underline-offset-[3px]"
-                            >
-                              {r.milestone}
-                            </Link>
-                            <p className="mt-1 truncate text-[12px] text-fg-faint">
-                              {r.freelancer}
-                              {r.daysOutstanding !== null ? <span className="font-mono tabular"> · {r.daysOutstanding}d out</span> : null}
-                            </p>
-                          </div>
-                          <StatePill state={pill.state} label={pill.label} />
-                        </div>
-                        <dl className="grid grid-cols-3 gap-3 font-mono text-[12px] tabular">
-                          <div>
-                            <dt className="type-label text-[10px] text-fg-faint">Principal</dt>
-                            <dd className="mt-1">
-                              <Money minor={r.principalMinor} currency={r.currency} />
-                            </dd>
-                          </div>
-                          <div>
-                            <dt className="type-label text-[10px] text-fg-faint">Out</dt>
-                            <dd className="mt-1">
-                              <Money minor={r.outstandingMinor} currency={r.currency} className={r.outstandingMinor === 0 ? "opacity-50" : undefined} />
-                            </dd>
-                          </div>
-                          <div className="text-right">
-                            <dt className="type-label text-[10px] text-fg-faint">pFail</dt>
-                            <dd className="mt-1 text-fg">{typeof r.pFail === "number" ? `${(r.pFail * 100).toFixed(1)}%` : "none"}</dd>
-                          </div>
-                        </dl>
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="flex min-w-0 items-center gap-2">
-                            <StatePill state={r.milestoneStatus} />
-                            <span
-                              data-tone={r.milestoneStatus === "held" ? "held" : undefined}
-                              className={cx("truncate text-[12px]", r.milestoneStatus === "held" ? "text-tone" : "text-fg-faint")}
-                            >
-                              {r.repaymentStatus}
-                            </span>
-                          </span>
-                          <span className="flex shrink-0 items-center gap-2 font-mono text-[11px] text-fg-faint tabular">
-                            <span aria-hidden className="relative block h-[3px] w-10 overflow-hidden rounded-full bg-hairline">
-                              <span
-                                className="absolute inset-y-0 left-0 rounded-full bg-fg/45"
-                                style={{
-                                  width: `${Math.round(sh * 1000) / 10}%`,
-                                }}
-                              />
-                            </span>
-                            {pct(sh)}
-                          </span>
-                        </div>
-                      </li>
-                    );
-                  })}
-              </ol>
-            </Panel>
-            <Panel
-              variant="solid"
-              padded={false}
-              className="hidden overflow-hidden md:block [&_.ag-header-cell-text]:tracking-[0.12em] [&_.ag-header-cell-text]:uppercase [&_.ag-paging-panel]:font-mono [&_.ag-paging-panel]:text-[11.5px] [&_.ag-paging-panel]:text-fg-faint"
-            >
-              <AgGridReact<LenderRow>
-                theme={bookTheme}
-                rowData={rows}
-                columnDefs={cols}
-                defaultColDef={{
-                  sortable: true,
-                  filter: true,
-                  resizable: true,
-                  suppressHeaderFilterButton: true,
-                }}
-                quickFilterText={quick}
-                domLayout="autoHeight"
-                pagination={rows.length > 20}
-                paginationPageSize={20}
-                paginationPageSizeSelector={[10, 20, 50, 100]}
-                getRowId={(p) => p.data.id}
-                overlayNoRowsTemplate="No advances match."
-              />
-            </Panel>
-          </>
+          <Panel variant="solid" padded={false} className="overflow-hidden">
+            <AgGridReact<GridRow>
+              // Remount across the breakpoint: the first column pins on phones only.
+              key={narrow ? "narrow" : "wide"}
+              theme={bookTheme}
+              rowData={rows}
+              columnDefs={cols}
+              context={{ share } satisfies Ctx}
+              pinnedTopRowData={pinned}
+              defaultColDef={{
+                sortable: true,
+                filter: true,
+                resizable: true,
+                suppressHeaderFilterButton: true,
+              }}
+              quickFilterText={quick}
+              domLayout="autoHeight"
+              suppressCellFocus
+              pagination={rows.length > 20}
+              paginationPageSize={20}
+              paginationPageSizeSelector={[10, 20, 50, 100]}
+              getRowId={(p) => p.data.id}
+              overlayNoRowsTemplate="No advances match."
+            />
+          </Panel>
         )}
       </section>
     </>
