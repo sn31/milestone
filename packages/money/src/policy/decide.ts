@@ -33,6 +33,10 @@ export function decide(input: DecideInput): PolicyDecision {
     return { spec, v };
   });
 
+  if (rows.length === 0) {
+    return { action: "ask_client", amountMinor: 0, ruleIds: ["P0"], reason: "The milestone has no acceptance criteria." };
+  }
+
   if (input.verdict.suspected_injection) {
     return { action: "ask_client", amountMinor: 0, ruleIds: ["P1"], reason: "The delivery contains text that tries to instruct the reviewer." };
   }

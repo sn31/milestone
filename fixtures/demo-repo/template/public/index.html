@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signup Demo</title>
+  </head>
+  <body>
+    <main>
+      <h1>Start your free trial</h1>
+      <form id="signup-form" action="/api/signup" method="post">
+        <label for="email">Work email</label>
+        <input id="email" name="email" type="email" required autocomplete="email" />
+
+        <label for="plan">Plan</label>
+        <select id="plan" name="plan">
+          <option value="starter">Starter</option>
+          <option value="pro">Pro</option>
+          <option value="team">Team</option>
+        </select>
+
+        <button type="submit">Sign up</button>
+      </form>
+    </main>
+  </body>
+</html>

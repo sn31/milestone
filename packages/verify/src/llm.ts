@@ -81,5 +81,5 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
 
 /** Everything that came from the delivery is evidence, never instructions. */
 export function wrapUntrusted(text: string, label = "evidence"): string {
-  return `<${label} untrusted="true">\n${text.replaceAll(`</${label}>`, "")}\n</${label}>`;
+  return `<${label} untrusted="true">\n${text.replace(new RegExp(`</${label}\\s*>`, "gi"), "")}\n</${label}>`;
 }

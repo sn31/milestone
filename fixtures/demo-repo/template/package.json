@@ -1,0 +1,14 @@
+{
+  "name": "signup-landing-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demo SaaS landing page signup flow used by the Milestone demo",
+  "main": "src/signup.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "UNLICENSED"
+}

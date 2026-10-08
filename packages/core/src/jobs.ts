@@ -10,15 +10,15 @@ export async function jobs(url = process.env.DATABASE_URL): Promise<PgBoss> {
   const b = new PgBoss({ connectionString: url, schema: "jobs" });
   await b.start();
   for (const name of JobName.options) {
-    if (!(await b.getQueue(name))) await b.createQueue(name);
+    if (!(await b.getQueue(name))) await b.createQueue(name, { policy: "stately" });
   }
   boss = b;
   return b;
 }
 
 /**
- * One job per (queue, milestone, dedupe key): pg-boss's singletonKey makes a second enqueue a no-op while
- * the first is queued or running, so a retried webhook never runs the same work twice.
+ * One job per (queue, milestone, dedupe key): on a "stately" queue pg-boss's singletonKey makes a second enqueue
+ * a no-op while the first is queued or running, so a retried webhook never runs the same work twice.
  */
 export async function enqueue(name: JobName, milestoneId: string, data: Record<string, unknown>, opts: { dedupe?: string; delaySeconds?: number } = {}) {
   const b = await jobs();

@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@milestone/core", "@milestone/money"],
+  transpilePackages: ["@milestone/core", "@milestone/money", "@milestone/verify"],
   serverExternalPackages: ["pg", "pg-boss"],
   turbopack: {
     rules: {

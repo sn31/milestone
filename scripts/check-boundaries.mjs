@@ -6,8 +6,8 @@ import { join, relative } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const rules = [
-  { dirs: ["apps", "packages"], forbid: /paypal\/money(\.js)?["']/, allowFiles: ["packages/money/src/policy/execute.ts", "packages/money/src/spike.ts"], why: "only policy/execute.ts may move money" },
-  { dirs: ["packages/verify"], forbid: /@milestone\/money/, why: "the verifier never touches money or policy" },
+  { dirs: ["apps", "packages"], forbid: /paypal\/money(\.js)?["']/, allowFiles: ["packages/money/src/policy/execute.ts"], why: "only policy/execute.ts may move money" },
+  { dirs: ["packages/verify/src"], forbid: /@milestone\/money/, why: "the verifier never touches money or policy (tests may)" },
 ];
 
 function* walk(dir) {
@@ -30,7 +30,7 @@ for (const rule of rules) {
       const src = readFileSync(file, "utf8");
       const lines = src.split("\n");
       lines.forEach((line, i) => {
-        if (/^\s*(import|export)\b/.test(line) && rule.forbid.test(line)) {
+        if ((/^\s*(import|export)\b/.test(line) || /\bimport\s*\(/.test(line) || /^\s*from\s/.test(line)) && rule.forbid.test(line)) {
           console.error(`${rel}:${i + 1}: forbidden import (${rule.why})`);
           failed++;
         }

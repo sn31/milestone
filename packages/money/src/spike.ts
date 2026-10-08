@@ -1,7 +1,8 @@
 /**
  * Money spike (Oct 9): create order -> approve in a browser as the client sandbox account ->
- * capture into the platform account -> payout to the freelancer -> partial refund to the client.
- * Run: pnpm paypal:spike   (reads ../../.env)
+ * capture into the platform account -> full release payout -> a second order and a partial release
+ * (payout plus refund). Goes through the same policy functions the worker uses.
+ * Run: pnpm paypal:spike   (reads ../../.env; needs SPIKE_FREELANCER_EMAIL)
  * Writes each response to fixtures/paypal-recordings/spike.local.json for CI fixtures.
  */
 import { createInterface } from "node:readline/promises";
@@ -9,7 +10,7 @@ import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PayPalClient } from "./paypal/client.js";
 import { approveLink, createOrder, getOrder } from "./paypal/orders.js";
-import { captureOrder, createPayout, getPayoutBatch, refundCapture } from "./paypal/money.js";
+import { captureFunding, executeRelease, type MoneyContext } from "./policy/execute.js";
 
 try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
 
@@ -20,35 +21,34 @@ const currency = "USD";
 const recordings: Record<string, unknown> = {};
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-const order = await createOrder(client, {
-  amountMinor: 50_00, currency, referenceId: `spike-${Date.now()}`,
-  returnUrl: "https://example.com/return", cancelUrl: "https://example.com/cancel", requestId: randomUUID(),
-});
-recordings.createOrder = order;
-console.log("1. Order created:", order.id);
-console.log("   Approve it as the CLIENT sandbox account:", approveLink(order));
-await rl.question("   Press Enter after approving... ");
+// In-memory stand-in for the paypal_ops table: same (kind, key) -> same request id.
+const ids = new Map<string, string>();
+const ctx: MoneyContext = { client, requestIdFor: async (kind, key) => { const k = `${kind}:${key}`; if (!ids.has(k)) ids.set(k, randomUUID()); return ids.get(k)!; } };
 
-const approved = await getOrder(client, order.id);
-if (approved.status !== "APPROVED") throw new Error(`order status is ${approved.status}, expected APPROVED`);
+async function fund(label: string, amountMinor: number) {
+  const milestoneId = `spike-${label}-${Date.now()}`;
+  const order = await createOrder(client, { amountMinor, currency, referenceId: milestoneId, returnUrl: "https://example.com/return", cancelUrl: "https://example.com/cancel", requestId: randomUUID() });
+  recordings[`${label}.createOrder`] = order;
+  console.log(`${label}: order ${order.id}. Approve it as the CLIENT sandbox account:`, approveLink(order));
+  await rl.question("   Press Enter after approving... ");
+  const approved = await getOrder(client, order.id);
+  if (approved.status !== "APPROVED") throw new Error(`order status is ${approved.status}, expected APPROVED`);
+  const { capture } = await captureFunding(ctx, milestoneId, order.id);
+  recordings[`${label}.capture`] = capture;
+  console.log(`${label}: captured ${capture.id} ${capture.status}`);
+  return { milestoneId, capture };
+}
 
-const { capture } = await captureOrder(client, order.id, randomUUID());
-recordings.capture = capture;
-console.log("2. Captured into the platform account:", capture.id, capture.status);
+const m1 = await fund("m1", 50_00);
+recordings["m1.release"] = await executeRelease(ctx, { milestoneId: m1.milestoneId, currency, captureId: m1.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 50_00, decision: { action: "release", amountMinor: 50_00, ruleIds: ["P6"], reason: "spike" } });
+console.log("m1: full release sent", JSON.stringify(recordings["m1.release"]).slice(0, 200));
+// A retry must reuse the same request id and never pay twice.
+recordings["m1.releaseRetry"] = await executeRelease(ctx, { milestoneId: m1.milestoneId, currency, captureId: m1.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 50_00, decision: { action: "release", amountMinor: 50_00, ruleIds: ["P6"], reason: "spike retry" } });
+console.log("m1: retry returned the same batch:", JSON.stringify(recordings["m1.releaseRetry"]) === JSON.stringify(recordings["m1.release"]));
 
-const batch = await createPayout(client, {
-  requestId: randomUUID(), senderBatchId: `spike-${Date.now()}`,
-  items: [{ receiverEmail: freelancer, amountMinor: 40_00, currency, note: "Spike release", senderItemId: "m1" }],
-});
-recordings.payout = batch;
-console.log("3. Payout batch:", batch.batch_header.payout_batch_id, batch.batch_header.batch_status);
-await new Promise((r) => setTimeout(r, 3000));
-recordings.payoutStatus = await getPayoutBatch(client, batch.batch_header.payout_batch_id);
-console.log("   Status after 3s:", (recordings.payoutStatus as { batch_header: { batch_status: string } }).batch_header.batch_status);
-
-const refund = await refundCapture(client, capture.id, { amountMinor: 10_00, currency, requestId: randomUUID(), note: "Spike partial release" });
-recordings.refund = refund;
-console.log("4. Partial refund to the client:", refund.id, refund.status);
+const m2 = await fund("m2", 40_00);
+recordings["m2.partial"] = await executeRelease(ctx, { milestoneId: m2.milestoneId, currency, captureId: m2.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 40_00, decision: { action: "partial", amountMinor: 30_00, ruleIds: ["P5"], reason: "spike" } });
+console.log("m2: partial release sent (payout 30.00, refund 10.00)");
 
 const out = new URL("../../../fixtures/paypal-recordings/spike.local.json", import.meta.url).pathname;
 writeFileSync(out, JSON.stringify(recordings, null, 2));

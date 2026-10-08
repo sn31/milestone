@@ -8,3 +8,5 @@ export { MODEL, promptHash, wrapUntrusted } from "./llm.js";
 export { runDeterministicStage, run, sha256 } from "./deterministic.js";
 export type { DeterministicInput, DeterministicOutput } from "./deterministic.js";
 export { runVisualStage } from "./visual.js";
+export { postVerdictComment, formatVerdictComment, commentMarker } from "./github.js";
+export type { PostCommentInput, PostCommentResult, VerdictCommentInput } from "./github.js";
