@@ -20,19 +20,50 @@ export function fromPayPalValue(value: string, currency: string): number {
 }
 
 // ---------- Contract and criteria ----------
-export const CriterionKind = z.enum(["test", "build", "file", "visual", "judgment"]);
+export const CriterionKind = z.enum(["test", "build", "file", "visual", "judgment", "upload"]);
 export type CriterionKind = z.infer<typeof CriterionKind>;
-export const DETERMINISTIC_KINDS: ReadonlySet<CriterionKind> = new Set(["test", "build", "file"]);
+export const DETERMINISTIC_KINDS: ReadonlySet<CriterionKind> = new Set(["test", "build", "file", "upload"]);
 
 export const CriterionSpec = z.object({
   id: z.string().min(1),
   kind: CriterionKind,
   description: z.string().min(1),
-  /** kind-specific: { command } for test/build, { path } for file, { url, steps } for visual, {} for judgment */
+  /** kind-specific: { command } for test/build, { path } for file, { url, steps } for visual, UploadCriterionSpec for upload, {} for judgment */
   spec: z.record(z.string(), z.unknown()).default({}),
   required: z.boolean().default(true),
 });
 export type CriterionSpec = z.infer<typeof CriterionSpec>;
+
+/** Formats the upload stage can sniff from magic bytes (md and txt: valid UTF-8 text). */
+export const UploadFormat = z.enum(["pdf", "png", "jpg", "svg", "docx", "md", "txt"]);
+export type UploadFormat = z.infer<typeof UploadFormat>;
+
+/**
+ * spec for kind "upload": which delivered file(s) the criterion is about and the checks they must pass.
+ * pattern: a glob ("*.pdf", "logo/*.{svg,png}") or an extension list ([".svg", ".png"] or "svg,png"); a criterion
+ * passes when at least one matching file passes every check.
+ */
+export const UploadCriterionSpec = z.object({
+  pattern: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+  format: UploadFormat.optional(),
+  minBytes: z.number().int().nonnegative().optional(),
+  minWords: z.number().int().nonnegative().optional(),
+  maxPages: z.number().int().positive().optional(),
+  minWidth: z.number().int().positive().optional(),
+  minHeight: z.number().int().positive().optional(),
+  mustContain: z.array(z.string().min(1)).optional(),
+});
+export type UploadCriterionSpec = z.infer<typeof UploadCriterionSpec>;
+
+/** One stored file of an upload delivery (deliveries.payload.files[]); path is relative to UPLOAD_DIR. */
+export const UploadedFile = z.object({
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  path: z.string().min(1),
+  mime: z.string(),
+});
+export type UploadedFile = z.infer<typeof UploadedFile>;
 
 export const MilestoneSpec = z.object({
   seq: z.number().int().positive(),

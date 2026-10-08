@@ -15,7 +15,8 @@
     "db:generate": "pnpm --filter @milestone/core generate",
     "db:migrate": "pnpm --filter @milestone/core migrate",
     "db:seed": "pnpm --filter @milestone/core seed",
-    "paypal:spike": "pnpm --filter @milestone/money spike"
+    "paypal:spike": "pnpm --filter @milestone/money spike",
+    "check:specifiers": "node scripts/check-specifiers.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

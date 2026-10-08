@@ -1,11 +1,20 @@
-import { ContractSpec, DETERMINISTIC_KINDS, type ContractSpec as ContractSpecT } from "@milestone/core";
+import { ContractSpec, DETERMINISTIC_KINDS, UploadCriterionSpec, type ContractSpec as ContractSpecT } from "@milestone/core";
 import { generateJson, promptHash, wrapUntrusted } from "./llm.js";
 
 const SYSTEM = `You turn a plain-English freelance scope into a contract of milestones with checkable acceptance criteria.
 Rules:
 - Three milestones unless the scope clearly needs a different number. Amounts sum exactly to the total.
-- Each milestone has at least one deterministic criterion (kind test, build or file) with a runnable spec:
+- Each milestone has at least one deterministic criterion (kind test, build, file or upload) with a checkable spec:
   test: { "command": "npm test" }, build: { "command": "npm run build" }, file: { "path": "README.md" }.
+- Non-code milestones (design files, logos, PDFs, images, documents, copy) are delivered as uploaded files. Give them
+  upload criteria with concrete checks, plus judgment criteria for taste and fit. An upload spec is
+  { "pattern": glob or extension list, "format"?: "pdf"|"png"|"jpg"|"svg"|"docx"|"md"|"txt", "minBytes"?, "minWords"?,
+  "maxPages"?, "minWidth"?, "minHeight"?, "mustContain"?: [strings, case-insensitive] }. Only use checks a program can
+  verify from the file: format, pixel dimensions, page count, word count, required strings. Example for a logo milestone:
+  { "id": "logo-file", "kind": "upload", "description": "Logo as SVG or PNG at least 1024 px wide", "spec": { "pattern": "*.{svg,png}", "minWidth": 1024 } },
+  { "id": "style-guide", "kind": "upload", "description": "PDF style guide, at most 12 pages, with a Typography section", "spec": { "pattern": "*.pdf", "format": "pdf", "maxPages": 12, "mustContain": ["Typography"] } },
+  { "id": "logo-fit", "kind": "judgment", "description": "The logo reads clearly at small sizes and suits a neighbourhood bakery", "spec": {} }.
+  Never mix repository criteria (test, build) and upload criteria in one milestone.
 - Judgment criteria (kind judgment) are for things only a reviewer can assess; keep them few and specific.
 - visual criteria carry { "url_from": "deploy", "steps": ["open /", "click Sign up", "expect text Welcome"] }.
 - Criterion ids are short slugs unique in the contract. required=false only for nice-to-haves.
@@ -48,6 +57,10 @@ export function validateContract(c: ContractSpecT, input: Pick<CompileInput, "cu
     if (!m.criteria.some((k) => DETERMINISTIC_KINDS.has(k.kind))) throw new Error(`milestone ${m.seq} has no deterministic criterion`);
     for (const k of m.criteria) {
       if (ids.has(k.id)) throw new Error(`duplicate criterion id ${k.id}`);
+      if (k.kind === "upload") {
+        const spec = UploadCriterionSpec.safeParse(k.spec);
+        if (!spec.success) throw new Error(`criterion ${k.id}: invalid upload spec (${spec.error.issues.map((x) => x.message).join("; ")})`);
+      }
       ids.add(k.id);
     }
   });

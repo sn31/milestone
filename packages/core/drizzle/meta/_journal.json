@@ -15,6 +15,13 @@
       "when": 1791442456071,
       "tag": "0001_normal_shatterstar",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791445786958,
+      "tag": "0002_living_patch",
+      "breakpoints": true
     }
   ]
 }

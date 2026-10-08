@@ -3,8 +3,8 @@ import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestam
 export const userRole = pgEnum("user_role", ["client", "freelancer", "partner", "platform"]);
 export const contractStatus = pgEnum("contract_status", ["draft", "approved", "active", "closed"]);
 export const milestoneStatus = pgEnum("milestone_status", ["draft", "funded", "verifying", "review", "released", "held", "needs_client", "partial_released"]);
-export const criterionKind = pgEnum("criterion_kind", ["test", "build", "file", "visual", "judgment"]);
-export const deliverySource = pgEnum("delivery_source", ["github_pr", "deploy_url", "manual"]);
+export const criterionKind = pgEnum("criterion_kind", ["test", "build", "file", "visual", "judgment", "upload"]);
+export const deliverySource = pgEnum("delivery_source", ["github_pr", "deploy_url", "manual", "upload"]);
 export const verdictResult = pgEnum("verdict_result", ["pass", "partial", "fail"]);
 export const advanceStatus = pgEnum("advance_status", ["offered", "funded", "repaid", "shortfall"]);
 export const opStatus = pgEnum("op_status", ["pending", "sent", "succeeded", "failed"]);
