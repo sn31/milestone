@@ -1,5 +1,5 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
+import { isSimulatedWebhook, paypalMode, verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
 import { audit, enqueue, storeWebhookOnce, webhookEvents, PAYPAL_EVENTS, type Db } from "@milestone/core";
 import { paypal } from "@/lib/paypal";
 import { getDb } from "@/lib/db";
@@ -13,10 +13,16 @@ import { captureAndFund, fundFromCapture, isCaptureInfo, milestoneForCapture, ty
  */
 export async function POST(req: Request) {
   const raw = await req.text();
-  const webhookId = process.env.PAYPAL_WEBHOOK_ID;
-  if (!webhookId) return new Response("PAYPAL_WEBHOOK_ID not set", { status: 500 });
-  const ok = await verifyWebhookSignature(paypal(), req.headers, raw, webhookId);
-  if (!ok) return new Response("bad signature", { status: 400 });
+  if (paypalMode() === "simulated") {
+    // Simulated PayPal signs nothing; its events carry X-Milestone-Simulated with the shared secret instead. Only
+    // that header is accepted here (the simulator's verify-webhook-signature would say SUCCESS to anything).
+    if (!isSimulatedWebhook(req.headers)) return new Response("bad signature", { status: 400 });
+  } else {
+    const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+    if (!webhookId) return new Response("PAYPAL_WEBHOOK_ID not set", { status: 500 });
+    const ok = await verifyWebhookSignature(paypal(), req.headers, raw, webhookId);
+    if (!ok) return new Response("bad signature", { status: 400 });
+  }
 
   const event = JSON.parse(raw) as WebhookEvent;
   const db = getDb();

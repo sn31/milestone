@@ -1,0 +1,500 @@
+{
+  "info": {
+    "name": "Milestone",
+    "description": "One request per route in docs/openapi.yaml. Auth is the milestone_actor cookie (usr_client, usr_freelancer, usr_partner).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "contractId",
+      "value": "ctr_demo"
+    },
+    {
+      "key": "milestoneId",
+      "value": "mst_1"
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "signature",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Create contract",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/contracts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "contracts"
+          ]
+        },
+        "description": "303 redirect to the contract page. Disable follow redirects in Postman to see it.",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "scope",
+              "value": "Build a signup flow for a SaaS landing page: form, validation, confirmation page, in three milestones."
+            },
+            {
+              "key": "currency",
+              "value": "USD"
+            },
+            {
+              "key": "total",
+              "value": "300.00"
+            },
+            {
+              "key": "repo",
+              "value": "milestone-demo/landing"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Approve contract (client)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/contracts/{{contractId}}/approve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "contracts",
+            "{{contractId}}",
+            "approve"
+          ]
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "Approve contract (freelancer)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/contracts/{{contractId}}/approve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "contracts",
+            "{{contractId}}",
+            "approve"
+          ]
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "Create funding order",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/order",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "order"
+          ]
+        },
+        "description": "Returns { orderId }."
+      }
+    },
+    {
+      "name": "Capture funding",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/capture",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "capture"
+          ]
+        },
+        "description": "Approve the order in the sandbox first.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"orderId\": \"{{orderId}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Review: approve",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/review",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "review"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"approve\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Review: veto",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/review",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "review"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"veto\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Review: confirm partial",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/review",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "review"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"confirm_partial\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Review: hold",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/review",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "review"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"hold\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "PayPal client token",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/paypal/client-token",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "paypal",
+            "client-token"
+          ]
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "PayPal webhook (example)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "PAYPAL-TRANSMISSION-ID",
+            "value": "{{paypal_transmission_id}}"
+          },
+          {
+            "key": "PAYPAL-TRANSMISSION-TIME",
+            "value": "{{paypal_transmission_time}}"
+          },
+          {
+            "key": "PAYPAL-TRANSMISSION-SIG",
+            "value": "{{paypal_transmission_sig}}"
+          },
+          {
+            "key": "PAYPAL-CERT-URL",
+            "value": "{{paypal_cert_url}}"
+          },
+          {
+            "key": "PAYPAL-AUTH-ALGO",
+            "value": "{{paypal_auth_algo}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/webhooks/paypal",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "webhooks",
+            "paypal"
+          ]
+        },
+        "description": "A hand-made event fails signature verification (400). Real events come from PayPal; use the sandbox webhook simulator.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"WH-EXAMPLE-1\",\n  \"event_type\": \"PAYMENT.CAPTURE.COMPLETED\",\n  \"create_time\": \"2026-10-08T12:00:00Z\",\n  \"resource_type\": \"capture\",\n  \"resource\": {\n    \"id\": \"CAPTURE-ID\",\n    \"status\": \"COMPLETED\",\n    \"amount\": {\n      \"currency_code\": \"USD\",\n      \"value\": \"100.00\"\n    },\n    \"supplementary_data\": {\n      \"related_ids\": {\n        \"order_id\": \"ORDER-ID\"\n      }\n    }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "GitHub webhook (example)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-GitHub-Event",
+            "value": "pull_request"
+          },
+          {
+            "key": "X-GitHub-Delivery",
+            "value": "{{$guid}}"
+          },
+          {
+            "key": "X-Hub-Signature-256",
+            "value": "sha256={{signature}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/webhooks/github",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "webhooks",
+            "github"
+          ]
+        },
+        "description": "signature is HMAC-SHA256 of the raw body with GITHUB_WEBHOOK_SECRET.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"closed\",\n  \"pull_request\": {\n    \"number\": 1,\n    \"merged\": true,\n    \"merge_commit_sha\": \"0123456789abcdef0123456789abcdef01234567\",\n    \"title\": \"feat: password strength check\",\n    \"body\": \"\",\n    \"head\": {\n      \"ref\": \"m1-pass\"\n    },\n    \"base\": {\n      \"sha\": \"89abcdef0123456789abcdef0123456789abcdef\"\n    }\n  },\n  \"repository\": {\n    \"full_name\": \"milestone-demo/landing\",\n    \"clone_url\": \"https://github.com/milestone-demo/landing.git\"\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Resolve operator case",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_partner"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/ops/{{milestoneId}}/resolve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "ops",
+            "{{milestoneId}}",
+            "resolve"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"note\": \"Paid the freelancer by hand in the PayPal dashboard; payout item was returned.\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

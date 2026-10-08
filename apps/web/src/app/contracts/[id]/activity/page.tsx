@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getDb } from "@/lib/db";
 import { AuditGrid, type AuditRow } from "@/components/audit-grid";
+import { ACTOR_NAMES } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -17,15 +18,16 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
     id: r.id,
     at: r.createdAt.toISOString(),
     milestone: r.milestoneId ? (label.get(r.milestoneId) ?? r.milestoneId) : "",
-    actor: r.actor,
+    actor: ACTOR_NAMES[r.actor] ?? r.actor,
     event: r.event,
     detail: r.detail ?? null,
   }));
   return (
     <main className="space-y-4">
       <header>
-        <Link href={`/contracts/${id}`} className="text-sm underline">Back to contract</Link>
-        <h1 className="mt-2 text-2xl font-semibold">Activity: {contract.title}</h1>
+        <Link href={`/contracts/${id}`} className="text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white">&larr; {contract.title}</Link>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Audit log</h1>
+        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Every approval, verdict, decision and PayPal call on this contract. Both parties can read it.</p>
       </header>
       <AuditGrid rows={rows} />
     </main>

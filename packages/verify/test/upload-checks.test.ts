@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
 import { countWords, docxText, jpegSize, patternMatcher, pdfPageCount, pdfText, pngSize, runUploadStage, sniffFormat } from "../src/upload-checks.ts";
 import { toolResultContent } from "../src/llm.ts";
+import { validateContract } from "../src/compiler.ts";
 
 // ---------- fixtures, generated ----------
 
@@ -201,5 +202,17 @@ describe("tool results", () => {
     const doc = toolResultContent({ type: "document", mediaType: "application/pdf", base64: "AAAA" }) as Array<{ type: string; source?: { media_type: string } }>;
     expect(doc.map((b) => b.type)).toEqual(["text", "document"]);
     expect(doc[1]!.source!.media_type).toBe("application/pdf");
+  });
+});
+
+describe("validateContract with upload criteria", () => {
+  const judgment = crit("fit", {}, "judgment");
+  it("counts an upload criterion as deterministic", () => {
+    const c = { title: "t", currency: "USD", totalMinor: 100, milestones: [{ seq: 1, title: "logo", amountMinor: 100, criteria: [crit("logo", { pattern: "*.{svg,png}", minWidth: 1024 }), judgment] }] };
+    expect(validateContract(c, { currency: "USD", totalMinor: 100 })).toBe(c);
+  });
+  it("rejects an upload criterion without a pattern", () => {
+    const c = { title: "t", currency: "USD", totalMinor: 100, milestones: [{ seq: 1, title: "logo", amountMinor: 100, criteria: [crit("logo", { minWidth: 1024 }), judgment] }] };
+    expect(() => validateContract(c, { currency: "USD", totalMinor: 100 })).toThrow(/invalid upload spec/);
   });
 });

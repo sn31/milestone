@@ -56,6 +56,42 @@ for (const c of criteriaRows) {
   await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
 }
 
+// A non-code contract: deliveries are uploaded files checked by the upload stage (format, size, pixels, pages, words).
+const brand = {
+  id: "ctr_brand",
+  clientId: "usr_client",
+  freelancerId: "usr_freelancer",
+  title: "Brand refresh for a bakery",
+  scopeText: "Refresh the brand of a neighbourhood bakery: a new logo with a colour system and a short style guide, then the website copy.",
+  currency: "USD",
+  totalMinor: 15000,
+  repoFullName: null,
+  status: "active" as const,
+  clientApprovedAt: now,
+  freelancerApprovedAt: now,
+};
+const { id: _bid, ...brandSet } = brand;
+await db.insert(contracts).values(brand).onConflictDoUpdate({ target: contracts.id, set: brandSet });
+
+const brandMilestones = [
+  { id: "mst_brand_1", contractId: "ctr_brand", seq: 1, title: "Logo and colour system", amountMinor: 9000, status: "draft" as const, advanceEligible: true },
+  { id: "mst_brand_2", contractId: "ctr_brand", seq: 2, title: "Website copy", amountMinor: 6000, status: "draft" as const, advanceEligible: true },
+];
+for (const m of brandMilestones) {
+  const { id: _mid, ...mSet } = m;
+  await db.insert(milestones).values(m).onConflictDoUpdate({ target: milestones.id, set: mSet });
+}
+criteriaRows.push(
+  { id: "crt_brand_1_logo", milestoneId: "mst_brand_1", kind: "upload", description: "Logo as an SVG or a PNG at least 1024 px wide", spec: { pattern: "*.{svg,png}", minWidth: 1024 }, required: true },
+  { id: "crt_brand_1_guide", milestoneId: "mst_brand_1", kind: "upload", description: "PDF style guide of at most 12 pages with a Typography section", spec: { pattern: "*.pdf", format: "pdf", maxPages: 12, mustContain: ["Typography"] }, required: true },
+  { id: "crt_brand_1_judge", milestoneId: "mst_brand_1", kind: "judgment", description: "The logo reads clearly at small sizes and the colour system suits a neighbourhood bakery", spec: {}, required: false },
+  { id: "crt_brand_2_copy", milestoneId: "mst_brand_2", kind: "upload", description: "Website copy as .md or .docx, at least 600 words, with an About us section", spec: { pattern: [".md", ".docx"], minWords: 600, mustContain: ["About us"] }, required: true },
+  { id: "crt_brand_2_judge", milestoneId: "mst_brand_2", kind: "judgment", description: "The copy is warm, specific to the bakery and free of filler", spec: {}, required: false },
+);
+for (const c of criteriaRows.slice(-5)) {
+  await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
+}
+
 // Freelancer history: five past releases with a verified pass. Fixed ids keep reseeding a no-op.
 for (let i = 1; i <= 5; i++) {
   await db.insert(auditLog).values({
@@ -69,5 +105,5 @@ for (let i = 1; i <= 5; i++) {
 
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
-console.log(`seed ok: ${userRows.length} users, 1 contract, 3 milestones, ${criteriaRows.length} criteria, ${n} release events`);
+console.log(`seed ok: ${userRows.length} users, 2 contracts, ${3 + brandMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events`);
 process.exit(0);

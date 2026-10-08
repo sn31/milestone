@@ -1,12 +1,12 @@
 import { rm } from "node:fs/promises";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Job } from "pg-boss";
-import { audit, deliveries, enqueue, milestones, transition, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
+import { audit, deliveries, enqueue, milestones, transition, UploadPayload, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection, enforce, formatVerdictComment, judge, overall, postVerdictComment, runDeterministicStage, type DeterministicOutput } from "@milestone/verify";
+import { detectInjection, enforce, formatVerdictComment, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
-import { createEvidenceReader, git } from "../lib/evidence.ts";
+import { createEvidenceReader, createUploadEvidenceReader, git, safePath } from "../lib/evidence.ts";
 import { isFlaggedForOperator } from "./release.ts";
 
 /** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
@@ -33,6 +33,13 @@ interface DeliveryPayload {
  */
 const SETUP = [["sh", "-c", "if [ -f package-lock.json ]; then npm ci --ignore-scripts; elif [ -f package.json ]; then npm install --ignore-scripts; fi"]];
 
+function uploadPayloadOf(raw: Record<string, unknown> | null): UploadPayload {
+  const parsed = UploadPayload.safeParse(raw ?? {});
+  if (!parsed.success) throw new Error(`upload delivery payload is invalid: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+  return parsed.data;
+}
+
+/** Commit deliveries (GitHub PR, manual) share one payload shape: clone_url + sha. */
 function payloadOf(raw: Record<string, unknown> | null): DeliveryPayload {
   const p = raw ?? {};
   const str = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
@@ -97,6 +104,25 @@ async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[]
   }
 }
 
+type Injection = { suspected: boolean; hits: Array<{ source: string; match: string }> };
+
+/** Judge with the model when one is configured; otherwise deterministic evidence only and everything else unclear. */
+async function conclude(deliveryId: string, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
+  if (process.env.ANTHROPIC_API_KEY) {
+    const r = await judge({ deliveryId, criteria, evidence, deliveryTexts, reader: reader() });
+    if (extra.suspected) r.verdict.suspected_injection = true;
+    return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits] };
+  }
+  const injection = detectInjection(deliveryTexts);
+  const verdict = enforce({ delivery_id: deliveryId, criteria: [], suspected_injection: injection.suspected || extra.suspected }, { deliveryId, criteria, evidence });
+  const byCriterion = new Map(evidence.filter((e) => e.criterion_id).map((e) => [e.criterion_id!, e]));
+  for (const c of verdict.criteria) {
+    const ev = byCriterion.get(c.criterion_id);
+    c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : "not judged: no model configured";
+  }
+  return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits] };
+}
+
 async function produceVerdict(deliveryId: string, payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null) {
   const stage = await deterministic(payload, criteria, baselineSha);
   try {
@@ -106,25 +132,32 @@ async function produceVerdict(deliveryId: string, payload: DeliveryPayload, crit
       { source: "pr_body", text: payload.body },
       { source: "commit_message", text: commitMessage },
     ].filter((t) => t.text.trim() !== "");
-
-    if (process.env.ANTHROPIC_API_KEY) {
-      const reader = createEvidenceReader({ workdir: stage.workdir, sha: payload.sha, baseline: stage.baseline, repoUrl: payload.clone_url, evidence: stage.evidence });
-      const r = await judge({ deliveryId, criteria, evidence: stage.evidence, deliveryTexts, reader });
-      return { evidence: stage.evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: r.injectionHits };
-    }
-
-    // No model configured: deterministic evidence only; everything else is unclear.
-    const injection = detectInjection(deliveryTexts);
-    const verdict = enforce({ delivery_id: deliveryId, criteria: [], suspected_injection: injection.suspected }, { deliveryId, criteria, evidence: stage.evidence });
-    const byCriterion = new Map(stage.evidence.filter((e) => e.criterion_id).map((e) => [e.criterion_id!, e]));
-    for (const c of verdict.criteria) {
-      const ev = byCriterion.get(c.criterion_id);
-      c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : "not judged: no model configured";
-    }
-    return { evidence: stage.evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: injection.hits };
+    return await conclude(deliveryId, criteria, stage.evidence, deliveryTexts, () =>
+      createEvidenceReader({ workdir: stage.workdir, sha: payload.sha, baseline: stage.baseline, repoUrl: payload.clone_url, evidence: stage.evidence }),
+    );
   } finally {
     if (stage.workdir) await rm(stage.workdir, { recursive: true, force: true });
   }
+}
+
+/** Excerpt of each delivered file's text that goes into the judge's prompt; injection detection reads all of it. */
+const EXCERPT = 4_000;
+
+/**
+ * File delivery: the upload stage (format, size, dimensions, pages, words, required strings), then the judge with
+ * view_file. No repository, so no tamper check: nothing in an upload controls what the checks run.
+ */
+async function produceUploadVerdict(deliveryId: string, payload: UploadPayload, criteria: CriterionSpec[]) {
+  const root = uploadRoot();
+  const files = await Promise.all(payload.files.map(async (f) => ({ ...f, absPath: await safePath(root, f.path) })));
+  const stage = await runUploadStage({ files, criteria });
+  const texts = stage.inspections.filter((i) => i.text?.trim()).map((i) => ({ source: `file ${i.name}`, text: i.text! }));
+  const full = detectInjection(texts);
+  const deliveryTexts = [
+    { source: "file_names", text: payload.files.map((f) => f.name).join("\n") },
+    ...texts.map((t) => ({ source: t.source, text: t.text.length > EXCERPT ? `${t.text.slice(0, EXCERPT)}\n[excerpt; use view_file for the rest]` : t.text })),
+  ];
+  return conclude(deliveryId, criteria, stage.evidence, deliveryTexts, () => createUploadEvidenceReader({ root, files: payload.files, evidence: stage.evidence }), full);
 }
 
 async function loadAll(db: Db, deliveryId: string) {
@@ -139,13 +172,14 @@ async function loadAll(db: Db, deliveryId: string) {
   return { delivery, milestone, contract, criteria };
 }
 
-/** Deterministic stage -> judge -> verdict on the delivery -> decide() -> state + release schedule -> PR comment. Safe to retry at every step. */
+/** Deterministic (or upload) stage -> judge -> verdict on the delivery -> decide() -> state + release schedule -> PR comment. Safe to retry at every step. */
 export async function verify(job: Job<JobData>): Promise<void> {
   const deliveryId = job.data.deliveryId;
   if (typeof deliveryId !== "string" || !deliveryId) throw new Error("verify job needs a deliveryId");
   const db = getDb();
   let { delivery, milestone, contract, criteria } = await loadAll(db, deliveryId);
-  const payload = payloadOf(delivery.payload);
+  // Upload deliveries carry files; everything else (GitHub PR, manual) a commit to clone.
+  const source = delivery.source === "upload" ? { kind: "upload" as const, payload: uploadPayloadOf(delivery.payload) } : { kind: "commit" as const, payload: payloadOf(delivery.payload) };
 
   // 1. Verdict, once per delivery.
   if (!delivery.verdict || !delivery.result || !delivery.verifiedAt) {
@@ -154,7 +188,7 @@ export async function verify(job: Job<JobData>): Promise<void> {
       console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
       return;
     }
-    const v = await produceVerdict(deliveryId, payload, criteria, milestone.baselineSha);
+    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, source.payload, criteria) : await produceVerdict(deliveryId, source.payload, criteria, milestone.baselineSha);
     const stored = await db
       .update(deliveries)
       .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })

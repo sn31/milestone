@@ -78,7 +78,7 @@ export function ReviewCard(props: {
       type="button"
       disabled={busy !== null}
       onClick={() => act(action)}
-      className={`rounded px-3 py-1.5 text-sm disabled:opacity-50 ${primary ? "bg-zinc-900 text-white" : "border border-zinc-300"}`}
+      className={`rounded-lg px-3 py-1.5 text-sm font-medium disabled:cursor-wait disabled:opacity-50 ${primary ? "bg-zinc-900 text-white shadow-sm hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200" : "border border-zinc-300 bg-white hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"}`}
     >
       {busy === action ? "Working..." : label}
     </button>
@@ -100,7 +100,7 @@ export function ReviewCard(props: {
   }
 
   return (
-    <div className="mt-3 space-y-2 rounded border border-zinc-200 p-3 text-sm">
+    <div className="mt-3 space-y-3 rounded-lg border border-indigo-200 bg-indigo-50/60 p-4 text-sm dark:border-indigo-900 dark:bg-indigo-950/40">
       {props.status === "review" ? (
         <p>
           Review window: {endsAt !== null && now !== null ? timeLeft(endsAt - now) : "..."}.{" "}
@@ -108,13 +108,13 @@ export function ReviewCard(props: {
         </p>
       ) : (
         <p>
-          The agent recommends: <span className="font-medium">{(props.decisionAction ?? "ask client").replace("_", " ")}</span>
+          The agent recommends: <span className="font-medium">{(props.decisionAction ?? "ask client").replaceAll("_", " ")}</span>
           {props.amountLabel ? <> with a proposed amount of <span className="font-medium">{props.amountLabel}</span></> : null}.
-          {props.reason ? <span className="block text-zinc-600">{props.reason}</span> : null}
+          {props.reason ? <span className="mt-1 block text-zinc-600 dark:text-zinc-400">{props.reason}</span> : null}
         </p>
       )}
-      {props.isClient ? <div className="flex flex-wrap gap-2">{buttons}</div> : <p className="text-zinc-500">Waiting for the client.</p>}
-      {error ? <p role="alert" className="text-red-700">{error}</p> : null}
+      {props.isClient ? <div className="flex flex-wrap gap-2">{buttons}</div> : <p className="text-zinc-500 dark:text-zinc-400">Waiting for the client to respond.</p>}
+      {error ? <p role="alert" className="text-rose-700 dark:text-rose-400">{error}</p> : null}
     </div>
   );
 }

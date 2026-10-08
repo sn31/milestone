@@ -65,6 +65,10 @@ export const UploadedFile = z.object({
 });
 export type UploadedFile = z.infer<typeof UploadedFile>;
 
+/** deliveries.payload for source "upload". */
+export const UploadPayload = z.object({ files: z.array(UploadedFile).min(1).max(10) });
+export type UploadPayload = z.infer<typeof UploadPayload>;
+
 export const MilestoneSpec = z.object({
   seq: z.number().int().positive(),
   title: z.string().min(1),

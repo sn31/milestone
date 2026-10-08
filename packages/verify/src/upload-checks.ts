@@ -8,7 +8,9 @@
  * has a check the stage could not decide (e.g. text inside a PDF with custom font encodings), and fails otherwise.
  * Every delivered file also becomes an evidence item (no criterion, no status) for the judgment stage.
  */
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { inflateRawSync, inflateSync } from "node:zlib";
 import { UploadCriterionSpec, type CriterionSpec, type CriterionStatus, type EvidenceSummary, type UploadFormat } from "@milestone/core";
 
@@ -57,6 +59,23 @@ export const MIME_BY_FORMAT: Record<UploadFormat, string> = {
   md: "text/markdown; charset=utf-8",
   txt: "text/plain; charset=utf-8",
 };
+
+/**
+ * Where uploaded files live: UPLOAD_DIR (absolute, or relative to the repo root), default <repo>/var/uploads. The web
+ * app and the worker run from different directories, so a relative path is resolved against the directory holding
+ * pnpm-workspace.yaml, found by walking up from the current directory.
+ */
+export function uploadRoot(env: string | undefined = process.env.UPLOAD_DIR, cwd = process.cwd()): string {
+  if (env && isAbsolute(env)) return env;
+  let dir = resolve(cwd);
+  for (;;) {
+    if (existsSync(join(dir, "pnpm-workspace.yaml"))) break;
+    const up = dirname(dir);
+    if (up === dir) { dir = resolve(cwd); break; }
+    dir = up;
+  }
+  return resolve(dir, env || "var/uploads");
+}
 
 /** Evidence id for the i-th delivered file (0-based). */
 export const fileEvidenceId = (i: number) => `evd_file_${i + 1}`;

@@ -8,19 +8,36 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Milestone",
+  title: { default: "Milestone", template: "%s · Milestone" },
   description: "AI escrow agent for freelance work",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col">
-        <header className="flex items-center justify-between border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
-          <Link href="/" className="font-semibold">Milestone</Link>
-          <RoleSwitcher />
+      <body className="flex min-h-full flex-col">
+        <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/85 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/85">
+          <div className="mx-auto flex w-full max-w-4xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
+            <div className="flex items-center gap-6">
+              <Link href="/" className="flex items-center gap-2" aria-label="Milestone home">
+                <span aria-hidden className="grid size-7 place-items-center rounded-md bg-zinc-900 text-[13px] font-bold text-white dark:bg-white dark:text-zinc-900">M</span>
+                <span className="leading-tight">
+                  <span className="block text-[15px] font-semibold tracking-tight">Milestone</span>
+                  <span className="block text-[11px] text-zinc-500 dark:text-zinc-400">AI escrow for freelance work</span>
+                </span>
+              </Link>
+              <nav className="hidden items-center gap-4 text-sm text-zinc-600 sm:flex dark:text-zinc-400">
+                <Link href="/" className="hover:text-zinc-900 dark:hover:text-white">Contracts</Link>
+                <Link href="/contracts/new" className="hover:text-zinc-900 dark:hover:text-white">New contract</Link>
+              </nav>
+            </div>
+            <RoleSwitcher />
+          </div>
         </header>
-        <div className="mx-auto w-full max-w-3xl flex-1 px-6 py-8">{children}</div>
+        <div className="mx-auto w-full max-w-4xl flex-1 px-4 py-8 sm:px-6">{children}</div>
+        <footer className="mx-auto w-full max-w-4xl px-4 pb-8 text-xs text-zinc-400 sm:px-6 dark:text-zinc-500">
+          Demo identities; PayPal runs in sandbox or simulated mode. The agent explains, a fixed policy decides.
+        </footer>
       </body>
     </html>
   );

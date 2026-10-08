@@ -4,8 +4,9 @@
  */
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { EvidenceSummary } from "@milestone/core";
-import { run, type EvidenceReader } from "@milestone/verify";
+import { createHash } from "node:crypto";
+import type { EvidenceSummary, UploadedFile } from "@milestone/core";
+import { docxText, fileEvidenceId, pdfText, run, sniffFormat, type EvidenceReader, type ToolOutput } from "@milestone/verify";
 
 export const MAX_TEXT = 100_000;
 
@@ -78,6 +79,72 @@ export function createEvidenceReader(input: ReaderInput): EvidenceReader {
     },
     async viewScreenshot() {
       return "no screenshot";
+    },
+    async viewFile() {
+      return "this delivery is a repository commit, not uploaded files; use read_file";
+    },
+  };
+}
+
+/** Images and PDFs larger than this go to the model as text (or a note), not as image/document blocks. */
+export const MAX_VIEW_BYTES = 5 * 1024 * 1024;
+
+export interface UploadReaderInput {
+  /** UPLOAD_DIR; every file's path is resolved under it. */
+  root: string;
+  files: UploadedFile[];
+  evidence: EvidenceSummary[];
+}
+
+/** Read-only access to an upload delivery's stored files; evd_file_N is files[N-1]. Bytes are checked against the stored sha256. */
+export function createUploadEvidenceReader(input: UploadReaderInput): EvidenceReader {
+  const load = async (file: UploadedFile): Promise<Buffer> => {
+    const bytes = await readFile(await safePath(input.root, file.path));
+    if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error(`${file.name} changed since it was uploaded`);
+    return bytes;
+  };
+  const asText = (file: UploadedFile, bytes: Buffer): string => {
+    const format = sniffFormat(bytes, file.name);
+    if (format === "docx") return bound(docxText(bytes) ?? "the .docx body could not be read");
+    if (format === "pdf") return bound(`[text extracted from ${file.name}, best effort]\n${pdfText(bytes)}`);
+    if (format === "png" || format === "jpg") return `${file.name} is an image; use view_file to see it`;
+    if (format === null) return `${file.name} is in an unrecognised binary format`;
+    return bound(bytes.subarray(0, MAX_TEXT * 4).toString("utf8"));
+  };
+  const byEvidence = (id: string) => {
+    const i = input.files.findIndex((_, n) => fileEvidenceId(n) === id);
+    if (i < 0) throw new Error(`no delivered file has evidence id ${id}; file ids are ${input.files.map((_, n) => fileEvidenceId(n)).join(", ")}`);
+    return input.files[i]!;
+  };
+  return {
+    async readFile(path) {
+      const file = input.files.find((f) => f.name === path);
+      if (!file) throw new Error(`no delivered file named ${path}`);
+      return asText(file, await load(file));
+    },
+    async getDiff() {
+      return "this delivery is uploaded files, there is no diff; use list_evidence and view_file";
+    },
+    async listEvidence() {
+      return input.evidence;
+    },
+    async viewScreenshot() {
+      return "no screenshot";
+    },
+    async viewFile(evidenceId): Promise<ToolOutput> {
+      const file = byEvidence(evidenceId);
+      const bytes = await load(file);
+      const format = sniffFormat(bytes, file.name);
+      const note = `${evidenceId}: ${file.name}, ${bytes.length} bytes`;
+      if (format === "png" || format === "jpg") {
+        if (bytes.length > MAX_VIEW_BYTES) return `${note}: image larger than ${MAX_VIEW_BYTES} bytes, not shown; rely on the upload checks`;
+        return { type: "image", mediaType: format === "png" ? "image/png" : "image/jpeg", base64: bytes.toString("base64"), note };
+      }
+      if (format === "pdf") {
+        if (bytes.length > MAX_VIEW_BYTES) return `${note}: PDF larger than ${MAX_VIEW_BYTES} bytes, extracted text only\n${asText(file, bytes)}`;
+        return { type: "document", mediaType: "application/pdf", base64: bytes.toString("base64"), note };
+      }
+      return `${note}\n${asText(file, bytes)}`;
     },
   };
 }

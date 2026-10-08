@@ -6,7 +6,7 @@ export { detectInjection } from "./injection.ts";
 export { explain } from "./explain.ts";
 export { MODEL, promptHash, toolResultContent, wrapUntrusted } from "./llm.ts";
 export type { Tool, ToolOutput } from "./llm.ts";
-export { runUploadStage, evaluateUploadCriterion, inspect as inspectUpload, sniffFormat, pngSize, jpegSize, pdfPageCount, pdfText, docxText, countWords, patternMatcher, fileEvidenceId, MIME_BY_FORMAT } from "./upload-checks.ts";
+export { runUploadStage, evaluateUploadCriterion, inspect as inspectUpload, sniffFormat, pngSize, jpegSize, pdfPageCount, pdfText, docxText, countWords, patternMatcher, fileEvidenceId, uploadRoot, MIME_BY_FORMAT } from "./upload-checks.ts";
 export type { UploadStageFile, UploadStageInput, UploadStageOutput, FileInspection } from "./upload-checks.ts";
 export { runDeterministicStage, run, sha256 } from "./deterministic.ts";
 export type { DeterministicInput, DeterministicOutput } from "./deterministic.ts";

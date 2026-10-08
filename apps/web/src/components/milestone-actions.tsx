@@ -1,6 +1,7 @@
-import type { contracts, milestones } from "@milestone/core";
+import { UploadPayload, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import type { Actor } from "@/lib/session";
 import { formatMoney } from "@/lib/format";
+import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
 import { VerdictView } from "@/components/verdict-view";
@@ -8,9 +9,53 @@ import { getDb } from "@/lib/db";
 
 type MilestoneRow = typeof milestones.$inferSelect;
 type ContractRow = typeof contracts.$inferSelect;
+type CriterionRow = typeof criteriaTable.$inferSelect;
+type DeliveryRow = typeof deliveries.$inferSelect;
 
 function Note({ children }: { children: React.ReactNode }) {
   return <p className="mt-3 text-sm text-zinc-500">{children}</p>;
+}
+
+/** The freelancer's delivery form on a funded or held milestone: files when it has upload criteria, a commit otherwise. */
+function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor, crit: CriterionRow[]) {
+  if (actor.role !== "freelancer" || actor.userId !== contract.freelancerId) return null;
+  if (milestone.status !== "funded" && milestone.status !== "held") return null;
+  const files = crit.some((c) => c.kind === "upload");
+  const repo = crit.some((c) => c.kind === "test" || c.kind === "build" || c.kind === "file" || c.kind === "visual") || !files;
+  const patterns = crit
+    .filter((c) => c.kind === "upload")
+    .map((c) => (c.spec as { pattern?: unknown }).pattern)
+    .flatMap((p) => (Array.isArray(p) ? p : [p]))
+    .filter((p): p is string => typeof p === "string");
+  return (
+    <DeliverForm
+      milestoneId={milestone.id}
+      files={files}
+      repo={repo}
+      defaultRepoUrl={contract.repoFullName ? `https://github.com/${contract.repoFullName}.git` : null}
+      accept={patterns.length ? [...new Set(patterns)].join(", ") : null}
+    />
+  );
+}
+
+/** Links to an upload delivery's files (served only to the contract's parties). */
+function DeliveredFiles({ delivery }: { delivery: DeliveryRow | null }) {
+  if (!delivery || delivery.source !== "upload") return null;
+  const parsed = UploadPayload.safeParse(delivery.payload);
+  if (!parsed.success) return null;
+  return (
+    <ul className="mt-3 space-y-1 text-sm">
+      {parsed.data.files.map((f) => (
+        <li key={f.path} className="flex gap-2">
+          <a className="underline" href={`/api/files/${encodeURIComponent(delivery.id)}/${encodeURIComponent(f.name)}`} target="_blank" rel="noreferrer noopener">
+            {f.name}
+          </a>
+          <span className="text-zinc-500">{Math.ceil(f.size / 1024)} KB</span>
+          <span className="font-mono text-xs text-zinc-500">sha256 {f.sha256.slice(0, 12)}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export async function MilestoneActions({ milestone, contract, actor }: { milestone: MilestoneRow; contract: ContractRow; actor: Actor }) {
@@ -23,16 +68,22 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
           currency={contract.currency}
           amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
           paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
+          mode={process.env.PAYPAL_MODE ?? (process.env.PAYPAL_CLIENT_ID ? "sandbox" : "simulated")}
         />
       );
     }
     return <Note>Waiting for the client to fund this milestone.</Note>;
   }
   if (milestone.status === "funded") {
+    const isFreelancer = actor.role === "freelancer" && actor.userId === contract.freelancerId;
+    const fundedCrit = isFreelancer ? await getDb().query.criteria.findMany({ where: (t, { eq }) => eq(t.milestoneId, milestone.id) }) : [];
     return (
-      <Note>
-        Funds held{milestone.paypalCaptureId ? <> (PayPal capture <span className="font-mono text-xs">{milestone.paypalCaptureId}</span>)</> : null}.
-      </Note>
+      <>
+        <Note>
+          Funds held{milestone.paypalCaptureId ? <> (PayPal capture <span className="font-mono text-xs">{milestone.paypalCaptureId}</span>)</> : null}.
+        </Note>
+        {deliverFor(milestone, contract, actor, fundedCrit)}
+      </>
     );
   }
   const isClient = actor.role === "client" && actor.userId === contract.clientId;
@@ -45,7 +96,12 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
   const crit = await db.query.criteria.findMany({ where: (t, { eq }) => eq(t.milestoneId, milestone.id) });
   const descriptions = Object.fromEntries(crit.map((c) => [c.id, c.description]));
   const decision = milestone.decision ?? null;
-  const verdict = <VerdictView delivery={delivery ?? null} decision={decision} descriptions={descriptions} />;
+  const verdict = (
+    <>
+      <DeliveredFiles delivery={delivery ?? null} />
+      <VerdictView delivery={delivery ?? null} decision={decision} descriptions={descriptions} />
+    </>
+  );
 
   switch (milestone.status) {
     case "verifying":
@@ -76,6 +132,7 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
         <>
           <Note>On hold{milestone.clientResponse ? ` (client chose ${milestone.clientResponse.replace("_", " ")})` : ""}. The deliverable can be resubmitted for verification.</Note>
           {delivery ? verdict : null}
+          {deliverFor(milestone, contract, actor, crit)}
         </>
       );
     case "released":

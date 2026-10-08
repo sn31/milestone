@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { auditLog, contracts, criteria, milestones, type ContractSpec } from "@milestone/core";
+import { auditLog, contracts, criteria, fromPayPalValue, milestones, type ContractSpec } from "@milestone/core";
 import { compileContract } from "@milestone/verify";
 import { getDb } from "@/lib/db";
 import { getActor } from "@/lib/session";
@@ -35,21 +35,37 @@ async function compile(scopeText: string, currency: string, totalMinor: number, 
   return compileContract({ scopeText, currency, totalMinor, repoHint: repo });
 }
 
-export async function POST(req: Request) {
-  const form = await req.formData();
-  const scope = String(form.get("scope") ?? "").trim();
-  const currency = String(form.get("currency") ?? "USD").trim().toUpperCase();
-  const totalMinor = Math.round(Number(form.get("total")) * 100);
-  const repo = String(form.get("repo") ?? "").trim() || undefined;
-  if (!scope || !Number.isInteger(totalMinor) || totalMinor <= 0 || !currency) {
-    return NextResponse.json({ error: "scope, a positive total and currency are required" }, { status: 400 });
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** A browser form post gets a redirect back to the form with the message; API callers get JSON. */
+function fail(req: Request, error: string, status: number) {
+  if ((req.headers.get("accept") ?? "").includes("text/html")) {
+    const url = new URL("/contracts/new", req.url);
+    url.searchParams.set("error", error);
+    return NextResponse.redirect(url, 303);
   }
+  return NextResponse.json({ error }, { status });
+}
+
+export async function POST(req: Request) {
+  const form = await req.formData().catch(() => null);
+  if (!form) return fail(req, "expected a form body", 400);
+  const scope = String(form.get("scope") ?? "").trim();
+  const title = String(form.get("title") ?? "").trim().slice(0, 120);
+  const currency = String(form.get("currency") ?? "USD").trim().toUpperCase();
+  const totalRaw = String(form.get("total") ?? "").trim();
+  const totalMinor = /^\d+(\.\d{1,2})?$/.test(totalRaw) ? fromPayPalValue(totalRaw, currency) : NaN;
+  const repo = String(form.get("repo") ?? "").trim() || undefined;
+  if (!scope || !Number.isSafeInteger(totalMinor) || totalMinor <= 0 || !/^[A-Z]{3}$/.test(currency)) {
+    return fail(req, "Scope, a positive total and a three-letter currency are required.", 400);
+  }
+  if (repo && !REPO.test(repo)) return fail(req, "Repository must look like owner/name.", 400);
 
   let result: Compiled;
   try {
     result = await compile(scope, currency, totalMinor, repo);
   } catch (e) {
-    return NextResponse.json({ error: e instanceof Error ? e.message : "compile failed" }, { status: 502 });
+    return fail(req, `Could not draft the contract: ${e instanceof Error ? e.message : "compile failed"}`, 502);
   }
 
   const actor = await getActor();
@@ -60,7 +76,7 @@ export async function POST(req: Request) {
       id: contractId,
       clientId: "usr_client",
       freelancerId: "usr_freelancer",
-      title: result.contract.title,
+      title: title || result.contract.title,
       scopeText: scope,
       currency,
       totalMinor,
@@ -78,14 +94,16 @@ export async function POST(req: Request) {
         status: "draft",
         advanceEligible: result.advanceEligible[m.seq] ?? false,
       });
-      await tx.insert(criteria).values(m.criteria.map((c) => ({
-        id: `crt_${randomUUID()}`,
-        milestoneId,
-        kind: c.kind,
-        description: c.description,
-        spec: c.spec,
-        required: c.required,
-      })));
+      if (m.criteria.length > 0) {
+        await tx.insert(criteria).values(m.criteria.map((c) => ({
+          id: `crt_${randomUUID()}`,
+          milestoneId,
+          kind: c.kind,
+          description: c.description,
+          spec: c.spec,
+          required: c.required,
+        })));
+      }
     }
     await tx.insert(auditLog).values({ id: randomUUID(), contractId, actor: actor.userId, event: "contract.created", detail: { milestones: result.contract.milestones.length } });
   });
