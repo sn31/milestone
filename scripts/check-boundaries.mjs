@@ -6,7 +6,7 @@ import { join, relative } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const rules = [
-  { dirs: ["apps", "packages"], forbid: /paypal\/money(\.js)?["']/, allowFiles: ["packages/money/src/policy/execute.ts"], why: "only policy/execute.ts may move money" },
+  { dirs: ["apps", "packages"], forbid: /paypal\/money(\.[cm]?[jt]s)?["']/, allowFiles: ["packages/money/src/policy/execute.ts"], why: "only policy/execute.ts may move money" },
   { dirs: ["packages/verify/src"], forbid: /@milestone\/money/, why: "the verifier never touches money or policy (tests may)" },
 ];
 

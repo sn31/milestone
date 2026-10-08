@@ -15,8 +15,8 @@ const db = createDb();
 
 const userRows = [
   { id: "usr_client", role: "client" as const, name: "Casey Client", email: "client@milestone.test" },
-  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo" },
-  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test" },
+  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: process.env.PAYPAL_FREELANCER_EMAIL ?? process.env.SPIKE_FREELANCER_EMAIL ?? null },
+  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: process.env.PAYPAL_PARTNER_EMAIL ?? null },
   { id: "usr_platform", role: "platform" as const, name: "Milestone Platform", email: "platform@milestone.test" },
 ];
 for (const u of userRows) {
@@ -48,7 +48,7 @@ for (let n = 1; n <= 3; n++) {
   await db.insert(milestones).values(m).onConflictDoUpdate({ target: milestones.id, set: mSet });
   criteriaRows.push(
     { id: `crt_${n}_tests`, milestoneId: m.id, kind: "test", description: "The test suite passes", spec: { command: "npm test" }, required: true },
-    { id: `crt_${n}_file`, milestoneId: m.id, kind: "file", description: "Expected source file exists", spec: { path: ["src/signup.tsx", "src/api/signup.ts", "README.md"][n - 1] }, required: true },
+    { id: `crt_${n}_file`, milestoneId: m.id, kind: "file", description: "Expected source file exists", spec: { path: ["src/password.js", "public/pricing.html", "README.md"][n - 1] }, required: true },
     { id: `crt_${n}_judge`, milestoneId: m.id, kind: "judgment", description: "The delivery matches the milestone description", spec: {}, required: false },
   );
 }
