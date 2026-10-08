@@ -20,7 +20,8 @@ export async function POST(req: Request) {
   } else {
     const webhookId = process.env.PAYPAL_WEBHOOK_ID;
     if (!webhookId) return new Response("PAYPAL_WEBHOOK_ID not set", { status: 500 });
-    const ok = await verifyWebhookSignature(paypal(), req.headers, raw, webhookId);
+    // A probe without PayPal's transmission headers makes the verify call itself fail; that is a bad signature, not a server error.
+    const ok = await verifyWebhookSignature(paypal(), req.headers, raw, webhookId).catch(() => false);
     if (!ok) return new Response("bad signature", { status: 400 });
   }
 
