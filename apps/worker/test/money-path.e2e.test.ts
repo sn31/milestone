@@ -111,8 +111,11 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   }
 
+  const prevPayPalMode = process.env.PAYPAL_MODE;
   beforeAll(async () => {
     // No receipt invoices: settle skips them without PayPal credentials, so the fake only has to answer payouts/refunds.
+    // .env may say PAYPAL_MODE=simulated, under which settle issues receipts anyway (against this fake, which 404s).
+    process.env.PAYPAL_MODE = "sandbox";
     delete process.env.PAYPAL_CLIENT_ID;
     delete process.env.PAYPAL_CLIENT_SECRET;
     fake.state.actor = { userId: clientId, role: "client" };
@@ -124,6 +127,8 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
   });
 
   afterAll(async () => {
+    if (prevPayPalMode === undefined) delete process.env.PAYPAL_MODE;
+    else process.env.PAYPAL_MODE = prevPayPalMode;
     if (milestoneIds.length > 0) {
       const held = milestoneIds.map((id) => accounts.held(id));
       const txns = db.select({ txnId: ledgerEntries.txnId }).from(ledgerEntries).where(inArray(ledgerEntries.account, held));
@@ -295,7 +300,7 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
     await settle(job({ milestoneId: t.milestoneId, eventId: e }));
     const s2 = await t.state();
     expect(s2.m.status).toBe("released");
-    expect(s2.ops[0]).toMatchObject({ status: "succeeded" });
+    expect(s2.ops.find((o) => o.kind === "payout")).toMatchObject({ kind: "payout", status: "succeeded" });
     const releaseRows = s2.ledger.filter((l) => l.ref === `release:${t.milestoneId}`);
     expect(new Set(releaseRows.map((l) => l.txnId)).size).toBe(1);
     expect(releaseRows.map(({ account, amount, direction }) => ({ account, amount, direction }))).toEqual([

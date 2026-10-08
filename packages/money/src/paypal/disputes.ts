@@ -6,11 +6,12 @@
  *   POST /v1/customer/disputes/{id}/accept-claim       JSON { note }
  * Events: CUSTOMER.DISPUTE.CREATED / UPDATED / RESOLVED.
  *
- * Both POSTs carry a PayPal-Request-Id from a paypal_ops row created first (kinds "dispute_evidence" and
- * "dispute_accept", keyed by the dispute id), so a double click or a retried request is answered once.
+ * Both POSTs carry a PayPal-Request-Id from a paypal_ops row created first: "dispute_evidence" keyed by
+ * "<disputeId>:<n>" (n = evidence submissions that already succeeded, so a retry replays and a second round after
+ * PayPal asks for more evidence gets a fresh id) and "dispute_accept" keyed by the dispute id.
  *
- * accept-claim makes PayPal refund the buyer from the platform account. It is the freelancer's explicit choice, not a
- * policy outcome, and it never touches the ledger here; see the note on acceptDisputeClaim.
+ * accept-claim makes PayPal refund the buyer from the platform account, so it moves money: the REST call lives in
+ * ./money.ts and is reached only through acceptDisputeClaim in ../policy/execute.ts. This module only builds its plan.
  */
 import { randomBytes } from "node:crypto";
 import { audit, fromPayPalValue, recordOpResult, requestIdFor, type Db } from "@milestone/core";
@@ -120,11 +121,6 @@ export async function provideEvidence(client: PayPalClient, disputeId: string, i
   const parts: Parameters<typeof multipartBody>[0] = [{ name: "input", contentType: "application/json", data: JSON.stringify({ evidences }) }];
   for (const f of input.files ?? []) parts.push({ name: f.name, filename: f.name, contentType: f.mime, data: f.bytes });
   return requestMultipart(client, path(disputeId, "/provide-evidence"), parts, opts);
-}
-
-/** POST accept-claim: the seller accepts liability and PayPal refunds the buyer. */
-export async function acceptClaim(client: PayPalClient, disputeId: string, input: { note: string }, opts: RequestOptions & { requestId: string }): Promise<{ links?: unknown[] }> {
-  return client.request("POST", path(disputeId, "/accept-claim"), { note: input.note.slice(0, 2000), accept_claim_type: "REFUND" }, opts);
 }
 
 // ---------- Events ----------
@@ -249,6 +245,26 @@ export async function recordDisputeEvent(db: Db, event: WebhookEvent): Promise<D
   return { outcome: "opened", disputeId, milestoneId, enqueue: true };
 }
 
+// ---------- Open disputes (the release guard) ----------
+
+/**
+ * Disputes on this milestone that were opened and not resolved since (a dispute.opened row with no later
+ * dispute.resolved for the same dispute id). The release job refuses to pay while any is open.
+ */
+export async function openDisputesFor(db: Db, milestoneId: string): Promise<string[]> {
+  const rows = await db.query.auditLog.findMany({
+    columns: { event: true, detail: true, createdAt: true },
+    where: (t, { and, eq, inArray }) => and(eq(t.milestoneId, milestoneId), inArray(t.event, ["dispute.opened", "dispute.resolved"])),
+  });
+  const id = (d: unknown) => s(o(d).disputeId);
+  const resolved = rows.filter((r) => r.event === "dispute.resolved");
+  const open = rows
+    .filter((r) => r.event === "dispute.opened" && id(r.detail) !== null)
+    .filter((r) => !resolved.some((x) => id(x.detail) === id(r.detail) && x.createdAt >= r.createdAt))
+    .map((r) => id(r.detail)!);
+  return [...new Set(open)];
+}
+
 // ---------- Responding (the freelancer's two choices) ----------
 
 export interface DisputeActionResult {
@@ -256,28 +272,44 @@ export interface DisputeActionResult {
   requestId: string;
   error?: string;
   status?: number;
+  /** Machine-readable refusal, e.g. "milestone_not_final". */
+  reason?: string;
+}
+
+/** The evidence op's key for the next submission: the dispute id plus the count of submissions that succeeded. */
+export async function evidenceOpKey(db: Db, disputeId: string): Promise<string> {
+  const rows = await db.query.auditLog.findMany({
+    columns: { id: true },
+    where: (t, { and, eq, sql }) => and(eq(t.event, "dispute.evidence_submitted"), sql`${t.detail}->>'disputeId' = ${disputeId}`),
+  });
+  return `${disputeId}:${rows.length}`;
 }
 
 /**
  * Sends the freelancer's response: one evidence entry (the final text as notes, the attached files as documents).
- * The audit row "dispute.evidence_submitted" keeps the text and each file's name, size and sha256.
+ * The audit row "dispute.evidence_submitted" keeps the text and each file's name, size and sha256. A later round (PayPal
+ * asked for more evidence) gets its own PayPal-Request-Id; a retry of the same round reuses the first one.
  */
 export async function submitDisputeEvidence(db: Db, client: PayPalClient, input: { disputeId: string; actor: string; text: string; files: Array<EvidenceFile & { sha256?: string }>; skipped?: Array<{ name: string; reason: string }>; evidenceType?: string }): Promise<DisputeActionResult> {
   const opened = await findOpenedDispute(db, input.disputeId);
   if (!opened?.milestoneId) return { ok: false, requestId: "", error: "dispute not found", status: 404 };
-  const requestId = await requestIdFor(db, "dispute_evidence", input.disputeId);
+  const opKey = await evidenceOpKey(db, input.disputeId);
+  const requestId = await requestIdFor(db, "dispute_evidence", opKey);
   const notes = input.text.trim().slice(0, EVIDENCE_NOTES_MAX);
   const evidence: Evidence = { evidence_type: input.evidenceType ?? SERVICE_EVIDENCE_TYPE, notes, ...(input.files.length ? { documents: input.files.map((f) => ({ name: f.name })) } : {}) };
   const where = scope(opened.milestoneId, opened.contractId);
   try {
     const res = await provideEvidence(client, input.disputeId, { evidences: [evidence], files: input.files }, { requestId });
     await recordOpResult(db, requestId, { status: "succeeded", paypalId: input.disputeId, response: res });
-    await audit(db, {
-      actor: input.actor,
-      event: "dispute.evidence_submitted",
-      ...where,
-      detail: { disputeId: input.disputeId, requestId, evidenceType: evidence.evidence_type, text: notes, documents: input.files.map((f) => ({ name: f.name, size: f.bytes.length, mime: f.mime, sha256: f.sha256 ?? null })), skipped: input.skipped ?? [] },
-    });
+    // Two racing submits of one round share the request id (PayPal answers once); only one of them is recorded.
+    if (!(await hasAudit(db, "dispute.evidence_submitted", "requestId", requestId))) {
+      await audit(db, {
+        actor: input.actor,
+        event: "dispute.evidence_submitted",
+        ...where,
+        detail: { disputeId: input.disputeId, requestId, opKey, evidenceType: evidence.evidence_type, text: notes, documents: input.files.map((f) => ({ name: f.name, size: f.bytes.length, mime: f.mime, sha256: f.sha256 ?? null })), skipped: input.skipped ?? [] },
+      });
+    }
     return { ok: true, requestId };
   } catch (e) {
     // The op row stays pending so a retry reuses the same PayPal-Request-Id.
@@ -287,24 +319,41 @@ export async function submitDisputeEvidence(db: Db, client: PayPalClient, input:
   }
 }
 
+/** What acceptDisputeClaim (policy/execute.ts) needs: the dispute, its milestone and who gets the refund in the ledger. */
+export interface AcceptClaimPlan {
+  disputeId: string;
+  milestoneId: string;
+  contractId: string;
+  clientId: string;
+  /** What PayPal refunds the buyer, in the contract's currency (never more than the milestone). */
+  amountMinor: number;
+  currency: string;
+  actor: string;
+  note: string;
+}
+
+/** Milestone states in which the money has left escrow, so an accepted claim cannot also be paid out by a release. */
+export const ACCEPT_CLAIM_STATUSES: ReadonlySet<string> = new Set(["released", "partial_released"]);
+
 /**
- * Accepts the buyer's claim. PayPal then refunds the buyer from the platform account, after the milestone's money
- * was already paid out, so the platform carries the loss. Nothing is posted to the ledger here: booking that loss (or
- * recovering it from the freelancer) is an operator step, and dispute.claim_accepted flags it.
+ * Builds the accept-claim plan, or refuses: 404 for an unknown dispute, 409 "milestone_not_final" while the milestone's
+ * money is still held (funded, verifying, review, needs_client, held). Accepting then would refund the buyer while the
+ * ledger still holds the money and a release could pay the freelancer too; an operator settles those disputes by hand.
  */
-export async function acceptDisputeClaim(db: Db, client: PayPalClient, input: { disputeId: string; actor: string; note: string }): Promise<DisputeActionResult> {
+export async function disputeAcceptPlan(db: Db, input: { disputeId: string; actor: string; note: string }): Promise<{ ok: true; plan: AcceptClaimPlan } | { ok: false; status: number; error: string; reason: string }> {
   const opened = await findOpenedDispute(db, input.disputeId);
-  if (!opened?.milestoneId) return { ok: false, requestId: "", error: "dispute not found", status: 404 };
-  const requestId = await requestIdFor(db, "dispute_accept", input.disputeId);
-  const where = scope(opened.milestoneId, opened.contractId);
-  try {
-    const res = await acceptClaim(client, input.disputeId, { note: input.note }, { requestId });
-    await recordOpResult(db, requestId, { status: "succeeded", paypalId: input.disputeId, response: res });
-    await audit(db, { actor: input.actor, event: "dispute.claim_accepted", ...where, detail: { disputeId: input.disputeId, requestId, note: input.note.slice(0, 2000) } });
-    return { ok: true, requestId };
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    await audit(db, { actor: input.actor, event: "dispute.accept_failed", ...where, detail: { disputeId: input.disputeId, requestId, error: message.slice(0, 500) } });
-    return { ok: false, requestId, error: message, status: e instanceof PayPalError ? 502 : 500 };
+  if (!opened?.milestoneId) return { ok: false, status: 404, error: "dispute not found", reason: "not_found" };
+  const milestoneId = opened.milestoneId;
+  const m = await db.query.milestones.findFirst({ columns: { id: true, status: true, amountMinor: true, contractId: true }, where: (t, { eq }) => eq(t.id, milestoneId) });
+  const c = m ? await db.query.contracts.findFirst({ columns: { id: true, clientId: true, currency: true }, where: (t, { eq }) => eq(t.id, m.contractId) }) : undefined;
+  if (!m || !c) return { ok: false, status: 404, error: "dispute not found", reason: "not_found" };
+  if (!ACCEPT_CLAIM_STATUSES.has(m.status)) {
+    return { ok: false, status: 409, reason: "milestone_not_final", error: `the milestone is ${m.status}: its money is still in escrow, so the claim cannot be accepted here; an operator settles it` };
   }
+  const d = o(opened.detail);
+  const disputed = typeof d.amountMinor === "number" && s(d.currency) === c.currency ? d.amountMinor : m.amountMinor;
+  return {
+    ok: true,
+    plan: { disputeId: input.disputeId, milestoneId, contractId: c.id, clientId: c.clientId, amountMinor: Math.min(disputed, m.amountMinor), currency: c.currency, actor: input.actor, note: input.note.slice(0, 2000) },
+  };
 }

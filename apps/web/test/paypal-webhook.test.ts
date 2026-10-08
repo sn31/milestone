@@ -81,14 +81,15 @@ describe.skipIf(!e2e)("paypal webhook against Postgres", () => {
   afterAll(async () => {
     if (!e2e) return;
     await db.delete(core.webhookEvents).where(inArray(core.webhookEvents.eventId, ids));
-    await db.execute(sql`delete from audit_log where event = 'paypal.capture_unmatched' and detail->>'eventId' like ${`WH-T-${tag}-%`}`);
+    await db.execute(sql`delete from audit_log where event in ('paypal.capture_unmatched', 'paypal.dispute_unmatched') and detail->>'eventId' like ${`WH-T-${tag}-%`}`);
   });
 
   it("duplicate of a processed event -> { duplicate: true }", async () => {
     const ev = fresh("paypal-dispute-created.json");
     const first = await post(ev);
     expect(first.status).toBe(200);
-    expect(await first.json()).toMatchObject({ ok: true, duplicate: false, outcome: "stored" });
+    // The fixture's disputed capture belongs to no milestone: recorded as paypal.dispute_unmatched and processed.
+    expect(await first.json()).toMatchObject({ ok: true, duplicate: false, outcome: "unmatched" });
     expect((await stored(ev.id))?.processedAt).not.toBeNull();
     const again = await post(ev);
     expect(again.status).toBe(200);

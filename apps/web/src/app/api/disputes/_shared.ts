@@ -21,6 +21,7 @@ export async function disputeForFreelancer(db: Db, actor: Actor, disputeId: stri
   if (actor.role !== "freelancer" || actor.userId !== contract.freelancerId) return { error: jsonError("only the contract's freelancer can respond to a dispute", 403) };
   if (dispute.resolved) return { error: jsonError("PayPal has already resolved this dispute", 409, { reason: "resolved" }) };
   if (dispute.accepted) return { error: jsonError("the claim was already accepted", 409, { reason: "accepted" }) };
-  if (dispute.submitted) return { error: jsonError("evidence was already sent to PayPal", 409, { reason: "submitted" }) };
+  // A further round is allowed only after PayPal asked for more evidence (status back to awaiting_response).
+  if (dispute.status === "submitted") return { error: jsonError("evidence was already sent to PayPal", 409, { reason: "submitted" }) };
   return { dispute };
 }

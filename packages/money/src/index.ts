@@ -14,8 +14,9 @@ export type { PayPalMode, SimulatorOptions, SimulatedOrderSummary } from "./payp
 export { openSimulatedDispute } from "./paypal/simulated.ts";
 export type { SimulatedDispute } from "./paypal/simulated.ts";
 // Disputes (week 3): read by REST, respond with evidence (multipart) or accept the claim.
-export { getDispute, provideEvidence, acceptClaim, requestMultipart, multipartBody, parseDispute, recordDisputeEvent, findOpenedDispute, submitDisputeEvidence, acceptDisputeClaim, EVIDENCE_NOTES_MAX, EVIDENCE_FILE_MAX_BYTES, EVIDENCE_TOTAL_MAX_BYTES, EVIDENCE_FILE_TYPES, SERVICE_EVIDENCE_TYPE } from "./paypal/disputes.ts";
-export type { Dispute, DisputeAmount, Evidence, EvidenceFile, DisputeEventInfo, DisputeEventOutcome, DisputeActionResult } from "./paypal/disputes.ts";
+// accept-claim moves money: its REST call is in ./paypal/money.ts and it is reached only through acceptDisputeClaim below.
+export { getDispute, provideEvidence, requestMultipart, multipartBody, parseDispute, recordDisputeEvent, findOpenedDispute, openDisputesFor, evidenceOpKey, submitDisputeEvidence, disputeAcceptPlan, ACCEPT_CLAIM_STATUSES, EVIDENCE_NOTES_MAX, EVIDENCE_FILE_MAX_BYTES, EVIDENCE_TOTAL_MAX_BYTES, EVIDENCE_FILE_TYPES, SERVICE_EVIDENCE_TYPE } from "./paypal/disputes.ts";
+export type { Dispute, DisputeAmount, Evidence, EvidenceFile, DisputeEventInfo, DisputeEventOutcome, DisputeActionResult, AcceptClaimPlan } from "./paypal/disputes.ts";
 // Policy
 export { decide, applyReviewWindow } from "./policy/decide.ts";
 export type { DecideInput, ReviewWindowState } from "./policy/decide.ts";
@@ -23,5 +24,5 @@ export { priceAdvance, DEFAULT_PRICING } from "./policy/pricing.ts";
 export type { PricingParams, FreelancerRecord, ClientRecord, MilestoneForPricing, AdvanceOffer } from "./policy/pricing.ts";
 export { underwrite, loadRecords, loadUnderwriting, daysUntil, criteriaCounts, describeOffer, DEFAULT_LIMITS, DEFAULT_HORIZON_DAYS, ADVANCE_MILESTONE_STATUSES, advanceRefs, isAdvanceRef, advanceBalances, remainingOwed, loadAdvanceBalances } from "./policy/advance.ts";
 export type { AdvanceTerms, UnderwriteInput, Underwriting, Records, UnderwritingContext, AdvanceKey, AdvanceLedgerRow, AdvanceBalance } from "./policy/advance.ts";
-export { captureFunding, executeRelease, fundAdvance } from "./policy/execute.ts";
+export { captureFunding, executeRelease, fundAdvance, acceptDisputeClaim, disputeLedgerRef } from "./policy/execute.ts";
 export type { MoneyContext, ReleasePlan } from "./policy/execute.ts";

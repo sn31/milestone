@@ -3,7 +3,9 @@
  * A released milestone shaped like the showcase's mst_3 (funded, delivered, verified pass, review window passed,
  * payout confirmed, ledger held -> freelancer) is disputed; the webhook side records it, the job drafts the response,
  * the freelancer submits it, and the simulator's CUSTOMER.DISPUTE.RESOLVED lands as dispute.resolved. A second dispute
- * is accepted instead. Every row is tagged and removed in afterAll; the simulator never touches var/.
+ * is accepted instead (booked in the ledger, flagged for an operator). A milestone still in review cannot have its claim
+ * accepted and its release is blocked while the dispute is open. A second evidence round after PayPal's UPDATED gets
+ * its own PayPal-Request-Id. Every row is tagged and removed in afterAll; the simulator never touches var/.
  */
 import { randomUUID } from "node:crypto";
 import type { Job } from "pg-boss";
@@ -23,6 +25,8 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
   const { packCites } = await import("@milestone/verify");
   const { getDb } = await import("../src/lib/db.ts");
   const { dispute } = await import("../src/jobs/dispute.ts");
+  const { release, BLOCKED_BY_DISPUTE_EVENT } = await import("../src/jobs/release.ts");
+  const { requestIdFor } = await import("@milestone/core");
   const db = getDb();
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_dp_${tag}`;
@@ -31,6 +35,11 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
   const milestoneId = `mst_e2e_dp_${tag}`;
   const deliveryId = `dlv_e2e_dp_${tag}`;
   const captureId = `SIM-CAP-E2E${tag.toUpperCase()}`;
+  // A second milestone still in its review window (money in escrow) for the release guard and the accept refusal.
+  const reviewMilestoneId = `mst_e2e_dpr_${tag}`;
+  const reviewDeliveryId = `dlv_e2e_dpr_${tag}`;
+  const reviewCaptureId = `SIM-CAP-E2ER${tag.toUpperCase()}`;
+  const moneyCtx = () => ({ db, client: money.createPayPalClient(), requestIdFor: (kind: string, key: string) => requestIdFor(db, kind, key) });
   const events: Array<{ id: string; event_type: string; resource?: unknown }> = [];
   const disputeIds: string[] = [];
   const unmatchedEventIds: string[] = [];
@@ -55,6 +64,10 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     await db.insert(milestones).values({
       id: milestoneId, contractId, seq: 3, title: "Polish, accessibility and docs", amountMinor: 10_000, status: "released", paypalOrderId: `SIM-ORD-E2E${tag}`, paypalCaptureId: captureId,
       decision: { action: "release", amountMinor: 10_000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold.", deliveryId } as never, decidedAt: min(-40), reviewEndsAt: min(-12),
+    });
+    await db.insert(milestones).values({
+      id: reviewMilestoneId, contractId, seq: 4, title: "Launch checklist", amountMinor: 5_000, status: "review", paypalOrderId: `SIM-ORD-E2ER${tag}`, paypalCaptureId: reviewCaptureId,
+      decision: { action: "release", amountMinor: 5_000, ruleIds: ["P6"], reason: "Every criterion passed.", deliveryId: reviewDeliveryId } as never, decidedAt: min(-5), reviewEndsAt: min(-1),
     });
     await db.insert(criteria).values([
       { id: `crt_e2e_dp_${tag}_tests`, milestoneId, kind: "test", description: "The test suite passes", spec: { command: "npm test" }, required: true },
@@ -94,12 +107,14 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
   afterAll(async () => {
     money.configureSimulator({ deliver: null, webhookDelayMs: 1500, disputeResolveDelayMs: 2000 });
     const q = (s: string, p: unknown[]) => db.$client.query(s, p);
-    await q(`delete from audit_log where contract_id = $1 or milestone_id = $2 or (event = 'paypal.dispute_unmatched' and detail->>'eventId' = any($3))`, [contractId, milestoneId, unmatchedEventIds]);
-    await q(`delete from paypal_ops where key = any($1)`, [disputeIds]);
-    await q(`delete from ledger_entries where txn_id in (select txn_id from ledger_entries where account = $1)`, [`held:${milestoneId}`]);
-    await q(`delete from deliveries where milestone_id = $1`, [milestoneId]);
-    await q(`delete from criteria where milestone_id = $1`, [milestoneId]);
-    await q(`delete from milestones where id = $1`, [milestoneId]);
+    const mids = [milestoneId, reviewMilestoneId];
+    await q(`delete from audit_log where contract_id = $1 or milestone_id = any($2) or (event = 'paypal.dispute_unmatched' and detail->>'eventId' = any($3))`, [contractId, mids, unmatchedEventIds]);
+    // Evidence ops are keyed "<disputeId>:<n>", accept ops by the dispute id; release ops (none expected) by milestone.
+    await q(`delete from paypal_ops where key = any($1) or split_part(key, ':', 1) = any($1) or key = any($2)`, [disputeIds, mids]);
+    await q(`delete from ledger_entries where txn_id in (select txn_id from ledger_entries where account = any($1))`, [mids.map((m) => `held:${m}`)]);
+    await q(`delete from deliveries where milestone_id = any($1)`, [mids]);
+    await q(`delete from criteria where milestone_id = any($1)`, [mids]);
+    await q(`delete from milestones where id = any($1)`, [mids]);
     await q(`delete from contracts where id = $1`, [contractId]);
     await q(`delete from users where id = any($1)`, [[clientId, freelancerId]]);
   });
@@ -144,8 +159,8 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     const pdf = new TextEncoder().encode("%PDF-1.4\n% e2e evidence\n");
     const sent = await money.submitDisputeEvidence(db, money.createPayPalClient(), { disputeId: opened.disputeId, actor: freelancerId, text, files: [{ name: "handover.pdf", bytes: pdf, mime: "application/pdf" }] });
     expect(sent.ok).toBe(true);
-    const ops = (await db.$client.query(`select kind, status, request_id from paypal_ops where key = $1`, [opened.disputeId])).rows as Array<{ kind: string; status: string; request_id: string }>;
-    expect(ops).toEqual([{ kind: "dispute_evidence", status: "succeeded", request_id: sent.requestId }]);
+    const ops = (await db.$client.query(`select kind, key, status, request_id from paypal_ops where key = $1 or key like $1 || ':%'`, [opened.disputeId])).rows as Array<{ kind: string; key: string; status: string; request_id: string }>;
+    expect(ops).toEqual([{ kind: "dispute_evidence", key: `${opened.disputeId}:0`, status: "succeeded", request_id: sent.requestId }]);
     const submitted = await audits("dispute.evidence_submitted", opened.disputeId);
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({ actor: freelancerId, detail: { text, evidenceType: "PROOF_FOR_SOFTWARE_OR_SERVICE_DELIVERED", documents: [{ name: "handover.pdf", size: pdf.length }] } });
@@ -168,10 +183,23 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     disputeIds.push(opened.disputeId);
     await until(() => Boolean(eventFor("CUSTOMER.DISPUTE.CREATED", opened.disputeId)));
     await money.recordDisputeEvent(db, eventFor("CUSTOMER.DISPUTE.CREATED", opened.disputeId) as never);
-    const accepted = await money.acceptDisputeClaim(db, money.createPayPalClient(), { disputeId: opened.disputeId, actor: freelancerId, note: "Refund the client." });
+    const planned = await money.disputeAcceptPlan(db, { disputeId: opened.disputeId, actor: freelancerId, note: "Refund the client." });
+    if (!planned.ok) throw new Error(planned.error);
+    expect(planned.plan).toMatchObject({ milestoneId, contractId, clientId, amountMinor: 10_000, currency: "USD" });
+    const accepted = await money.acceptDisputeClaim(moneyCtx(), planned.plan);
     expect(accepted.ok).toBe(true);
-    // A second accept reuses the same PayPal-Request-Id and is answered from the first.
-    expect((await money.acceptDisputeClaim(db, money.createPayPalClient(), { disputeId: opened.disputeId, actor: freelancerId, note: "again" })).requestId).toBe(accepted.requestId);
+    // A second accept reuses the same PayPal-Request-Id, is answered from the first and books nothing more.
+    expect((await money.acceptDisputeClaim(moneyCtx(), { ...planned.plan, note: "again" })).requestId).toBe(accepted.requestId);
+    const ref = money.disputeLedgerRef(opened.disputeId);
+    const legs = (await db.$client.query(`select account, amount_minor::int as amount, direction from ledger_entries where ref = $1 order by account`, [ref])).rows;
+    expect(legs).toEqual([
+      { account: `client:${clientId}`, amount: 10_000, direction: "credit" },
+      { account: `held:${milestoneId}`, amount: 10_000, direction: "debit" },
+    ]);
+    expect(await audits("dispute.claim_accepted", opened.disputeId)).toHaveLength(1);
+    const flagged = (await db.$client.query(`select detail from audit_log where event = 'milestone.needs_operator' and milestone_id = $1 and detail->>'disputeId' = $2`, [milestoneId, opened.disputeId])).rows;
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].detail).toMatchObject({ ledgerRef: ref, refundMinor: 10_000, status: "released" });
     await until(() => Boolean(eventFor("CUSTOMER.DISPUTE.RESOLVED", opened.disputeId)));
     await money.recordDisputeEvent(db, eventFor("CUSTOMER.DISPUTE.RESOLVED", opened.disputeId) as never);
     expect((await audits("dispute.resolved", opened.disputeId))[0]!.detail).toMatchObject({ outcome: "RESOLVED_BUYER_FAVOUR" });
@@ -185,5 +213,73 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     expect(await money.recordDisputeEvent(db, evt as never)).toMatchObject({ outcome: "unmatched" });
     const rows = (await db.$client.query(`select count(*)::int as n from audit_log where event = 'paypal.dispute_unmatched' and detail->>'eventId' = $1`, [id])).rows as Array<{ n: number }>;
     expect(rows[0]!.n).toBe(1);
+  });
+
+  it("a dispute on a milestone still in escrow: accept is refused and the release is blocked until it resolves", async () => {
+    const opened = money.openSimulatedDispute({ captureId: reviewCaptureId, amountMinor: 5_000, currency: "USD" });
+    disputeIds.push(opened.disputeId);
+    await until(() => Boolean(eventFor("CUSTOMER.DISPUTE.CREATED", opened.disputeId)));
+    await money.recordDisputeEvent(db, eventFor("CUSTOMER.DISPUTE.CREATED", opened.disputeId) as never);
+    expect(await money.openDisputesFor(db, reviewMilestoneId)).toEqual([opened.disputeId]);
+
+    // Accepting would refund the buyer while the ledger still holds the money: refused before PayPal is called.
+    const planned = await money.disputeAcceptPlan(db, { disputeId: opened.disputeId, actor: freelancerId, note: "x" });
+    expect(planned).toMatchObject({ ok: false, status: 409, reason: "milestone_not_final" });
+    const forced = await money.acceptDisputeClaim(moneyCtx(), { disputeId: opened.disputeId, milestoneId: reviewMilestoneId, contractId, clientId, amountMinor: 5_000, currency: "USD", actor: freelancerId, note: "x" });
+    expect(forced).toMatchObject({ ok: false, status: 409, reason: "milestone_not_final" });
+    const acceptOps = (await db.$client.query(`select 1 from paypal_ops where kind = 'dispute_accept' and key = $1`, [opened.disputeId])).rows;
+    expect(acceptOps).toHaveLength(0);
+
+    // The release job skips, audits release.blocked_by_dispute and holds the milestone; no payout op is claimed.
+    await release({ id: randomUUID(), name: "release", data: { milestoneId: reviewMilestoneId, deliveryId: reviewDeliveryId } } as never);
+    const m = await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, reviewMilestoneId) });
+    expect(m?.status).toBe("held");
+    const blocked = (await db.$client.query(`select detail from audit_log where event = $1 and milestone_id = $2`, [BLOCKED_BY_DISPUTE_EVENT, reviewMilestoneId])).rows;
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].detail).toMatchObject({ disputeIds: [opened.disputeId], status: "review" });
+    const payoutOps = (await db.$client.query(`select 1 from paypal_ops where key = $1`, [reviewMilestoneId])).rows;
+    expect(payoutOps).toHaveLength(0);
+
+    // Resolved: the guard lifts.
+    await db.insert(auditLog).values({ id: randomUUID(), actor: "paypal", event: "dispute.resolved", milestoneId: reviewMilestoneId, contractId, detail: { disputeId: opened.disputeId, outcome: "RESOLVED_SELLER_FAVOUR" } });
+    expect(await money.openDisputesFor(db, reviewMilestoneId)).toEqual([]);
+  });
+
+  it("a second evidence round after PayPal's UPDATED gets its own PayPal-Request-Id; a retry of a round reuses it", async () => {
+    const disputeId = `PP-D-E2E-RS-${tag}`;
+    disputeIds.push(disputeId);
+    const resource = (status: string) => ({ dispute_id: disputeId, status, disputed_transactions: [{ seller_transaction_id: captureId }], dispute_amount: { currency_code: "USD", value: "100.00" } });
+    expect(await money.recordDisputeEvent(db, { id: `WH-e2e-rs-${tag}-1`, event_type: "CUSTOMER.DISPUTE.CREATED", resource: resource("WAITING_FOR_SELLER_RESPONSE") } as never)).toMatchObject({ outcome: "opened" });
+
+    // A PayPal that answers provide-evidence with 200 and records each PayPal-Request-Id it sees.
+    const seen: string[] = [];
+    let failNext = false;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/oauth2/token")) return new Response(JSON.stringify({ access_token: "t", expires_in: 3600, token_type: "Bearer" }), { status: 200 });
+      seen.push(new Headers(init?.headers).get("PayPal-Request-Id") ?? "");
+      if (failNext) { failNext = false; return new Response(JSON.stringify({ name: "INTERNAL_SERVER_ERROR" }), { status: 500 }); }
+      return new Response(JSON.stringify({ links: [] }), { status: 200 });
+    }) as typeof fetch;
+    const client = new money.PayPalClient({ clientId: "x", clientSecret: "y", env: "sandbox", fetchImpl });
+    const submit = (text: string) => money.submitDisputeEvidence(db, client, { disputeId, actor: freelancerId, text, files: [] });
+
+    failNext = true;
+    const failed = await submit("Round one.");
+    expect(failed.ok).toBe(false);
+    const first = await submit("Round one.");
+    expect(first.ok).toBe(true);
+    expect(first.requestId).toBe(failed.requestId); // the retry of round one replays its id
+    expect(await money.evidenceOpKey(db, disputeId)).toBe(`${disputeId}:1`);
+
+    // PayPal asks for more evidence.
+    expect(await money.recordDisputeEvent(db, { id: `WH-e2e-rs-${tag}-2`, event_type: "CUSTOMER.DISPUTE.UPDATED", resource: resource("WAITING_FOR_SELLER_RESPONSE") } as never)).toMatchObject({ outcome: "updated" });
+    const second = await submit("Round two, with more detail.");
+    expect(second.ok).toBe(true);
+    expect(second.requestId).not.toBe(first.requestId);
+    expect(seen).toEqual([first.requestId, first.requestId, second.requestId]);
+    const ops = (await db.$client.query(`select key, status from paypal_ops where kind = 'dispute_evidence' and split_part(key, ':', 1) = $1 order by key`, [disputeId])).rows;
+    expect(ops).toEqual([{ key: `${disputeId}:0`, status: "succeeded" }, { key: `${disputeId}:1`, status: "succeeded" }]);
+    expect(await audits("dispute.evidence_submitted", disputeId)).toHaveLength(2);
   });
 });

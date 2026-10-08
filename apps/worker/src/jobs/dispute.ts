@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Job } from "pg-boss";
 import { audit, ledgerEntries, type Db } from "@milestone/core";
 import { findOpenedDispute, getDispute, parseDispute } from "@milestone/money";
@@ -9,7 +10,8 @@ import { paypal } from "../lib/paypal.ts";
 /**
  * The dispute copilot's job, enqueued by the PayPal webhook on CUSTOMER.DISPUTE.CREATED with { milestoneId, disputeId }.
  * Builds the evidence pack from the milestone's own record, drafts the response, and stores both in the audit detail
- * of "dispute.drafted" (no schema change). Idempotent: a dispute is drafted once.
+ * of "dispute.drafted" (no schema change) with their hashes; the activity page redacts both for everyone but the
+ * contract's freelancer. Idempotent: a dispute is drafted once.
  */
 export async function dispute(job: Job<JobData>): Promise<void> {
   const disputeId = typeof job.data.disputeId === "string" ? job.data.disputeId : null;
@@ -78,7 +80,8 @@ export async function draftDispute(db: Db, disputeId: string): Promise<DraftOutc
     event: "dispute.drafted",
     milestoneId: opened.milestoneId,
     ...(opened.contractId ? { contractId: opened.contractId } : {}),
-    detail: { disputeId, packHash: pack.hash, pack, draft },
+    // The pack and draft are the freelancer's working copy: the activity page shows anyone else only these hashes.
+    detail: { disputeId, packHash: pack.hash, draftHash: createHash("sha256").update(JSON.stringify(draft)).digest("hex"), pack, draft },
   });
   return { kind: "drafted", pack };
 }

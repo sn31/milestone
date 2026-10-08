@@ -1,11 +1,30 @@
 import type { GlyphKey, ToneKey } from "@/components/ui/states";
 
 /**
+ * Dispute events by name (the patterns below would leave most of them neutral). A dispute holds the milestone's money
+ * in question, the copilot's draft is the verifier at work, evidence sent waits on PayPal's review, an accepted claim is
+ * a refund, and the outcome itself is not in the event name.
+ */
+const DISPUTE_EVENTS: Record<string, { tone: ToneKey; glyph?: GlyphKey }> = {
+  "dispute.opened": { tone: "held" },
+  "dispute.drafted": { tone: "verifying" },
+  "dispute.updated": { tone: "needs" },
+  "dispute.evidence_submitted": { tone: "review" },
+  "dispute.claim_accepted": { tone: "partial" },
+  "dispute.resolved": { tone: "neutral", glyph: "check" },
+  "dispute.evidence_failed": { tone: "danger" },
+  "dispute.accept_failed": { tone: "danger" },
+  "release.blocked_by_dispute": { tone: "held" },
+};
+
+/**
  * How an audit event looks everywhere it is listed (the contract page's activity ledger and the full audit grid): the
  * state it belongs to, its glyph and its time. One map, so the same event never changes colour between screens.
  * Violet stays reserved for the verifier at work; a policy decision reads in the review tone it hands over to.
  */
 export function eventTone(event: string): ToneKey {
+  const known = DISPUTE_EVENTS[event];
+  if (known) return known.tone;
   const e = event.toLowerCase();
   if (/fail|error|denied|revers|mismatch|conflict|refused|unmatched|needs_operator|shortfall|injection/.test(e)) return "danger";
   if (/needs_client/.test(e)) return "needs";
@@ -32,7 +51,7 @@ const GLYPH_OF: Record<ToneKey, GlyphKey> = {
   neutral: "ring",
 };
 
-export const eventGlyph = (event: string): GlyphKey => GLYPH_OF[eventTone(event)];
+export const eventGlyph = (event: string): GlyphKey => DISPUTE_EVENTS[event]?.glyph ?? GLYPH_OF[eventTone(event)];
 
 /** Splits "milestone.needs_client" into its namespace and verb for the faint/strong rendering. */
 export function eventParts(event: string): { ns: string | null; verb: string } {

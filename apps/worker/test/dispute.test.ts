@@ -7,7 +7,6 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { compileEvidencePack, draftResponse, templateResponse, packCites, citationsIn, type EvidencePackInput } from "@milestone/verify";
 import {
-  acceptClaim,
   configureSimulator,
   createSimulatedPayPalClient,
   getDispute,
@@ -230,7 +229,9 @@ describe("simulated dispute endpoints", () => {
   it("accept-claim resolves in the buyer's favour", async () => {
     const client = createSimulatedPayPalClient();
     const opened = openSimulatedDispute({ captureId: "CAP-TEST-2", amountMinor: 5_000, currency: "USD" });
-    await acceptClaim(client, opened.disputeId, { note: "Refunding." }, { requestId: "req-acc-1" });
+    // accept-claim moves money, so @milestone/money exposes it only through acceptDisputeClaim (execute.ts); the simulator's
+    // endpoint is exercised with the raw client here.
+    await client.request("POST", `/v1/customer/disputes/${opened.disputeId}/accept-claim`, { note: "Refunding.", accept_claim_type: "REFUND" }, { requestId: "req-acc-1" });
     const d = await getDispute(client, opened.disputeId);
     expect(d.status).toBe("RESOLVED");
     expect(d.dispute_outcome?.outcome_code).toBe("RESOLVED_BUYER_FAVOUR");

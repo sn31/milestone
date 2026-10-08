@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getDb } from "@/lib/db";
 import { AuditGrid, type AuditRow } from "@/components/audit-grid";
 import { PageHeader, Stat } from "@/components/ui";
-import { ACTOR_NAMES } from "@/lib/session";
+import { ACTOR_NAMES, getActor } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -14,11 +15,30 @@ export async function generateMetadata({ params }: PageProps<"/contracts/[id]/ac
   return { title: contract ? `Audit log · ${contract.title}` : "Contract not found" };
 }
 
+const sha256 = (v: unknown) => createHash("sha256").update(JSON.stringify(v ?? null)).digest("hex");
+
+/**
+ * dispute.drafted carries the evidence pack and the freelancer's unsent draft. Only the contract's freelancer sees them
+ * here; everyone else gets the hashes, which still prove what was drafted and when.
+ */
+function redactDetail(event: string, detail: unknown, canSeeDraft: boolean): unknown {
+  if (event !== "dispute.drafted" || canSeeDraft) return detail;
+  const d = detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : {};
+  return {
+    ...(typeof d.disputeId === "string" ? { disputeId: d.disputeId } : {}),
+    packHash: typeof d.packHash === "string" ? d.packHash : sha256(d.pack),
+    draftHash: typeof d.draftHash === "string" ? d.draftHash : sha256(d.draft),
+    redacted: true,
+  };
+}
+
 export default async function ActivityPage({ params }: PageProps<"/contracts/[id]/activity">) {
   const { id } = await params;
   const db = getDb();
   const contract = await db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, id) });
   if (!contract) notFound();
+  const actor = await getActor();
+  const canSeeDraft = actor.role === "freelancer" && actor.userId === contract.freelancerId;
   const ms = await db.query.milestones.findMany({ where: (t, { eq }) => eq(t.contractId, id) });
   const label = new Map(ms.map((m) => [m.id, `${m.seq} ${m.title}`]));
   const log = await db.query.auditLog.findMany({ where: (t, { eq }) => eq(t.contractId, id), orderBy: (t, { desc }) => [desc(t.createdAt)] });
@@ -28,7 +48,7 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
     milestone: r.milestoneId ? (label.get(r.milestoneId) ?? r.milestoneId) : "",
     actor: ACTOR_NAMES[r.actor] ?? r.actor,
     event: r.event,
-    detail: r.detail ?? null,
+    detail: redactDetail(r.event, r.detail ?? null, canSeeDraft),
   }));
   const paypal = log.filter((r) => r.event.startsWith("paypal.")).length;
   const decisions = log.filter((r) => r.event === "policy.decided" || r.event.startsWith("client.")).length;

@@ -1,3 +1,4 @@
+import { isModelConfigured } from "@milestone/verify";
 import type { Metadata } from "next";
 import { Button, PageHeader, Panel, StateGlyph, cx } from "@/components/ui";
 
@@ -29,7 +30,7 @@ const OUTPUT = [
 export default async function NewContract({ searchParams }: PageProps<"/contracts/new">) {
   const sp = await searchParams;
   const error = typeof sp.error === "string" ? sp.error : null;
-  const compilesWithModel = Boolean(process.env.ANTHROPIC_API_KEY);
+  const compilesWithModel = await isModelConfigured();
 
   return (
     <main>

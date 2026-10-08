@@ -7,8 +7,8 @@ import { uploadRoot, type DraftResponse, type EvidencePack } from "@milestone/ve
 
 /**
  * A dispute as the audit log tells it. There is no disputes table: dispute.opened (webhook), dispute.drafted (job,
- * carrying the pack and the draft), dispute.evidence_submitted / dispute.claim_accepted (the freelancer) and
- * dispute.resolved (webhook) are its whole record.
+ * carrying the pack and the draft), dispute.evidence_submitted / dispute.claim_accepted (the freelancer),
+ * dispute.updated and dispute.resolved (webhook) are its whole record.
  */
 export interface DisputeView {
   disputeId: string;
@@ -21,7 +21,14 @@ export interface DisputeView {
   captureId: string | null;
   dueAt: string | null;
   drafted: { at: string; pack: EvidencePack; draft: DraftResponse } | null;
+  /** The latest evidence sent to PayPal (`submissions` counts every round). */
   submitted: { at: string; actor: string; text: string; documents: Array<{ name: string; size: number }>; skipped: Array<{ name: string; reason: string }> } | null;
+  submissions: number;
+  /**
+   * A dispute.updated that arrived after the latest submission and leaves the dispute waiting on the seller: PayPal
+   * asks for more evidence, and only then may the freelancer send another round.
+   */
+  moreRequested: { at: string; status: string | null } | null;
   accepted: { at: string; actor: string; note: string } | null;
   resolved: { at: string; outcome: string | null } | null;
   failures: Array<{ at: string; event: string; error: string }>;
@@ -69,6 +76,8 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
         dueAt: s(d.dueAt),
         drafted: null,
         submitted: null,
+        submissions: 0,
+        moreRequested: null,
         accepted: null,
         resolved: null,
         failures: [],
@@ -79,7 +88,9 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
     const v = byId.get(id);
     if (!v) continue;
     if (r.event === "dispute.drafted" && !v.drafted && d.pack && d.draft) v.drafted = { at, pack: d.pack as EvidencePack, draft: d.draft as DraftResponse };
-    else if (r.event === "dispute.evidence_submitted" && !v.submitted) {
+    else if (r.event === "dispute.evidence_submitted") {
+      v.submissions += 1;
+      v.moreRequested = null;
       v.submitted = {
         at,
         actor: r.actor,
@@ -87,6 +98,9 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
         documents: (Array.isArray(d.documents) ? d.documents : []).map(o).map((x) => ({ name: s(x.name) ?? "", size: typeof x.size === "number" ? x.size : 0 })),
         skipped: (Array.isArray(d.skipped) ? d.skipped : []).map(o).map((x) => ({ name: s(x.name) ?? "", reason: s(x.reason) ?? "" })),
       };
+    } else if (r.event === "dispute.updated") {
+      const status = s(d.status);
+      if (v.submitted && (status === null || status === "WAITING_FOR_SELLER_RESPONSE")) v.moreRequested = { at, status };
     } else if (r.event === "dispute.claim_accepted" && !v.accepted) v.accepted = { at, actor: r.actor, note: s(d.note) ?? "" };
     else if (r.event === "dispute.resolved" && !v.resolved) v.resolved = { at, outcome: s(d.outcome) };
     else if (r.event === "dispute.evidence_failed" || r.event === "dispute.accept_failed") v.failures.push({ at, event: r.event, error: s(d.error) ?? "" });
@@ -102,7 +116,8 @@ function statusOf(v: DisputeView): DisputeStatus {
     return "resolved";
   }
   if (v.accepted) return "accepted";
-  if (v.submitted) return "submitted";
+  // Another round only after PayPal asked for more evidence (dispute.updated after the latest submission).
+  if (v.submitted && !(v.moreRequested && v.drafted)) return "submitted";
   return v.drafted ? "awaiting_response" : "drafting";
 }
 

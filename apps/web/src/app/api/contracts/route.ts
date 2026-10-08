@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { auditLog, contracts, criteria, fromPayPalValue, milestones, type ContractSpec } from "@milestone/core";
-import { compileContract } from "@milestone/verify";
+import { compileContract, isModelConfigured } from "@milestone/verify";
 import { getDb } from "@/lib/db";
 import { getActor } from "@/lib/session";
 
@@ -31,7 +31,7 @@ function demoContract(totalMinor: number, currency: string): Compiled {
 }
 
 async function compile(scopeText: string, currency: string, totalMinor: number, repo?: string): Promise<Compiled> {
-  if (!process.env.ANTHROPIC_API_KEY) return demoContract(totalMinor, currency);
+  if (!(await isModelConfigured())) return demoContract(totalMinor, currency);
   return compileContract({ scopeText, currency, totalMinor, repoHint: repo });
 }
 

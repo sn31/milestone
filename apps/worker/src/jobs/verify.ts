@@ -3,7 +3,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import { audit, deliveries, enqueue, milestones, transition, UploadPayload, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection, enforce, formatVerdictComment, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader } from "@milestone/verify";
+import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { createEvidenceReader, createUploadEvidenceReader, git, safePath } from "../lib/evidence.ts";
@@ -108,7 +108,7 @@ type Injection = { suspected: boolean; hits: Array<{ source: string; match: stri
 
 /** Judge with the model when one is configured; otherwise deterministic evidence only and everything else unclear. */
 async function conclude(deliveryId: string, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (await isModelConfigured()) {
     const r = await judge({ deliveryId, criteria, evidence, deliveryTexts, reader: reader() });
     if (extra.suspected) r.verdict.suspected_injection = true;
     return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits] };

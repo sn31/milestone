@@ -1,5 +1,5 @@
 /**
- * Money-moving calls. Importable ONLY from packages/policy (enforced by scripts/check-boundaries.mjs).
+ * Money-moving calls. Importable ONLY from policy/execute.ts (enforced by scripts/check-boundaries.mjs).
  * Every function requires a requestId that was persisted first.
  */
 import { toPayPalValue } from "@milestone/core";
@@ -83,5 +83,18 @@ export function refundCapture(client: PayPalClient, captureId: string, input: { 
     `/v2/payments/captures/${captureId}/refund`,
     { amount: { value: toPayPalValue(input.amountMinor, input.currency), currency_code: input.currency }, note_to_payer: input.note ?? "Partial release" },
     opts,
+  );
+}
+
+/**
+ * Disputes: POST /v1/customer/disputes/{id}/accept-claim. The seller accepts liability and PayPal refunds the buyer from
+ * the platform account, so it moves money and lives here (reachable only through policy/execute.ts).
+ */
+export function acceptClaim(client: PayPalClient, disputeId: string, input: { note: string; requestId: string }) {
+  return client.request<{ links?: unknown[] }>(
+    "POST",
+    `/v1/customer/disputes/${encodeURIComponent(disputeId)}/accept-claim`,
+    { note: input.note.slice(0, 2000), accept_claim_type: "REFUND" },
+    { requestId: input.requestId },
   );
 }

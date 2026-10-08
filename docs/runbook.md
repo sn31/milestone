@@ -99,6 +99,32 @@ Reseeding is idempotent, but the seed's user upsert does not update `paypal_emai
 
 `ANTHROPIC_API_KEY` is required for judgment criteria to be judged (and for the contract compiler and model-phrased advance explanations). Without it the contract form builds a fixed three-milestone demo contract, and verification runs the deterministic or upload checks only: every judgment criterion is unclear, the model is recorded as `deterministic-only`, and a delivery that passes everything else goes to "needs client" under rule P3 instead of review. Set the key for the recording; `MILESTONE_MODEL` picks the model.
 
+## Local models with Ollama
+
+Ollama is the default model backend; no Anthropic key is needed. `packages/verify/src/llm.ts` uses it whenever `MODEL_PROVIDER=ollama`, or when `MODEL_PROVIDER` is unset and `ANTHROPIC_API_KEY` is empty. Claude stays available with `MODEL_PROVIDER=anthropic` (or just a key and no `MODEL_PROVIDER`).
+
+Setup (M2 Max, 32 GB is comfortable; the two models take about 15 GB of disk):
+
+```bash
+ollama serve                 # http://localhost:11434; another host: OLLAMA_HOST=host:port
+ollama pull qwen3:14b        # text: contract compiler, verifier judgment, explanations
+ollama pull qwen2.5vl:7b     # vision: any request that carries an image (view_file on a PNG/JPG)
+```
+
+Variables: `MILESTONE_MODEL` (default `qwen3:14b`; a leftover `claude-*` value is ignored under Ollama), `MILESTONE_VISION_MODEL` (default `qwen2.5vl:7b`), `OLLAMA_HOST`, `MILESTONE_OLLAMA_TIMEOUT_MS` (per HTTP call, default 600000; the first call loads the model).
+
+How it maps: read-only tools use Ollama tool calling; the final answer is one more `/api/chat` turn with `"format"` set to the answer's JSON schema, so the reply is grammar-constrained JSON that the zod schema then validates as before. Requests run with `temperature: 0`, `num_ctx: 32768`, `stream: false` and `think: false` (qwen3); any `<think>` text is stripped anyway. `isModelConfigured()` (exported from `llm.ts`) answers whether a model can be called: for Ollama, `GET /api/tags` answers within 1 s and lists `MILESTONE_MODEL` (cached 30 s).
+
+Limits: Ollama vision models cannot read PDFs, so `view_file` on a PDF hands the model the text extracted from it with a note saying so; layout and pictures inside a PDF are not seen. qwen2.5vl has no tool calling, so once an image is in the conversation the vision model answers directly from what was gathered. The eval set is small; the regex injection pre-pass, the parser and the policy apply unchanged whichever model runs.
+
+Check the local model against the eval set (opt-in, about 4 minutes):
+
+```bash
+MILESTONE_MODEL_EVAL=1 pnpm --filter @milestone/verify exec vitest run test/model-eval.test.ts --silent=false
+```
+
+It runs `judge()` on the 20 cases in `fixtures/eval/cases.json`, prints per-case results, agreement and the false-release count, and fails if any case releases money it should not or fewer than 80% of cases agree. On 2026-10-08 with `qwen3:14b` on an M2 Max: 20/20 cases agree (result, action and injection flag), 0 false releases, 11.7 s per case on average (19 s max). The contract compiler produced valid contracts for both seed scopes in about 20 s each.
+
 ## The end-to-end suites
 
 Unit tests run with `pnpm test`. The suites that need Postgres are opt-in: start Postgres (`docker compose up -d`), run `pnpm db:migrate`, then

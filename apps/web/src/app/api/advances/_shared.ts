@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { users, type advances, type Db } from "@milestone/core";
 import { describeOffer, type Underwriting, type UnderwritingContext } from "@milestone/money";
-import { explain } from "@milestone/verify";
+import { explain, isModelConfigured } from "@milestone/verify";
 
 type AdvanceRow = typeof advances.$inferSelect;
 
@@ -73,12 +73,12 @@ function explainNumbers(u: UnderwritingContext) {
 }
 
 /**
- * The explanation shown with an offer: the model's two sentences when ANTHROPIC_API_KEY is set (bounded to 8s),
+ * The explanation shown with an offer: the model's two sentences when a model is configured (Ollama or Anthropic) (bounded to 8s),
  * otherwise, or on any failure, a sentence built from the numbers.
  */
 export async function explainOffer(u: UnderwritingContext): Promise<{ text: string; source: "model" | "rules" }> {
   const rules = { text: describeOffer(u as Underwriting, u.currency), source: "rules" as const };
-  if (!u.offer.eligible || !u.terms || !process.env.ANTHROPIC_API_KEY) return rules;
+  if (!u.offer.eligible || !u.terms || !(await isModelConfigured())) return rules;
   try {
     const text = await Promise.race([
       explain("advance_offer", explainNumbers(u), "freelancer"),

@@ -18,7 +18,7 @@ import {
   type Db,
   type MilestoneStatus,
 } from "@milestone/core";
-import { PayPalError, applyReviewWindow, executeRelease, loadAdvanceBalances, paypalMode, remainingOwed, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
+import { PayPalError, applyReviewWindow, executeRelease, loadAdvanceBalances, openDisputesFor, paypalMode, remainingOwed, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { paypal } from "../lib/paypal.ts";
@@ -53,6 +53,8 @@ export const RESUMABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review
 export const NEEDS_OPERATOR_EVENT = "milestone.needs_operator";
 export const REFUSED_NEEDS_OPERATOR_EVENT = "release.refused_needs_operator";
 export const SKIPPED_IN_FLIGHT_EVENT = "release.skipped_in_flight";
+/** Written instead of a claim while a PayPal dispute on the milestone is open (dispute.opened, no later dispute.resolved). */
+export const BLOCKED_BY_DISPUTE_EVENT = "release.blocked_by_dispute";
 
 /** How long a claim belongs to the job that made it before another job may resume its unanswered PayPal calls. */
 export const LEASE_MS = 120_000;
@@ -676,6 +678,15 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       }
       await note("release.lease_taken_over", "the claiming job's lease expired", { jobId, previousJobId: gate.claim.jobId ?? null, previousClaimedAt: gate.claim.claimedAt ?? null });
       return { claim, contractId: m.contractId };
+    }
+
+    // Dispute guard: while the buyer's PayPal dispute is open, nothing is claimed. Paying out now could pay the money
+    // twice (PayPal refunds the buyer if the claim is accepted or lost). A milestone in review is held; it waits for an
+    // operator, as any held milestone does.
+    const disputes = await openDisputesFor(t, milestoneId);
+    if (disputes.length > 0) {
+      if (m.status === "review") await transition(t, milestoneId, "held", { actor: "system", event: "milestone.held", detail: { reason: "a PayPal dispute on this milestone is open", disputeIds: disputes } });
+      return note(BLOCKED_BY_DISPUTE_EVENT, "a PayPal dispute on this milestone is open", { disputeIds: disputes });
     }
 
     const stored = parseDecision(m.decision);
