@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Milestone",
-    "description": "One request per route in docs/openapi.yaml. Auth is the milestone_actor cookie (usr_client, usr_freelancer, usr_partner).",
+    "description": "One request per route in docs/openapi.yaml. Auth is the milestone_actor cookie (usr_client, usr_freelancer, usr_partner). Set demoRepoPath to a repo built with scripts/make-demo-repo.sh. The /api/dev/paypal routes answer 404 unless PAYPAL_MODE=simulated.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -24,6 +24,14 @@
     {
       "key": "signature",
       "value": ""
+    },
+    {
+      "key": "deliveryId",
+      "value": ""
+    },
+    {
+      "key": "demoRepoPath",
+      "value": "/tmp/milestone-demo"
     }
   ],
   "item": [
@@ -401,7 +409,7 @@
             "paypal"
           ]
         },
-        "description": "A hand-made event fails signature verification (400). Real events come from PayPal; use the sandbox webhook simulator.",
+        "description": "A hand-made event fails signature verification (400). Real events come from PayPal; use the sandbox webhook simulator. Needs a real PayPal signature in sandbox mode. In PAYPAL_MODE=simulated send header X-Milestone-Simulated: dev instead (the simulator posts its own events).",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"id\": \"WH-EXAMPLE-1\",\n  \"event_type\": \"PAYMENT.CAPTURE.COMPLETED\",\n  \"create_time\": \"2026-10-08T12:00:00Z\",\n  \"resource_type\": \"capture\",\n  \"resource\": {\n    \"id\": \"CAPTURE-ID\",\n    \"status\": \"COMPLETED\",\n    \"amount\": {\n      \"currency_code\": \"USD\",\n      \"value\": \"100.00\"\n    },\n    \"supplementary_data\": {\n      \"related_ids\": {\n        \"order_id\": \"ORDER-ID\"\n      }\n    }\n  }\n}",
@@ -494,6 +502,300 @@
             }
           }
         }
+      }
+    },
+    {
+      "name": "Deliver a commit (manual)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/deliver",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "deliver"
+          ]
+        },
+        "description": "Freelancer only; milestone must be funded or held. Resolves the ref with git ls-remote and queues a verify job. Build the repo with scripts/make-demo-repo.sh.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"repoUrl\": \"{{demoRepoPath}}\",\n  \"ref\": \"m1-pass\",\n  \"title\": \"Milestone 1: password strength\",\n  \"note\": \"All tests pass.\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Deliver files (upload)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/mst_brand_1/upload",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "mst_brand_1",
+            "upload"
+          ]
+        },
+        "description": "Freelancer only. Multipart field \"files\" (up to 10 files, 20 MB each) and optional \"note\". Pick a logo (SVG or PNG at least 1024 px wide) and a PDF style guide with a Typography section for the seeded bakery contract.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "files",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "files",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "note",
+              "value": "Logo and style guide for review.",
+              "type": "text"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get a delivered file",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{deliveryId}}/logo.svg",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{deliveryId}}",
+            "logo.svg"
+          ]
+        },
+        "description": "Client or freelancer of the contract. deliveryId comes from the upload response."
+      }
+    },
+    {
+      "name": "Advance offer",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/advances/offer?milestoneId={{milestoneId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "advances",
+            "offer"
+          ],
+          "query": [
+            {
+              "key": "milestoneId",
+              "value": "{{milestoneId}}"
+            }
+          ]
+        },
+        "description": "Freelancer only. Prices an advance against a funded milestone, or returns the existing one."
+      }
+    },
+    {
+      "name": "Accept advance (Get paid now)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/advances/accept",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "advances",
+            "accept"
+          ]
+        },
+        "description": "Freelancer only. 201 when created, 200 when the milestone already has an advance. Queues the advance job.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"milestoneId\": \"{{milestoneId}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Simulated PayPal mode",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/dev/paypal/mode",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "dev",
+            "paypal",
+            "mode"
+          ]
+        },
+        "description": "Answers simulated or sandbox."
+      }
+    },
+    {
+      "name": "Simulated checkout approve",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/dev/paypal/approve?order={{orderId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "dev",
+            "paypal",
+            "approve"
+          ],
+          "query": [
+            {
+              "key": "order",
+              "value": "{{orderId}}"
+            }
+          ]
+        },
+        "description": "Only while PAYPAL_MODE=simulated (404 otherwise). 303 back to the contract page. Disable follow redirects to see it."
+      }
+    },
+    {
+      "name": "Arm a simulated payout failure",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_partner"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/dev/paypal/fail",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "dev",
+            "paypal",
+            "fail"
+          ]
+        },
+        "description": "Only while PAYPAL_MODE=simulated. The next payout item with this sender_item_id fails once, so the release goes to held with milestone.needs_operator.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sender_item_id\": \"{{milestoneId}}:freelancer\",\n  \"reason\": \"RECEIVER_ACCOUNT_LOCKED\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "List armed simulated failures",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_partner"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/dev/paypal/fail",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "dev",
+            "paypal",
+            "fail"
+          ]
+        },
+        "description": "Only while PAYPAL_MODE=simulated."
       }
     }
   ]

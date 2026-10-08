@@ -1,6 +1,8 @@
 import { UploadPayload, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { paypalMode } from "@milestone/money";
 import type { Actor } from "@/lib/session";
 import { formatMoney } from "@/lib/format";
+import { AdvanceOffer } from "@/components/advance-offer";
 import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
@@ -38,6 +40,20 @@ function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor
   );
 }
 
+/**
+ * Descriptions of required criteria whose verdict on this delivery is not a pass (a criterion the verdict does not
+ * mention counts as not passed). Mirrors requiredNotPassed in app/api/milestones/[id]/review/route.ts, which refuses
+ * approve and confirm_partial in that case.
+ */
+function requiredNotPassed(delivery: DeliveryRow | null | undefined, crit: CriterionRow[]): string[] {
+  const list = delivery?.verdict && typeof delivery.verdict === "object" ? (delivery.verdict as { criteria?: unknown }).criteria : undefined;
+  const status = new Map<string, unknown>();
+  if (Array.isArray(list)) {
+    for (const r of list) if (r && typeof r === "object") status.set(String((r as Record<string, unknown>).criterion_id), (r as Record<string, unknown>).status);
+  }
+  return crit.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
+}
+
 /** Links to an upload delivery's files (served only to the contract's parties). */
 function DeliveredFiles({ delivery }: { delivery: DeliveryRow | null }) {
   if (!delivery || delivery.source !== "upload") return null;
@@ -68,7 +84,7 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
           currency={contract.currency}
           amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
           paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
-          mode={process.env.PAYPAL_MODE ?? (process.env.PAYPAL_CLIENT_ID ? "sandbox" : "simulated")}
+          mode={paypalMode()}
         />
       );
     }
@@ -82,6 +98,7 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
         <Note>
           Funds held{milestone.paypalCaptureId ? <> (PayPal capture <span className="font-mono text-xs">{milestone.paypalCaptureId}</span>)</> : null}.
         </Note>
+        {isFreelancer && milestone.advanceEligible ? <AdvanceOffer milestoneId={milestone.id} /> : null}
         {deliverFor(milestone, contract, actor, fundedCrit)}
       </>
     );
@@ -99,7 +116,7 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
   const verdict = (
     <>
       <DeliveredFiles delivery={delivery ?? null} />
-      <VerdictView delivery={delivery ?? null} decision={decision} descriptions={descriptions} />
+      <VerdictView delivery={delivery ?? null} decision={decision} descriptions={descriptions} showEvidence />
     </>
   );
 
@@ -112,7 +129,13 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
         </>
       );
     case "review":
-    case "needs_client":
+    case "needs_client": {
+      // The route checks the delivery the decision was made for (decision.deliveryId), falling back to the latest.
+      const decidedId = (decision as { deliveryId?: unknown } | null)?.deliveryId;
+      const decided =
+        typeof decidedId === "string" && decidedId !== delivery?.id
+          ? await db.query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decidedId) })
+          : delivery;
       return (
         <>
           {verdict}
@@ -124,9 +147,11 @@ export async function MilestoneActions({ milestone, contract, actor }: { milesto
             decisionAction={decision?.action ?? null}
             amountLabel={decision && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, contract.currency) : null}
             reason={decision?.reason ?? null}
+            requiredNotPassed={requiredNotPassed(decided, crit)}
           />
         </>
       );
+    }
     case "held":
       return (
         <>

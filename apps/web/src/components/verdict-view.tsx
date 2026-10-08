@@ -1,4 +1,8 @@
+"use client";
+
+import { useState } from "react";
 import type { deliveries, milestones } from "@milestone/core";
+import { EvidencePanel, toEvidenceItems } from "@/components/evidence-panel";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
 type Decision = NonNullable<(typeof milestones.$inferSelect)["decision"]>;
@@ -29,7 +33,45 @@ function rowsOf(verdict: DeliveryRow["verdict"]): CriterionRow[] {
   return Array.isArray(list) ? (list as CriterionRow[]) : [];
 }
 
-export function VerdictView({ delivery, decision, descriptions = {} }: { delivery: DeliveryRow | null; decision: Decision | null; descriptions?: Record<string, string> }) {
+/** Panels taller than this many rows start collapsed behind the "Evidence (n)" toggle. */
+const OPEN_UP_TO = 3;
+
+/**
+ * The delivery's evidence (deliveries.evidence) in the AG Grid panel, behind an "Evidence (n)" toggle. Client-side
+ * because toEvidenceItems lives in the client module evidence-panel.tsx; the grid is mounted only while open.
+ */
+function EvidenceSection({ evidence }: { evidence: unknown[] | null }) {
+  const items = toEvidenceItems(evidence);
+  const [open, setOpen] = useState(items.length <= OPEN_UP_TO);
+  if (items.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="text-sm font-medium text-zinc-700 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+      >
+        <span aria-hidden className="mr-1 inline-block w-3">{open ? "\u25BE" : "\u25B8"}</span>
+        Evidence ({items.length})
+      </button>
+      {open ? <EvidencePanel items={items} /> : null}
+    </div>
+  );
+}
+
+export function VerdictView({
+  delivery,
+  decision,
+  descriptions = {},
+  showEvidence = false,
+}: {
+  delivery: DeliveryRow | null;
+  decision: Decision | null;
+  descriptions?: Record<string, string>;
+  /** Show the delivery's evidence panel below the verdict and decision. */
+  showEvidence?: boolean;
+}) {
   if (!delivery) return <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No delivery yet.</p>;
   const rows = rowsOf(delivery.verdict);
   const result = delivery.result ?? (delivery.verifiedAt ? "no result" : "verifying");
@@ -68,6 +110,7 @@ export function VerdictView({ delivery, decision, descriptions = {} }: { deliver
           {decision.ruleIds.length ? <p className="font-mono text-xs text-zinc-500">rules: {decision.ruleIds.join(", ")}</p> : null}
         </div>
       ) : null}
+      {showEvidence ? <EvidenceSection evidence={delivery.evidence ?? null} /> : null}
     </div>
   );
 }

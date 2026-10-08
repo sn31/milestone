@@ -2,11 +2,11 @@
 
 ## Components
 
-- `apps/web`: Next.js App Router. UI, HTTP routes, the PayPal and GitHub webhook receivers. Creates orders and captures them, records approvals and client responses, enqueues jobs. Never calls the model.
+- `apps/web`: Next.js App Router. UI, HTTP routes, the PayPal and GitHub webhook receivers. Creates orders and captures them, records approvals and client responses, receives manual and upload deliveries, prices and accepts advances, enqueues jobs. It calls the model only to phrase an advance offer's explanation.
 - `apps/worker`: pg-boss consumers for the jobs `verify`, `release`, `settle`, `advance`.
 - `packages/core`: zod schemas, Drizzle schema and migrations, the milestone state machine, the ledger, the idempotency helpers (`requestIdFor`, `storeWebhookOnce`), the job queue.
-- `packages/money`: `paypal/` is the REST client (orders, capture, payouts, refunds, invoicing, webhook verification). `policy/` holds `decide()` (pure), `applyReviewWindow()`, `priceAdvance()` and `execute.ts`, the only module that moves money.
-- `packages/verify`: contract compiler, deterministic stage with the tamper check, injection pre-pass, the judgment stage and parser, PR comment formatter, explanations. All model calls go through `llm.ts`. It never imports `@milestone/money`.
+- `packages/money`: `paypal/` is the REST client (orders, capture, payouts, refunds, invoicing, webhook verification) and `simulated.ts`, the local stand-in used when `PAYPAL_MODE=simulated`. `policy/` holds `decide()` (pure), `applyReviewWindow()`, `priceAdvance()` and `execute.ts`, the only module that moves money.
+- `packages/verify`: contract compiler, deterministic stage with the tamper check, upload stage (`upload-checks.ts`), injection pre-pass, the judgment stage and parser, PR comment formatter, explanations. All model calls go through `llm.ts`. It never imports `@milestone/money`.
 - Postgres: application tables, the job queue (pg-boss) and locks.
 
 Boundaries enforced by `pnpm check:boundaries`: only `packages/money` talks to PayPal, only `policy/execute.ts` imports `paypal/money.ts`, and `packages/verify` does not import `@milestone/money`.
@@ -75,36 +75,60 @@ A milestone flagged `milestone.needs_operator` stays in `held`: a new delivery i
 3. Release: the release job claims the payout `paypal_ops` row under a row lock, then calls `POST /v1/payments/payouts`.
 4. Partial: payout of the released share, then `POST /v2/payments/captures/{id}/refund` for the rest.
 5. Settle: `PAYMENT.PAYOUTS-ITEM.*` and `PAYMENT.CAPTURE.REFUNDED` webhooks enqueue the settle job, which posts the ledger, moves the milestone to `released` or `partial_released`, and issues a paid receipt invoice.
-6. Advances (planned): a payout from the capital partner's account, repaid from the release.
+6. Advances: the freelancer accepts an offer on a funded milestone, the advance job pays the principal from the capital partner's PayPal account (`fundAdvance`), and the release job later pays the partner first (principal plus the quoted fee) and the freelancer the rest.
+
+### Simulated PayPal
+
+`PAYPAL_MODE=simulated` (also the default when `PAYPAL_CLIENT_ID` is empty outside production) swaps the PayPal client for `paypal/simulated.ts`, a `fetch` implementation that answers the REST calls Milestone makes with sandbox-shaped JSON. It replays the first success for a repeated `PayPal-Request-Id`, keeps all state in `var/simulated-paypal.json` (shared by web and worker, written under a lock file; delete it to reset) and posts the matching webhook events (capture, payout item, refund) to `APP_URL/api/webhooks/paypal` about 1.5 seconds later with an `X-Milestone-Simulated` header carrying `SIMULATED_WEBHOOK_SECRET` (default `dev` outside production). In simulated mode the webhook route accepts only that header; in sandbox mode only PayPal's signature. The order's approve link points at `/api/dev/paypal/approve`, and `/api/dev/paypal/fail` arms a one-shot payout failure. Those routes answer 404 in sandbox mode. The capital partner has its own simulated account.
 
 ## Jobs
 
 - `verify`: deterministic stage, judgment stage, store the verdict, `decide()`, move to review, held or needs_client, schedule the release at the end of the window, comment on the PR. Safe to retry at every step.
-- `release`: re-derives the outcome from the database under the milestone row lock, applies the review window, claims the payout op, calls PayPal. One attempt per milestone, with a 120 second lease for a crashed claimer.
+- `release`: re-derives the outcome from the database under the milestone row lock, applies the review window, claims the payout op, calls PayPal. When the milestone or an earlier one of the freelancer's has a funded advance, the payout batch pays the partner first. One attempt per milestone, with a 120 second lease for a crashed claimer.
 - `settle`: handles PayPal webhook events for payouts and refunds; confirms release, flags failures, reversals and failed refunds for an operator, repays advances, issues the receipt.
-- `advance`: planned. The handler exists and throws "not written yet".
+- `advance`: pays an accepted advance (`offered`) from the capital partner's PayPal account, under row locks on the advance and milestone, with the payout claimed in a `paypal_ops` row first so a retry replays the same request id. Posts the ledger entry (partner receivable debit, partner cash credit), sets the advance `funded` and audits `advance.funded`. It refuses if the milestone is past `verifying` or the release payout is already claimed: an unsent advance is withdrawn (`advance.withdrawn`), one that may already have been paid is flagged `advance.needs_operator` and never touched again. Repayment happens in the release and settle jobs, which move the advance to `repaid` or `shortfall`.
 
 Jobs are sent with `enqueue(name, milestoneId, data, { dedupe, delaySeconds })`; the dedupe key makes a repeat a no-op. Retries use 5 attempts with backoff.
 
+## Deliveries
+
+`deliveries.source` has four values. Three are created by routes:
+
+- `github_pr`: the GitHub webhook (HMAC checked, stored once by delivery id) turns a merged pull request from a branch named `m<seq>-...` on a contract's repository into a delivery and a verify job.
+- `manual`: `POST /api/milestones/{id}/deliver` with `{ repoUrl, ref }` by the contract's freelancer. The ref is resolved with `git ls-remote` and stored in the same payload shape as the webhook, so the verify job treats it identically.
+- `upload`: `POST /api/milestones/{id}/upload`, multipart, up to 10 files of 20 MB. Files are written to `UPLOAD_DIR/<deliveryId>/` (default `var/uploads`) with their sha256; `GET /api/files/{deliveryId}/{name}` serves them to the two parties with a sandboxing CSP.
+- `deploy_url` exists in the schema but nothing creates it.
+
+Both route deliveries are allowed while the milestone is `funded` or `held`, and a delivery id is derived from the milestone and commit so a repeat is a no-op.
+
 ## The verification path
 
-1. The GitHub webhook (HMAC checked, stored once by delivery id) turns a merged pull request from a branch named `m<seq>-...` into a delivery and a verify job.
-2. The deterministic stage clones the commit, removes committed `node_modules`, installs with `--ignore-scripts`, runs the test, build and file criteria, and runs the tamper check against the baseline.
-3. The judgment stage gives Claude the criteria, evidence summaries and delivery text inside delimited untrusted blocks, with read-only tools (`read_file`, `get_diff`, `list_evidence`, `view_screenshot`, `view_file`).
+1. A delivery and a verify job exist (see above).
+2. Code deliveries: the deterministic stage clones the commit, removes committed `node_modules`, installs with `--ignore-scripts`, runs the test, build and file criteria, and runs the tamper check. The baseline is the default-branch head saved at funding, else the pull request base, else the commit's first parent; an unfetchable baseline fails closed. If the delivery changed existing tests, `package.json` scripts or dependencies, lockfiles, CI or runner config, or anything under `node_modules`, passing test and build results become `unclear`; failing ones still fail.
+   File deliveries: the upload stage (no model) checks each `upload` criterion against the files matching `spec.pattern` (a glob or extension list): `format` (from magic bytes: pdf, png, jpg, svg, docx, md, txt), `minBytes`, `minWords`, `maxPages`, `minWidth`, `minHeight` and `mustContain`. A criterion passes when one matching file passes every check, is unclear when a check cannot be decided, and fails otherwise. There is no tamper check because nothing in an upload controls what the checks run.
+3. The judgment stage gives Claude the criteria, evidence summaries and delivery text inside delimited untrusted blocks, with read-only tools (`read_file`, `get_diff`, `list_evidence`, `view_screenshot`, `view_file`). Without `ANTHROPIC_API_KEY` the judgment stage is skipped: the model is recorded as `deterministic-only`, judgment criteria are unclear and rule P3 sends a passing delivery to the client.
 4. `enforce()` makes deterministic results win, drops unknown evidence ids and downgrades evidence-free passes. `overall()` computes pass, partial or fail from the criteria.
 
-Not built yet: the visual stage (`visual.ts` is a stub), and HTTP routes for manual or upload deliveries (the schema has `deploy_url`, `manual` and `upload` sources and the upload criterion checker, but only the GitHub webhook creates deliveries).
+Planned, not built: the KERNEL visual stage (`visual.ts` is a stub), a Bryntum timeline, a disputes copilot, negotiation, and Render deployment.
+
+## Seed contracts
+
+`pnpm db:seed` loads two active contracts. `ctr_demo` (repo `milestone-demo/landing`, three milestones of $100): each milestone has a required test, a required file (`src/password.js`, `public/pricing.html`, `README.md`) and an optional judgment criterion, matching the demo repo branches `m1-pass`, `m2-partial` and `m2-injection`. `ctr_brand` (a bakery brand refresh, no repository, $90 and $60): `upload` criteria for a logo (`*.{svg,png}`, at least 1024 px wide), a PDF style guide (at most 12 pages, containing "Typography") and website copy (`.md` or `.docx`, at least 600 words, containing "About us"), plus optional judgment criteria. The freelancer's PayPal email comes from `PAYPAL_FREELANCER_EMAIL`, the partner's from `PAYPAL_PARTNER_EMAIL`.
+
+## The operator flow
+
+If a payout item fails, is blocked, returned or reversed, or a refund fails, the release or settle job writes `milestone.needs_operator` and the milestone stays `held`; the release job refuses to run again and a new delivery is refused. The partner opens `/ops`, which lists flagged milestones with the paid, failed, reversed, pending and refunded items and the `paypal_ops` rows, fixes it by hand in PayPal, and records a note with `POST /api/ops/{milestoneId}/resolve` (audit event `ops.resolved`, which clears the card but moves no money). In simulated mode the card also has a "Simulate payout failure" button (`/api/dev/paypal/fail`). Advances have the same pattern with `advance.needs_operator`. See `docs/runbook.md`.
 
 ## Data model
 
-Ten tables in `packages/core/src/schema.ts`; no tables have been added to them.
+Ten tables in `packages/core/src/schema.ts`.
 
 - `users`: role (client, freelancer, partner, platform), PayPal email, GitHub login.
 - `contracts`: parties, scope text, currency, total, per-release cap, confidence threshold, review window, repo, status, approval times.
 - `milestones`: seq, amount, status, PayPal order and capture ids, baseline sha, current decision, review end, client response, advance eligibility.
 - `criteria`: kind, description, spec, required.
-- `deliveries`: source, ref, payload, evidence, verdict, result, injection flag, model, prompt hash.
-- `advances`: partner, principal, fee, status, offer, explanation.
+- `deliveries`: source (`github_pr`, `manual`, `upload`, `deploy_url`), ref, payload (commit data, or the stored files with sha256), evidence, verdict, result, injection flag, model, prompt hash.
+- `advances`: partner, principal, fee per day, status (`offered`, `funded`, `repaid`, `shortfall`), offer, explanation. One per milestone.
 - `paypal_ops`: kind, key, request id (unique), PayPal id, status, request, response. Unique on (kind, key).
 - `webhook_events`: source, event id, type, payload, processed time. Unique on (source, event_id).
 - `ledger_entries`: transaction id, account, amount in minor units, currency, debit or credit, ref. Balances are derived; each `txn_id` sums to zero.

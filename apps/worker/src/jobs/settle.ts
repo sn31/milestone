@@ -18,7 +18,7 @@ import {
   webhookEvents,
   type Db,
 } from "@milestone/core";
-import { advanceRefs, issuePaidReceipt } from "@milestone/money";
+import { advanceRefs, issuePaidReceipt, paypalMode } from "@milestone/money";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { paypal } from "../lib/paypal.ts";
@@ -748,7 +748,8 @@ async function settleRefund(tx: Tx, m: MilestoneRow, contract: ContractRow, even
 
 async function issueReceipt(db: Db, m: MilestoneRow, contract: ContractRow, amountMinor: number): Promise<void> {
   const base = { milestoneId: m.id, contractId: contract.id } as const;
-  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+  // The simulator issues receipts too; outside simulated mode a receipt needs the platform's real credentials.
+  if (paypalMode() !== "simulated" && (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET)) {
     await audit(db, { ...base, actor: "system", event: "receipt.skipped", detail: { reason: "PayPal credentials are not configured" } });
     return;
   }

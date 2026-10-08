@@ -12,15 +12,27 @@ try {
 }
 
 const db = createDb();
+const simulated = process.env.PAYPAL_MODE === "simulated" || (!process.env.PAYPAL_MODE && !process.env.PAYPAL_CLIENT_ID && process.env.NODE_ENV !== "production");
+
+// `pnpm db:seed -- --reset` wipes every table (and the PayPal simulator state) before seeding, so a demo
+// never starts with stale payout rows that would send a milestone to needs_operator.
+if (process.argv.includes("--reset")) {
+  const { sql } = await import("drizzle-orm");
+  await db.execute(sql`truncate table audit_log, ledger_entries, webhook_events, paypal_ops, advances, deliveries, criteria, milestones, contracts, users restart identity cascade`);
+  const { rmSync } = await import("node:fs");
+  try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/simulated-paypal.json"), { force: true }); } catch { /* none */ }
+  try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/uploads"), { recursive: true, force: true }); } catch { /* none */ }
+  console.log("reset: all tables truncated, simulator state and uploads removed");
+}
 
 const userRows = [
   { id: "usr_client", role: "client" as const, name: "Casey Client", email: "client@milestone.test" },
-  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: process.env.PAYPAL_FREELANCER_EMAIL ?? process.env.SPIKE_FREELANCER_EMAIL ?? null },
-  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: process.env.PAYPAL_PARTNER_EMAIL ?? null },
+  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: process.env.PAYPAL_FREELANCER_EMAIL ?? process.env.SPIKE_FREELANCER_EMAIL ?? (simulated ? "freelancer@milestone.test" : null) },
+  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: process.env.PAYPAL_PARTNER_EMAIL ?? (simulated ? "partner@milestone.test" : null) },
   { id: "usr_platform", role: "platform" as const, name: "Milestone Platform", email: "platform@milestone.test" },
 ];
 for (const u of userRows) {
-  await db.insert(users).values(u).onConflictDoUpdate({ target: users.id, set: { role: u.role, name: u.name, email: u.email, githubLogin: u.githubLogin ?? null } });
+  await db.insert(users).values(u).onConflictDoUpdate({ target: users.id, set: { role: u.role, name: u.name, email: u.email, githubLogin: u.githubLogin ?? null, ...("paypalEmail" in u && u.paypalEmail ? { paypalEmail: u.paypalEmail } : {}) } });
 }
 
 const now = new Date();

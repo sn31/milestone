@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Milestone API
-  version: 0.1.0
+  version: 0.2.0
   summary: HTTP routes of apps/web
   description: |
     Routes under apps/web/src/app/api. Authentication is a role cookie, `milestone_actor`, set by the role switcher
@@ -9,8 +9,11 @@ info:
     This is a hackathon stand-in for real sign-in. The two webhook routes do not use the cookie; they verify a
     signature instead.
 
-    Not implemented as HTTP routes yet: delivering work by manual or upload request, and advances. Deliveries
-    are created by the GitHub webhook. The `advance` job handler is planned.
+    Deliveries are created by the GitHub webhook (source github_pr), by /api/milestones/{id}/deliver (manual) or by
+    /api/milestones/{id}/upload (upload). Advances go through /api/advances/offer and /api/advances/accept. The
+    /api/dev/paypal/* routes exist only while PAYPAL_MODE=simulated and answer 404 otherwise (mode answers always).
+    Roles: usr_client, usr_freelancer and usr_partner act on the demo contracts; the freelancer and client checks
+    compare the cookie's user with the contract's parties.
   license:
     name: MIT
     identifier: MIT
@@ -24,7 +27,10 @@ tags:
   - name: milestones
   - name: paypal
   - name: webhooks
+  - name: deliveries
+  - name: advances
   - name: ops
+  - name: dev
 paths:
   /api/contracts:
     post:
@@ -202,7 +208,9 @@ paths:
       summary: PayPal webhook receiver
       description: |
         Verified with PayPal's verify-webhook-signature call against PAYPAL_WEBHOOK_ID, stored once by event id, then
-        routed. Handled events: CHECKOUT.ORDER.APPROVED, PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED,
+        routed. In PAYPAL_MODE=simulated the signature call is replaced by the X-Milestone-Simulated header (the shared
+        SIMULATED_WEBHOOK_SECRET, default "dev"), which the simulator sends itself about 1.5 seconds after a capture,
+        payout or refund. Handled events: CHECKOUT.ORDER.APPROVED, PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED,
         PAYMENT.PAYOUTS-ITEM.* and PAYMENT.PAYOUTSBATCH.DENIED. Others are stored for the audit log. Returns 500
         when an event is not processed yet so PayPal redelivers.
       security: []
@@ -228,7 +236,7 @@ paths:
                   ok: { type: boolean }
                   duplicate: { type: boolean }
                   outcome: { type: string, description: "funded, already, pending, mismatch, rejected, enqueued, stored or ignored" }
-        "400": { description: Bad signature }
+        "400": { description: Bad signature (or a missing simulated header in simulated mode) }
         "500": { description: Not processed yet, or PAYPAL_WEBHOOK_ID not set }
   /api/webhooks/github:
     post:
@@ -296,6 +304,267 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /api/milestones/{id}/deliver:
+    post:
+      tags: [deliveries]
+      operationId: deliverRepository
+      summary: Deliver a commit from a repository (manual delivery)
+      description: |
+        The contract's freelancer only, while the milestone is funded or held. The ref (default HEAD) is resolved to a
+        commit with git ls-remote, a delivery with source `manual` is stored in the GitHub webhook's payload shape
+        (the baseline for the tamper check is the milestone's funding-time sha), and a verify job is queued. The same
+        milestone and commit give the same delivery id, so a repeat returns `duplicate: true`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualDeliveryRequest" }
+      responses:
+        "200":
+          description: Delivery stored and verification queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, deliveryId, sha, duplicate]
+                properties:
+                  ok: { type: boolean }
+                  deliveryId: { type: string }
+                  sha: { type: string, description: 40-character commit id }
+                  duplicate: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422":
+          description: git ls-remote failed or the ref was not found
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /api/milestones/{id}/upload:
+    post:
+      tags: [deliveries]
+      operationId: uploadFiles
+      summary: Deliver files (upload delivery)
+      description: |
+        The contract's freelancer only, while the milestone is funded or held. Up to 10 files of 20 MB each, sent as
+        multipart field `files`, optional text field `note`. Files are stored under UPLOAD_DIR/<deliveryId>/ (default
+        var/uploads) with their sha256, a delivery with source `upload` is recorded, and a verify job runs the upload
+        checks (format by magic bytes, size, image dimensions, PDF page count, word count, required strings) and the
+        judgment stage. There is no tamper check for uploads. Delivered files are untrusted evidence.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_brand_1 }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  maxItems: 10
+                  items: { type: string, format: binary }
+                note: { type: string, description: Optional note to the reviewer, maxLength: 10000 }
+      responses:
+        "200":
+          description: Files stored and verification queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, deliveryId, files]
+                properties:
+                  ok: { type: boolean }
+                  deliveryId: { type: string, example: dlv_up_0123456789abcdef01234567 }
+                  files:
+                    type: array
+                    items: { $ref: "#/components/schemas/StoredFile" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413":
+          description: Too many bytes (a file over 20 MB, or a request over 10 files of 20 MB)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /api/files/{deliveryId}/{name}:
+    get:
+      tags: [deliveries]
+      operationId: getDeliveredFile
+      summary: Download or view a delivered file
+      description: |
+        Only the contract's client and freelancer. Served with a sandboxing Content-Security-Policy and nosniff;
+        images and PDFs open inline, everything else downloads as an attachment. The X-File-Sha256 header carries the
+        stored hash. Errors are plain text.
+      parameters:
+        - { name: deliveryId, in: path, required: true, schema: { type: string }, example: dlv_up_0123456789abcdef01234567 }
+        - { name: name, in: path, required: true, schema: { type: string }, example: logo.svg }
+      responses:
+        "200":
+          description: The file
+          headers:
+            X-File-Sha256: { schema: { type: string } }
+          content:
+            "*/*":
+              schema: { type: string, format: binary }
+        "403": { description: Not a party to the contract, content: { text/plain: { schema: { type: string } } } }
+        "404": { description: Unknown delivery, not an upload delivery, or unknown file name, content: { text/plain: { schema: { type: string } } } }
+  /api/advances/offer:
+    get:
+      tags: [advances]
+      operationId: getAdvanceOffer
+      summary: Price an advance against a funded milestone
+      description: |
+        The contract's freelancer only. If the milestone already has an advance (one per milestone) it is returned with
+        its stored offer. Otherwise a fresh offer is priced from the database; an ineligible milestone answers 200 with
+        `offer.eligible: false` and a reason. The explanation is two sentences from Claude when ANTHROPIC_API_KEY is set,
+        otherwise built from the numbers. The model never changes the numbers.
+      parameters:
+        - { name: milestoneId, in: query, required: true, schema: { type: string }, example: mst_1 }
+      responses:
+        "200":
+          description: Offer or existing advance
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdvanceOfferResponse" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/advances/accept:
+    post:
+      tags: [advances]
+      operationId: acceptAdvance
+      summary: Accept the advance offer ("Get paid now")
+      description: |
+        The contract's freelancer only. Under row locks the offer is re-priced from the database and stored as an
+        advance with status `offered`, `advance.accepted` is audited, and the `advance` job is queued; the job pays the
+        principal from the capital partner's PayPal account. One advance per milestone: a second call returns the
+        existing advance with 200 and `created: false`. The release repays the partner first (principal plus the quoted
+        fee) and pays the freelancer the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [milestoneId]
+              properties:
+                milestoneId: { type: string }
+      responses:
+        "200":
+          description: An advance already existed
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdvanceAcceptResponse" } } }
+        "201":
+          description: Advance created and queued
+          content: { application/json: { schema: { $ref: "#/components/schemas/AdvanceAcceptResponse" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: Not eligible, or a PayPal email is missing
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      reason:
+                        type: string
+                        description: not_eligible, no_paypal_email or no_partner_paypal_email
+        "503":
+          description: No capital partner is configured
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /api/dev/paypal/mode:
+    get:
+      tags: [dev]
+      operationId: getPayPalMode
+      summary: Which PayPal the server talks to
+      security: []
+      description: Answers in every mode. The fund button asks when it was not told.
+      responses:
+        "200":
+          description: Mode
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mode]
+                properties:
+                  mode: { type: string, enum: [simulated, sandbox] }
+  /api/dev/paypal/approve:
+    get:
+      tags: [dev]
+      operationId: approveSimulatedOrder
+      summary: Simulated PayPal checkout page
+      security: []
+      description: |
+        Exists only while PAYPAL_MODE is simulated (404 otherwise). The approve link of a simulated order points here. It
+        marks the order APPROVED and redirects (303) to /contracts/{contractId}?approved=<orderId>&milestone=<id>, where
+        the fund button captures it.
+      parameters:
+        - { name: order, in: query, required: true, schema: { type: string } }
+      responses:
+        "303":
+          description: Redirect back to the contract page
+          headers:
+            Location: { schema: { type: string } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/dev/paypal/fail:
+    post:
+      tags: [dev]
+      operationId: armSimulatedPayoutFailure
+      summary: Make the next simulated payout item fail
+      security: []
+      description: |
+        Exists only while PAYPAL_MODE is simulated (404 otherwise). Arms a one-shot failure: the next payout item with
+        this sender_item_id comes back FAILED, so the release goes to `held` with `milestone.needs_operator`. Release
+        items use `<milestoneId>:freelancer` and `<milestoneId>:partner`. Accepts JSON, or a form post (the /ops
+        "Simulate payout failure" button).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArmFailureRequest" }
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/ArmFailureRequest" }
+      responses:
+        "200":
+          description: Armed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  armed:
+                    type: object
+                    properties:
+                      senderItemId: { type: string }
+                      reason: { type: string, example: RECEIVER_ACCOUNT_LOCKED }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [dev]
+      operationId: listArmedFailures
+      summary: List armed simulated payout failures
+      security: []
+      responses:
+        "200":
+          description: Armed failures
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  armed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        senderItemId: { type: string }
+                        reason: { type: string }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     roleCookie:
@@ -330,9 +599,98 @@ components:
       required: [scope, total]
       properties:
         scope: { type: string, description: Plain-English scope }
+        title: { type: string, maxLength: 120, description: Optional; defaults to the compiled title }
         currency: { type: string, minLength: 3, maxLength: 3, default: USD }
         total: { type: number, description: Total in major units, for example 300.00 }
         repo: { type: string, description: "owner/name of the delivery repository" }
+    ManualDeliveryRequest:
+      type: object
+      required: [repoUrl]
+      properties:
+        repoUrl: { type: string, description: "https URL, file:// URL or absolute local path; ssh, git:// and credentials in the URL are refused", example: /tmp/milestone-demo }
+        ref: { type: string, default: HEAD, description: Branch, tag, HEAD or a 40-character commit id, example: m1-pass }
+        title: { type: string, maxLength: 200 }
+        note: { type: string, maxLength: 10000 }
+    StoredFile:
+      type: object
+      required: [name, size, sha256, mime]
+      properties:
+        name: { type: string }
+        size: { type: integer }
+        sha256: { type: string }
+        mime: { type: string }
+    UploadCriterionSpec:
+      type: object
+      description: "spec of a criterion with kind upload. A criterion passes when at least one matching file passes every check."
+      required: [pattern]
+      properties:
+        pattern:
+          description: A glob ("*.pdf", "logo/*.{svg,png}") or an extension list ([".svg", ".png"] or "svg,png")
+          oneOf:
+            - { type: string }
+            - { type: array, minItems: 1, items: { type: string } }
+        format: { type: string, enum: [pdf, png, jpg, svg, docx, md, txt], description: Checked from magic bytes }
+        minBytes: { type: integer, minimum: 0 }
+        minWords: { type: integer, minimum: 0, description: "txt, md, docx" }
+        maxPages: { type: integer, minimum: 1, description: PDF }
+        minWidth: { type: integer, minimum: 1, description: "png, jpg, svg" }
+        minHeight: { type: integer, minimum: 1 }
+        mustContain:
+          type: array
+          items: { type: string }
+          description: Case-insensitive strings the file text must contain
+    ArmFailureRequest:
+      type: object
+      description: Either sender_item_id, or milestoneId with an optional party.
+      properties:
+        sender_item_id: { type: string, maxLength: 127, example: "mst_1:freelancer" }
+        milestoneId: { type: string }
+        party: { type: string, enum: [freelancer, partner], default: freelancer }
+        reason: { type: string, description: A PayPal error name, default: RECEIVER_ACCOUNT_LOCKED, example: RECEIVER_UNREGISTERED }
+    AdvanceTerms:
+      type: object
+      properties:
+        principalMinor: { type: integer }
+        feeBpsPerDay: { type: number }
+        days: { type: integer, description: Days until the milestone is due }
+        expectedFeeMinor: { type: integer }
+        repaymentMinor: { type: integer }
+        pFail: { type: number, description: Estimated chance of failing verification }
+    AdvanceView:
+      type: object
+      required: [id, status, principalMinor, feeBpsPerDay, feeMinor, repaymentMinor, fundedAt, repaidAt, explanation]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [offered, funded, repaid, shortfall] }
+        principalMinor: { type: integer }
+        feeBpsPerDay: { type: number }
+        feeMinor: { type: integer }
+        repaymentMinor: { type: integer, description: Principal plus the quoted fee, deducted from the release }
+        fundedAt: { type: [string, "null"], format: date-time }
+        repaidAt: { type: [string, "null"], format: date-time }
+        explanation: { type: [string, "null"] }
+    AdvanceOfferResponse:
+      type: object
+      required: [milestoneId, currency, amountMinor, advance, offer, terms, explanation, explanationSource]
+      properties:
+        milestoneId: { type: string }
+        currency: { type: string }
+        amountMinor: { type: integer }
+        advance: { oneOf: [{ $ref: "#/components/schemas/AdvanceView" }, { type: "null" }] }
+        offer:
+          type: object
+          description: "Includes eligible (boolean) and, when not eligible, reason"
+          additionalProperties: true
+        terms: { oneOf: [{ $ref: "#/components/schemas/AdvanceTerms" }, { type: "null" }] }
+        explanation: { type: string }
+        explanationSource: { type: string, enum: [model, rules, stored] }
+    AdvanceAcceptResponse:
+      type: object
+      required: [advance, created, queued]
+      properties:
+        advance: { $ref: "#/components/schemas/AdvanceView" }
+        created: { type: boolean }
+        queued: { type: boolean, description: Whether the advance job was queued by this call }
     CaptureResult:
       type: object
       required: [status]

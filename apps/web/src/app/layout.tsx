@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import { RoleSwitcher } from "@/components/role-switcher";
+import { getActor } from "@/lib/session";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -12,7 +13,9 @@ export const metadata: Metadata = {
   description: "AI escrow agent for freelance work",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const actor = await getActor();
+  const isPartner = actor.role === "partner";
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="flex min-h-full flex-col">
@@ -28,7 +31,15 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               </Link>
               <nav className="hidden items-center gap-4 text-sm text-zinc-600 sm:flex dark:text-zinc-400">
                 <Link href="/" className="hover:text-zinc-900 dark:hover:text-white">Contracts</Link>
-                <Link href="/contracts/new" className="hover:text-zinc-900 dark:hover:text-white">New contract</Link>
+                {isPartner ? (
+                  // The partner is not a contract party; its two links take New contract's place so the header stays on one row.
+                  <>
+                    <Link href="/lender" className="hover:text-zinc-900 dark:hover:text-white">Lender&apos;s book</Link>
+                    <Link href="/ops" className="hover:text-zinc-900 dark:hover:text-white">Operations</Link>
+                  </>
+                ) : (
+                  <Link href="/contracts/new" className="hover:text-zinc-900 dark:hover:text-white">New contract</Link>
+                )}
               </nav>
             </div>
             <RoleSwitcher />

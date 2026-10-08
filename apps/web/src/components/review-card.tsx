@@ -38,6 +38,8 @@ export function ReviewCard(props: {
   decisionAction: string | null;
   amountLabel: string | null;
   reason: string | null;
+  /** Required criteria the delivery's verdict did not pass; the review route then refuses approve and confirm_partial. */
+  requiredNotPassed?: string[];
 }) {
   const router = useRouter();
   const [now, setNow] = useState<number | null>(null);
@@ -88,10 +90,15 @@ export function ReviewCard(props: {
   // Veto only while the window is known to be open (the route refuses it once reviewEndsAt has passed).
   const windowOpen = endsAt === null || (now !== null && endsAt > now);
 
+  // With a required criterion not passed the route refuses approve and confirm_partial, so only Hold is offered.
+  const holdOnly = props.status === "needs_client" && (props.requiredNotPassed?.length ?? 0) > 0;
+
   const buttons: React.ReactNode[] = [];
   if (props.status === "review") {
     buttons.push(btn("approve", "Approve now", true));
     if (windowOpen) buttons.push(btn("veto", "Veto"));
+  } else if (holdOnly) {
+    buttons.push(btn("hold", "Hold", true));
   } else {
     if (props.decisionAction === "partial") buttons.push(btn("confirm_partial", "Release partial", true));
     if (props.decisionAction === "ask_client") buttons.push(btn("approve", "Approve full", true));
@@ -113,7 +120,18 @@ export function ReviewCard(props: {
           {props.reason ? <span className="mt-1 block text-zinc-600 dark:text-zinc-400">{props.reason}</span> : null}
         </p>
       )}
-      {props.isClient ? <div className="flex flex-wrap gap-2">{buttons}</div> : <p className="text-zinc-500 dark:text-zinc-400">Waiting for the client to respond.</p>}
+      {props.isClient ? (
+        <>
+          {holdOnly ? (
+            <p className="text-zinc-600 dark:text-zinc-400" title={props.requiredNotPassed?.join("; ")}>
+              Required criteria did not pass, so only Hold is available.
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">{buttons}</div>
+        </>
+      ) : (
+        <p className="text-zinc-500 dark:text-zinc-400">Waiting for the client to respond.</p>
+      )}
       {error ? <p role="alert" className="text-rose-700 dark:text-rose-400">{error}</p> : null}
     </div>
   );

@@ -32,7 +32,7 @@ Recording the resolution: submit the note on the `/ops` card, or `POST /api/ops/
 
 ## Audit events to search
 
-`audit_log.event`: `milestone.needs_operator`, `ops.resolved`, `release.refused_needs_operator`, `verify.refused_needs_operator`, `release.claimed`, `release.waiting`, `release.skipped_in_flight`, `paypal.payout`, `paypal.refund`, `paypal.payout_error`, `paypal.refund_error`, `paypal.payout_failed`, `paypal.payout_reversed`, `paypal.payout_batch_denied`, `paypal.payout_unmatched`, `paypal.unmatched_batch`, `paypal.refund_failed`, `paypal.refund_unmatched`, `paypal.capture_unmatched`, `milestone.capture_mismatch`, `milestone.settle_conflict`, `milestone.reversed`, `advance.repayment_failed`, `ledger.skipped`, `paypal.receipt_failed`. Example:
+`audit_log.event`: `milestone.needs_operator`, `ops.resolved`, `release.refused_needs_operator`, `verify.refused_needs_operator`, `release.claimed`, `release.waiting`, `release.skipped_in_flight`, `paypal.payout`, `paypal.refund`, `paypal.payout_error`, `paypal.refund_error`, `paypal.payout_failed`, `paypal.payout_reversed`, `paypal.payout_batch_denied`, `paypal.payout_unmatched`, `paypal.unmatched_batch`, `paypal.refund_failed`, `paypal.refund_unmatched`, `paypal.capture_unmatched`, `milestone.capture_mismatch`, `milestone.settle_conflict`, `milestone.reversed`, `advance.repayment_failed`, `ledger.skipped`, `paypal.receipt_failed`, `delivery.manual`, `delivery.upload`, `advance.accepted`, `advance.funded`, `advance.needs_operator`, `advance.withdrawn`, `advance.refused`, `advance.skipped`, `advance.config_error`, `paypal.advance_payout_error`. Example:
 
 ```sql
 select created_at, actor, event, detail from audit_log where milestone_id = 'mst_1' order by created_at;
@@ -54,4 +54,57 @@ It creates an order, asks you to approve it in the browser as the sandbox client
 
 ## Switching PAYPAL_MODE
 
-`PAYPAL_MODE` is planned and not read by any code yet. Today the only switch is `PAYPAL_ENV` (`sandbox`, the default, or `live`). Do not set `live` for the hackathon. Once the simulated mode is built, `PAYPAL_MODE=simulated` is meant to replace the PayPal client with a local stand-in so the demo runs without credentials, and removing the variable returns to the sandbox. Check the README before relying on it.
+`PAYPAL_MODE` is read by the web app and the worker. Both must agree, so set it in `.env` and restart `pnpm dev`.
+
+- `PAYPAL_MODE=simulated`: no PayPal account needed. A local simulator answers the REST calls, and posts its own webhooks to `APP_URL/api/webhooks/paypal` about 1.5 seconds after a capture, payout or refund, authenticated by the `X-Milestone-Simulated` header (`SIMULATED_WEBHOOK_SECRET`, default `dev` outside production, required in production). The fund button becomes a dashed amber "simulated" button; the approve step is instant.
+- `PAYPAL_MODE=sandbox`: the real sandbox. Needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and, for advances, `PAYPAL_PARTNER_CLIENT_ID` and `PAYPAL_PARTNER_CLIENT_SECRET`. Without partner credentials the advance job throws rather than pay from the platform account.
+- Unset: simulated when `PAYPAL_CLIENT_ID` is empty and `NODE_ENV` is not `production`, sandbox otherwise.
+
+`PAYPAL_ENV` (`sandbox`, the default, or `live`) is separate. Do not set `live` for the hackathon. `GET /api/dev/paypal/mode` says which mode the server is in.
+
+Note that `.env.example` lists `PAYPAL_MODE` twice (once as `simulated`, once empty). Keep only one line so the mode is what you intend.
+
+## Resetting the simulator
+
+The simulator keeps its orders, captures, payouts, refunds, idempotency records and armed failures in `var/simulated-paypal.json` (or the path in `SIMULATED_PAYPAL_STATE_FILE`; the value `memory` keeps state in the process only). Stop `pnpm dev`, delete the file, and start again:
+
+```bash
+rm var/simulated-paypal.json
+```
+
+Reset the database too (`pnpm db:migrate` on a fresh volume, then `pnpm db:seed`) if the simulator state and the milestones no longer match; an order id in the database that the simulator no longer knows will fail to capture.
+
+## Arming a payout failure
+
+Only in simulated mode (the route answers 404 otherwise). To make the next payout item for a milestone fail once:
+
+```bash
+curl -X POST localhost:3000/api/dev/paypal/fail \
+  -H 'content-type: application/json' \
+  -d '{"sender_item_id":"mst_1:freelancer","reason":"RECEIVER_UNREGISTERED"}'
+```
+
+`sender_item_id` is `<milestoneId>:freelancer` or `<milestoneId>:partner`; `{"milestoneId":"mst_1","party":"freelancer"}` works too. `reason` is optional (default `RECEIVER_ACCOUNT_LOCKED`). The next release for that milestone then sees a FAILED item, the milestone goes to `held` and `milestone.needs_operator` appears on `/ops`. `GET /api/dev/paypal/fail` lists what is armed. The "Simulate payout failure" button on an `/ops` card arms it for that milestone's freelancer item. Arm it before the release job runs; each arming fires once.
+
+## Seed environment variables
+
+`pnpm db:seed` reads these from `.env`:
+
+- `PAYPAL_FREELANCER_EMAIL`: the freelancer's PayPal receiver (falls back to `SPIKE_FREELANCER_EMAIL`). Without it, accepting an advance is refused with "add a PayPal email" in every mode, and a sandbox payout has no receiver.
+- `PAYPAL_PARTNER_EMAIL`: the capital partner's PayPal account, which receives repayments. Without it, accepting an advance is refused (`no_partner_paypal_email`), except in simulated mode, where the partner's account email is used.
+
+Reseeding is idempotent, but the seed's user upsert does not update `paypal_email` on an existing user. Set both variables before the first `pnpm db:seed`; to change them later, update `users.paypal_email` directly or reseed a fresh database.
+
+## The model key
+
+`ANTHROPIC_API_KEY` is required for judgment criteria to be judged (and for the contract compiler and model-phrased advance explanations). Without it the contract form builds a fixed three-milestone demo contract, and verification runs the deterministic or upload checks only: every judgment criterion is unclear, the model is recorded as `deterministic-only`, and a delivery that passes everything else goes to "needs client" under rule P3 instead of review. Set the key for the recording; `MILESTONE_MODEL` picks the model.
+
+## The end-to-end suites
+
+Unit tests run with `pnpm test`. The suites that need Postgres are opt-in: start Postgres (`docker compose up -d`), run `pnpm db:migrate`, then
+
+```bash
+MILESTONE_E2E=1 pnpm test
+```
+
+They are `apps/worker/src/lib/verify.e2e.test.ts` (verify against a throwaway git repo, and upload deliveries), `apps/worker/test/money-path.e2e.test.ts` (review, release and settle with PayPal faked at the HTTP layer), `release-settle.e2e.test.ts` and `advance.e2e.test.ts`. They use `DATABASE_URL`, tag every row they create and remove it afterwards, and mock the job queue. Run them against a development database, not one you are about to demo from.

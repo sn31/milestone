@@ -75,6 +75,8 @@ export function AuditGrid({ rows }: { rows: AuditRow[] }) {
         sortable: false,
         filter: "agTextColumnFilter",
         filterValueGetter: (p) => summarize(p.data?.detail),
+        // detail is an object; a formatter silences AG Grid warning #48 and gives copy/export a readable string.
+        valueFormatter: (p) => summarize(p.value),
         cellRenderer: DetailCell,
       },
     ],
