@@ -1,13 +1,20 @@
 import { rm } from "node:fs/promises";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Job } from "pg-boss";
-import { audit, enqueue, transition, VerdictOutput, VerdictResult, type CriterionSpec, type EvidenceSummary, type PolicyDecision } from "@milestone/core";
+import { audit, deliveries, enqueue, milestones, transition, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
 import { decide } from "@milestone/money";
 import { detectInjection, enforce, formatVerdictComment, judge, overall, postVerdictComment, runDeterministicStage, type DeterministicOutput } from "@milestone/verify";
 import type { JobData } from "../handlers.js";
 import { getDb } from "../lib/db.js";
 import { createEvidenceReader, git } from "../lib/evidence.js";
 
-type Db = ReturnType<typeof getDb>;
+/** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
+export type StoredDecision = PolicyDecision & { deliveryId: string };
+
+/** The review window can be shortened for demos, never skipped. */
+export const MIN_REVIEW_WINDOW_SECONDS = 30;
+
+const VERIFIABLE: readonly MilestoneStatus[] = ["funded", "held", "verifying"];
 
 interface DeliveryPayload {
   sha: string;
@@ -28,9 +35,31 @@ function payloadOf(raw: Record<string, unknown> | null): DeliveryPayload {
   return out;
 }
 
-function reviewWindowSeconds(contractWindow: number): number {
-  const env = Number(process.env.REVIEW_WINDOW_SECONDS);
-  return process.env.REVIEW_WINDOW_SECONDS !== undefined && process.env.REVIEW_WINDOW_SECONDS !== "" && Number.isFinite(env) && env >= 0 ? Math.floor(env) : contractWindow;
+export function reviewWindowSeconds(contractWindow: number, override = process.env.REVIEW_WINDOW_SECONDS): number {
+  const env = Number(override);
+  const chosen = override !== undefined && override.trim() !== "" && Number.isFinite(env) ? Math.floor(env) : contractWindow;
+  return Math.max(MIN_REVIEW_WINDOW_SECONDS, Number.isFinite(chosen) ? chosen : MIN_REVIEW_WINDOW_SECONDS);
+}
+
+function decisionDeliveryId(decision: unknown): string | null {
+  const id = decision && typeof decision === "object" ? (decision as { deliveryId?: unknown }).deliveryId : undefined;
+  return typeof id === "string" ? id : null;
+}
+
+/**
+ * Enters "verifying" under a row lock and clears everything that belonged to the previous delivery
+ * (client response, review window, decision), so a stale decision can never be released for this one.
+ * Returns the status found when the milestone could not enter verifying.
+ */
+async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): Promise<MilestoneStatus | null> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx.select({ status: milestones.status }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
+    if (!row) throw new Error(`milestone ${milestoneId} not found`);
+    if (!VERIFIABLE.includes(row.status)) return row.status;
+    await transition(tx as unknown as Db, milestoneId, "verifying", { actor: "system", event: "milestone.verifying", detail: { deliveryId } });
+    await tx.update(milestones).set({ clientResponse: null, reviewEndsAt: null, decision: null, decidedAt: null }).where(eq(milestones.id, milestoneId));
+    return null;
+  });
 }
 
 /** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
@@ -99,34 +128,37 @@ export async function verify(job: Job<JobData>): Promise<void> {
 
   // 1. Verdict, once per delivery.
   if (!delivery.verdict || !delivery.result || !delivery.verifiedAt) {
-    if (milestone.status !== "funded" && milestone.status !== "held" && milestone.status !== "verifying") {
-      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${milestone.status}, nothing to verify`);
+    const blocked = await enterVerifying(db, milestone.id, deliveryId);
+    if (blocked) {
+      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
       return;
     }
-    await transition(db, milestone.id, "verifying", { actor: "system", event: "milestone.verifying", detail: { deliveryId } });
     const v = await produceVerdict(deliveryId, payload, criteria);
-    const stored = await db.$client.query(
-      `update deliveries set evidence = $2::jsonb, verdict = $3::jsonb, result = $4, suspected_injection = $5, model = $6, prompt_hash = $7, verified_at = now()
-       where id = $1 and verdict is null returning id`,
-      [deliveryId, JSON.stringify(v.evidence), JSON.stringify(v.verdict), v.result, v.verdict.suspected_injection, v.model, v.promptHash],
-    );
-    if (stored.rowCount) {
+    const stored = await db
+      .update(deliveries)
+      .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })
+      .where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)))
+      .returning({ id: deliveries.id });
+    if (stored.length) {
       await audit(db, { actor: "verifier", event: "verdict.stored", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, result: v.result, model: v.model, promptHash: v.promptHash, suspectedInjection: v.verdict.suspected_injection, injectionHits: v.injectionHits } });
     }
     ({ delivery, milestone, contract, criteria } = await loadAll(db, deliveryId));
   }
   const verdict = VerdictOutput.parse(delivery.verdict);
   const result = VerdictResult.parse(delivery.result);
-  const verifiedAt = delivery.verifiedAt!;
 
-  // 2. Decision, once per verdict: a decision older than this verdict belongs to an earlier delivery.
-  const decidedForThis = milestone.decidedAt !== null && milestone.decision !== null && milestone.decidedAt >= verifiedAt;
+  // 2. Decision, once per delivery: the stored decision names the delivery it was made for.
   let decision: PolicyDecision;
-  if (decidedForThis) {
-    decision = milestone.decision as PolicyDecision;
+  if (milestone.decision && decisionDeliveryId(milestone.decision) === deliveryId) {
+    decision = milestone.decision as StoredDecision;
   } else {
     if (milestone.status !== "verifying") {
       console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${milestone.status}, not deciding`);
+      return;
+    }
+    const latest = await db.query.deliveries.findFirst({ where: (d, o) => o.eq(d.milestoneId, milestone.id), orderBy: (d, o) => [o.desc(d.receivedAt), o.desc(d.id)] });
+    if (latest && latest.id !== deliveryId) {
+      console.warn(`[verify] ${deliveryId}: delivery ${latest.id} superseded it, not deciding`);
       return;
     }
     decision = decide({
@@ -138,27 +170,51 @@ export async function verify(job: Job<JobData>): Promise<void> {
         ...(contract.perReleaseCapMinor !== null ? { perReleaseCapMinor: contract.perReleaseCapMinor } : {}),
       },
     });
-    await db.$client.query(`update milestones set decision = $2::jsonb, decided_at = now() where id = $1`, [milestone.id, JSON.stringify(decision)]);
-    await audit(db, { actor: "policy", event: "policy.decided", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, ...decision } });
+    const stored: StoredDecision = { ...decision, deliveryId };
+    const written = await db
+      .update(milestones)
+      .set({ decision: stored, decidedAt: new Date() })
+      .where(and(eq(milestones.id, milestone.id), eq(milestones.status, "verifying"), isNull(milestones.decision)))
+      .returning({ id: milestones.id });
+    if (written.length) {
+      await audit(db, { actor: "policy", event: "policy.decided", milestoneId: milestone.id, contractId: contract.id, detail: { ...stored } });
+    }
     milestone = (await loadAll(db, deliveryId)).milestone;
+    if (decisionDeliveryId(milestone.decision) !== deliveryId) {
+      // The milestone moved on (another delivery, or the client) between our read and the write.
+      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} changed while deciding, leaving it`);
+      return;
+    }
+    decision = milestone.decision as StoredDecision;
   }
 
   // 3. State and schedule. transition() is a no-op when already there; a milestone that has moved on is left alone.
   const target = decision.action === "release" ? "review" : decision.action === "hold" ? "held" : "needs_client"; // partial: the client confirms the share on the web
   const detail = { deliveryId, action: decision.action, ruleIds: decision.ruleIds };
-  if (milestone.status !== "verifying" && milestone.status !== target) {
-    console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${milestone.status}, leaving it`);
-  } else if (target === "review") {
-    let endsAt = milestone.reviewEndsAt;
-    if (milestone.status === "verifying" || !endsAt) {
-      endsAt = new Date(Date.now() + reviewWindowSeconds(contract.reviewWindowSeconds) * 1000);
-      await db.$client.query(`update milestones set review_ends_at = $2 where id = $1`, [milestone.id, endsAt]);
+  const milestoneId = milestone.id;
+  const reviewEndsAt = await db.transaction(async (tx) => {
+    const t = tx as unknown as Db;
+    const [row] = await tx.select({ status: milestones.status, decision: milestones.decision, reviewEndsAt: milestones.reviewEndsAt }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
+    if (!row || decisionDeliveryId(row.decision) !== deliveryId || (row.status !== "verifying" && row.status !== target)) {
+      console.warn(`[verify] ${deliveryId}: milestone ${milestoneId} is ${row?.status ?? "gone"} with another decision or state, leaving it`);
+      return null;
     }
-    await transition(db, milestone.id, "review", { actor: "policy", event: "milestone.review", detail: { ...detail, reviewEndsAt: endsAt.toISOString() } });
-    const delaySeconds = Math.max(0, Math.ceil((endsAt.getTime() - Date.now()) / 1000));
-    await enqueue("release", milestone.id, { deliveryId }, { delaySeconds, dedupe: deliveryId });
-  } else {
-    await transition(db, milestone.id, target, { actor: "policy", event: `milestone.${target}`, detail });
+    if (target !== "review") {
+      await transition(t, milestoneId, target, { actor: "policy", event: `milestone.${target}`, detail });
+      return null;
+    }
+    let endsAt = row.reviewEndsAt;
+    if (row.status === "verifying" || !endsAt) {
+      endsAt = new Date(Date.now() + reviewWindowSeconds(contract.reviewWindowSeconds) * 1000);
+      await tx.update(milestones).set({ reviewEndsAt: endsAt }).where(eq(milestones.id, milestoneId));
+    }
+    await transition(t, milestoneId, "review", { actor: "policy", event: "milestone.review", detail: { ...detail, reviewEndsAt: endsAt.toISOString() } });
+    return endsAt;
+  });
+  if (reviewEndsAt) {
+    // The release job re-checks the decision's deliveryId and the window; dedupe makes a retry a no-op.
+    const delaySeconds = Math.max(0, Math.ceil((reviewEndsAt.getTime() - Date.now()) / 1000));
+    await enqueue("release", milestoneId, { deliveryId }, { delaySeconds, dedupe: deliveryId });
   }
 
   // 4. PR comment, best effort and marker-deduplicated.

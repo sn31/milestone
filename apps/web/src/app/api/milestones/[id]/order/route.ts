@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
 import { audit, milestones, recordOpResult, requestIdFor } from "@milestone/core";
 import { createOrder } from "@milestone/money";
 import { getDb } from "@/lib/db";
@@ -16,7 +17,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const db = getDb();
   const found = await loadMilestone(db, id);
   if (!found) return jsonError("milestone not found", 404);
-  const { milestone: m, contract: c, ops } = found;
+  const { milestone: m, contract: c } = found;
 
   if (!isContractClient(actor, c)) return jsonError("only the contract's client can fund a milestone", 403);
   if (c.status !== "active") return jsonError(`contract is ${c.status}; both parties must approve before funding`, 409);
@@ -45,7 +46,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   if (m.paypalOrderId !== orderId) {
-    await db.update(milestones).set({ paypalOrderId: orderId }).where(ops.eq(milestones.id, m.id));
+    await db.update(milestones).set({ paypalOrderId: orderId }).where(eq(milestones.id, m.id));
     await audit(db, { actor: actor.userId, event: "milestone.order_created", milestoneId: m.id, contractId: c.id, detail: { orderId } });
   }
   return NextResponse.json({ orderId }, { headers: { "Cache-Control": "no-store" } });

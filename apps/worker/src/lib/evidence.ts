@@ -62,11 +62,8 @@ export function createEvidenceReader(input: ReaderInput): EvidenceReader {
     getDiff() {
       const workdir = input.workdir;
       if (!workdir) return Promise.resolve("the delivery could not be checked out, no diff is available");
-      diff ??= (async () => {
-        // The deterministic stage fetched depth 1; deepen by one so the diff is against the parent, best effort.
-        await git(workdir, ["fetch", "-q", "--depth", "2", input.repoUrl, input.sha], 120_000).catch(() => "");
-        return bound(await git(workdir, ["show", "--stat", "-p", "--no-color", input.sha]));
-      })();
+      // The deterministic stage fetched depth 2 (the commit and its first parent), so this diffs against the parent.
+      diff ??= git(workdir, ["show", "--stat", "-p", "--no-color", input.sha]).then((d) => bound(d));
       return diff;
     },
     async listEvidence() {
