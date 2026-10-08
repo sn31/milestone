@@ -9,21 +9,16 @@ import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
 import { VerdictView } from "@/components/verdict-view";
-import { Hash, LogStream, MoneyTransit, StateGlyph, stateMeta, type LogLine, type ToneKey } from "@/components/ui";
+import { VerifierLog } from "@/components/live-refresh";
+import { Hash, MoneyTransit, StateGlyph, stateMeta, type LogLine, type ToneKey } from "@/components/ui";
+import type { MilestoneSnapshot } from "@/app/api/milestones/[id]/status/snapshot";
 import { CriteriaList } from "@/app/contracts/_components/criteria-list";
 import { LifecycleTrack } from "@/app/contracts/_components/lifecycle-track";
-import { LiveRefresh } from "@/app/contracts/_components/live-refresh";
 
 type MilestoneRow = typeof milestones.$inferSelect;
 type ContractRow = typeof contracts.$inferSelect;
 type CriterionRow = typeof criteriaTable.$inferSelect;
 type DeliveryRow = typeof deliveries.$inferSelect;
-
-/** An audit row about this milestone, oldest first (used for the verifying log). */
-export interface MilestoneEvent {
-  at: Date;
-  event: string;
-}
 
 export interface MilestoneActionsProps {
   milestone: MilestoneRow;
@@ -33,9 +28,14 @@ export interface MilestoneActionsProps {
   crit: CriterionRow[];
   /** The latest delivery, if any. */
   delivery: DeliveryRow | null;
-  /** Audit rows for this milestone, oldest first. Only read while verifying. */
-  events?: MilestoneEvent[];
+  /** This milestone's live snapshot (GET /api/milestones/[id]/status) when the page is polling it; feeds the verifier log. */
+  live?: MilestoneSnapshot | null;
   names: { client: string; freelancer: string };
+  /**
+   * Set when a payout or refund for this milestone went wrong (a milestone.needs_operator audit row): it stays held
+   * until an operator resolves it by hand, and the worker refuses new deliveries for it.
+   */
+  operator?: { reason: string; failure: string | null } | null;
 }
 
 /** A one-line status note with the state's dot. */
@@ -113,45 +113,44 @@ function DeliveredFiles({ delivery }: { delivery: DeliveryRow | null }) {
   );
 }
 
-/** Settled milestones keep their receipt one click away instead of at full length. */
-function Folded({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <details className="group/fold">
-      <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-control py-1 font-mono text-[11px] tracking-[0.1em] text-fg-muted uppercase transition-colors duration-200 hover:text-fg [&::-webkit-details-marker]:hidden">
-        <svg aria-hidden viewBox="0 0 10 10" className="size-2.5 transition-transform duration-200 ease-glide group-open/fold:rotate-90" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M3.5 2 L7 5 L3.5 8" />
-        </svg>
-        {label}
-      </summary>
-      <div className="mt-3 grid gap-4">{children}</div>
-    </details>
-  );
-}
-
 const hhmmss = (d: Date) => d.toISOString().slice(11, 19);
 
-/** What the verifier has been given and what it is working through, as log lines. Only real events carry a time. */
-function verifyLines(delivery: DeliveryRow | null, crit: CriterionRow[], events: MilestoneEvent[]): LogLine[] {
+/**
+ * The head of the verifier's log: what it was given (the delivery) and what it checks. The lines that arrive while it
+ * works (audit events, evidence summaries) are appended by VerifierLog from the live snapshot.
+ */
+function verifyHead(delivery: DeliveryRow | null, crit: CriterionRow[]): LogLine[] {
   const lines: LogLine[] = [];
-  const since = delivery?.receivedAt.getTime() ?? 0;
   if (delivery) {
     const what = delivery.source === "upload" ? "files" : delivery.source === "github_pr" ? "pull request" : delivery.source;
     lines.push({ at: hhmmss(delivery.receivedAt), text: `delivery ${delivery.id} received · ${what} ${truncateMiddle(delivery.ref, 14, 6)}` });
   }
-  for (const e of events) {
-    if (e.at.getTime() < since) continue;
-    lines.push({ at: hhmmss(e.at), text: humanize(e.event), tone: /fail|refused|error/.test(e.event) ? "err" : undefined });
-  }
   crit.forEach((c, i) => lines.push({ text: `check ${String(i + 1).padStart(2, "0")}  ${c.kind.padEnd(8, " ")} ${c.description}` }));
-  lines.push({ text: "agent weighing the evidence against each check", tone: "verifying" });
+  lines.push({ text: "agent running the checks and weighing the evidence", tone: "verifying" });
   return lines;
+}
+
+/** The snapshot to start the verifier log from when the page did not pass one (it polls only live milestones). */
+function emptySnapshot(milestone: MilestoneRow, delivery: DeliveryRow | null): MilestoneSnapshot {
+  return {
+    id: milestone.id,
+    status: milestone.status,
+    live: true,
+    decidedAt: null,
+    reviewEndsAt: null,
+    delivery: delivery ? { id: delivery.id, receivedAt: delivery.receivedAt.toISOString(), verifiedAt: null, result: null, evidenceCount: 0 } : null,
+    evidence: [],
+    events: [],
+    auditId: null,
+    pendingOp: null,
+  };
 }
 
 /**
  * Everything inside one milestone's station on the contract rail: where it sits in its lifecycle, its release conditions
  * or its verdict, and the actions the acting role can take here (fund, deliver, advance, review).
  */
-export async function MilestoneActions({ milestone, contract, actor, crit, delivery, events = [], names }: MilestoneActionsProps) {
+export async function MilestoneActions({ milestone, contract, actor, crit, delivery, live = null, names, operator = null }: MilestoneActionsProps) {
   const status = milestone.status;
   const isClient = actor.role === "client" && actor.userId === contract.clientId;
   const isFreelancer = actor.role === "freelancer" && actor.userId === contract.freelancerId;
@@ -167,6 +166,20 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
       <DeliveredFiles delivery={delivery} />
       <VerdictView delivery={delivery} decision={receiptDecision} descriptions={descriptions} currency={contract.currency} required={required} showEvidence />
     </>
+  );
+  // Where the decision is what matters (review, needs client, held, paid), the receipt folds to one line: result,
+  // criteria passed and the policy stamp, with the full receipt and delivered files one click away.
+  const receipt = (
+    <VerdictView
+      folded
+      attachments={<DeliveredFiles delivery={delivery} />}
+      delivery={delivery}
+      decision={receiptDecision}
+      descriptions={descriptions}
+      currency={contract.currency}
+      required={required}
+      showEvidence
+    />
   );
 
   let body: ReactNode;
@@ -211,8 +224,12 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
     case "verifying":
       body = (
         <>
-          <LiveRefresh />
-          <LogStream live title={`verifier · ${delivery ? delivery.id : "waiting for delivery"}`} lines={verifyLines(delivery, crit, events)} maxHeight={240} />
+          <VerifierLog
+            milestoneId={milestone.id}
+            initial={live ?? emptySnapshot(milestone, delivery)}
+            head={verifyHead(delivery, crit)}
+            title={`verifier · ${delivery ? delivery.id : "waiting for delivery"}`}
+          />
           <CriteriaList items={items} checking />
           {delivery?.verdict ? verdict : null}
         </>
@@ -243,25 +260,34 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
           <>
             {/* ReviewCard draws the countdown ring and the approve / veto controls for the review window. */}
             {card}
-            {verdict}
+            {receipt}
           </>
         ) : (
           <>
-            <Note tone="needs">The agent could not release this on its own. {names.client} decides.</Note>
+            {/* The card says what the agent recommends and why; the client decides there. */}
             {card}
-            {verdict}
+            {receipt}
           </>
         );
       break;
     }
     case "held":
-      body = (
+      body = operator ? (
+        <>
+          <Note tone="danger">
+            {operator.reason.replace(/\.$/, "")}
+            {operator.failure ? `: ${operator.failure.replace(/\.$/, "")}` : ""}. The money stays in escrow until an operator resolves it by
+            hand; a new delivery will not be verified.
+          </Note>
+          {delivery ? receipt : null}
+        </>
+      ) : (
         <>
           <Note tone="held">
             Held in escrow{milestone.clientResponse ? ` (${names.client} chose ${humanize(milestone.clientResponse)})` : ""}. Nothing moves until a new delivery
             passes or an operator resolves it.
           </Note>
-          {delivery ? verdict : null}
+          {delivery ? receipt : null}
           {deliverFor(milestone, contract, actor, crit)}
         </>
       );
@@ -282,7 +308,7 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
               {refunded > 0 ? <span>{formatMoney(refunded, contract.currency)} refunded to {names.client}</span> : null}
             </p>
           </div>
-          {delivery ? <Folded label="Verdict receipt">{verdict}</Folded> : null}
+          {delivery ? receipt : null}
         </>
       );
       break;

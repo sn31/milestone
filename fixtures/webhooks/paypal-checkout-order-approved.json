@@ -1,0 +1,85 @@
+{
+  "id": "WH-2WR32451HC0233532-67976317FL4543714",
+  "create_time": "2026-10-07T15:21:03.000Z",
+  "resource_type": "checkout-order",
+  "event_version": "1.0",
+  "event_type": "CHECKOUT.ORDER.APPROVED",
+  "summary": "An order has been approved by buyer",
+  "resource": {
+    "id": "5O190127TN364715T",
+    "status": "APPROVED",
+    "intent": "CAPTURE",
+    "gross_amount": {
+      "currency_code": "USD",
+      "value": "100.00"
+    },
+    "payer": {
+      "name": {
+        "given_name": "Casey",
+        "surname": "Client"
+      },
+      "email_address": "casey.client@example.com",
+      "payer_id": "QYR5Z8XDVJNXQ",
+      "address": {
+        "country_code": "US"
+      }
+    },
+    "purchase_units": [
+      {
+        "reference_id": "mst_example_1",
+        "amount": {
+          "currency_code": "USD",
+          "value": "100.00",
+          "breakdown": {
+            "item_total": {
+              "currency_code": "USD",
+              "value": "100.00"
+            }
+          }
+        },
+        "payee": {
+          "email_address": "platform@example.com",
+          "merchant_id": "7KNGBPH2U58GQ"
+        },
+        "description": "Milestone escrow funding",
+        "shipping": {
+          "name": {
+            "full_name": "Casey Client"
+          },
+          "address": {
+            "address_line_1": "123 Main St",
+            "admin_area_2": "San Jose",
+            "admin_area_1": "CA",
+            "postal_code": "95131",
+            "country_code": "US"
+          }
+        }
+      }
+    ],
+    "create_time": "2026-10-07T15:20:55Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/5O190127TN364715T",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/5O190127TN364715T/capture",
+        "rel": "capture",
+        "method": "POST"
+      }
+    ]
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-2WR32451HC0233532-67976317FL4543714",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-2WR32451HC0233532-67976317FL4543714/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

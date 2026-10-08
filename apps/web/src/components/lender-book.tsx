@@ -327,7 +327,8 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
   const clients = useMemo(() => clientExposure(open), [open]);
   const states = useMemo(() => exposureByState(open), [open]);
   const share = useMemo(() => partnerShares(rows), [rows]);
-  const concentrated = !!s.topClient && s.topClient.shareOfOutstanding > 0.5 && s.clientCount > 1;
+  // Same rule as the grid's exposure bars: a client past CONCENTRATION_LIMIT of the outstanding principal reads amber.
+  const concentrated = !!s.topClient && s.topClient.shareOfOutstanding > CONCENTRATION_LIMIT;
   const lossShare = s.outstandingMinor > 0 ? s.expectedLossMinor / s.outstandingMinor : 0;
 
   // Totals for the book's main currency; other currencies are listed but not added in (as in the stats above).

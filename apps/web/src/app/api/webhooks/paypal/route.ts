@@ -1,5 +1,5 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { isSimulatedWebhook, paypalMode, verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
+import { isSimulatedWebhook, paypalMode, recordDisputeEvent, verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
 import { audit, enqueue, storeWebhookOnce, webhookEvents, PAYPAL_EVENTS, type Db } from "@milestone/core";
 import { paypal } from "@/lib/paypal";
 import { getDb } from "@/lib/db";
@@ -138,8 +138,19 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
       await enqueue("settle", op.key, { eventId: event.id, eventType: event.event_type }, { dedupe: event.id });
       return "enqueued";
     }
+    case PAYPAL_EVENTS.disputeCreated:
+    case PAYPAL_EVENTS.disputeUpdated:
+    case PAYPAL_EVENTS.disputeResolved: {
+      // The dispute copilot: the milestone is found by the disputed transaction id (= paypal_capture_id); CREATED
+      // audits dispute.opened and enqueues the "dispute" job that drafts the response, RESOLVED audits the outcome.
+      // recordDisputeEvent is idempotent, and the job's dedupe key makes a repeated enqueue a no-op.
+      const r = await recordDisputeEvent(db, event);
+      if (r.enqueue) await enqueue("dispute", r.milestoneId, { disputeId: r.disputeId }, { dedupe: `dispute:${r.disputeId}` });
+      await markProcessed(db, event.id);
+      return r.outcome;
+    }
     default:
-      // CUSTOMER.DISPUTE.* and INVOICING.* are stored for the audit log; the dispute copilot is a week-3 stretch.
+      // INVOICING.* and anything unrouted are stored for the audit log.
       await markProcessed(db, event.id);
       return "stored";
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "motion/react";
-import { useState, type MouseEvent } from "react";
+import { useId, useState, type MouseEvent, type ReactNode } from "react";
 import type { deliveries, milestones } from "@milestone/core";
 import { EvidencePanel, evidenceTone, toEvidenceItems, type EvidenceItem } from "@/components/evidence-panel";
 import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, type CriterionStatus } from "@/components/ui";
@@ -61,6 +61,8 @@ export function VerdictView({
   showEvidence = false,
   currency,
   required,
+  folded = false,
+  attachments,
 }: {
   delivery: DeliveryRow | null;
   decision: Decision | null;
@@ -72,6 +74,13 @@ export function VerdictView({
   currency?: string;
   /** Whether each criterion is required, by criterion id; optional ones are marked on the receipt. */
   required?: Record<string, boolean>;
+  /**
+   * Folded: one summary line (result, criteria passed, the policy stamp) with the full receipt behind a disclosure.
+   * Used on stations where the decision is what matters and the receipt is the proof.
+   */
+  folded?: boolean;
+  /** Printed above the receipt when it is open (e.g. the delivered files). */
+  attachments?: ReactNode;
 }) {
   const items = toEvidenceItems(delivery?.evidence ?? null);
   const byId = new Map<string, EvidenceItem>(items.map((it) => [it.id, it]));
@@ -79,6 +88,8 @@ export function VerdictView({
   const [panelOpen, setPanelOpen] = useState(false);
   const [openRows, setOpenRows] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState<{ id: string | null; n: number }>({ id: null, n: 0 });
+  const [unfolded, setUnfolded] = useState(false);
+  const foldId = useId();
 
   if (!delivery) return <p className="mt-4 font-mono text-[12px] text-fg-faint">No delivery yet.</p>;
 
@@ -128,8 +139,9 @@ export function VerdictView({
     </div>
   ) : null;
 
-  return (
-    <div className="mt-4 space-y-4">
+  const full = (
+    <div className="space-y-4">
+      {attachments}
       <Receipt title="Verdict" meta={meta} footer={footer}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-dashed border-hairline py-4">
           <StatePill state={pill.state} label={pill.label} size="md" />
@@ -210,6 +222,55 @@ export function VerdictView({
           ) : null}
         </div>
       ) : null}
+    </div>
+  );
+
+  if (!folded) return <div className="mt-4">{full}</div>;
+
+  const stamp = decision ? (
+    <Stamp size="sm" action={decision.action} ruleIds={decision.ruleIds} note={currency && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, currency) : undefined} />
+  ) : null;
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={unfolded}
+        aria-controls={foldId}
+        onClick={() => setUnfolded((o) => !o)}
+        className={cx(
+          "group/fold flex w-full flex-wrap items-center gap-x-2.5 gap-y-2 sm:gap-x-3 rounded-panel border border-hairline bg-surface-sunken px-3.5 py-2.5 text-left sm:px-4",
+          "transition-colors duration-200 hover:border-hairline-strong hover:bg-surface-raised",
+          unfolded && "rounded-b-none border-b-transparent",
+        )}
+      >
+        <svg aria-hidden viewBox="0 0 10 10" className={cx("size-2.5 shrink-0 text-fg-faint transition-transform duration-200 ease-glide", unfolded && "rotate-90")} fill="none" stroke="currentColor" strokeWidth={1.5}>
+          <path d="M3.5 1.8 L6.8 5 L3.5 8.2" />
+        </svg>
+        <span className="type-label text-fg-muted">Receipt</span>
+        <StatePill state={pill.state} label={pill.label} />
+        {rows.length > 0 ? (
+          <span className="font-mono text-[12px] text-fg-muted tabular">
+            {passed} of {rows.length}
+            <span className="text-fg-faint max-sm:sr-only"> criteria passed</span>
+          </span>
+        ) : null}
+        {delivery.suspectedInjection ? <StatePill state="failed" label="Suspected injection" /> : null}
+        {stamp ? <span className="ml-auto flex items-center gap-2.5">{stamp}</span> : null}
+        <span className="sr-only">{unfolded ? "Hide the full receipt" : "Show the full receipt"}</span>
+      </button>
+      {unfolded ? (
+        <motion.div
+          id={foldId}
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: DUR.reveal, ease: EASE.glide }}
+          className="rounded-b-panel border border-t-0 border-hairline bg-surface-sunken p-2.5 sm:p-3.5"
+        >
+          {full}
+        </motion.div>
+      ) : (
+        <div id={foldId} hidden />
+      )}
     </div>
   );
 }

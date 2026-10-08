@@ -4,7 +4,9 @@ import { notFound } from "next/navigation";
 import { getDb } from "@/lib/db";
 import { ACTOR_NAMES, getActor } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
-import { MilestoneActions, type MilestoneEvent } from "@/components/milestone-actions";
+import { MilestoneActions } from "@/components/milestone-actions";
+import { LiveRefresh } from "@/components/live-refresh";
+import { LIVE_STATUSES, loadSnapshot, pendingOpMilestones } from "@/app/api/milestones/[id]/status/snapshot";
 import {
   Button,
   EmptyState,
@@ -55,20 +57,36 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
     db.query.auditLog.findMany({ where: (t, { eq }) => eq(t.contractId, id), orderBy: (t, { desc }) => [desc(t.createdAt)], limit: 12 }),
   ]);
   const ids = ms.map((m) => m.id);
-  const verifyingIds = ms.filter((m) => m.status === "verifying").map((m) => m.id);
-  const [crit, dels, verifyEvents] = await Promise.all([
+  const heldIds = ms.filter((m) => m.status === "held").map((m) => m.id);
+  const [crit, dels, inFlight, flagged] = await Promise.all([
     ids.length ? db.query.criteria.findMany({ where: (t, { inArray }) => inArray(t.milestoneId, ids) }) : [],
     ids.length ? db.query.deliveries.findMany({ where: (t, { inArray }) => inArray(t.milestoneId, ids), orderBy: (t, { desc }) => [desc(t.receivedAt)] }) : [],
-    verifyingIds.length
-      ? db.query.auditLog.findMany({ where: (t, { inArray }) => inArray(t.milestoneId, verifyingIds), orderBy: (t, { asc }) => [asc(t.createdAt)], limit: 200 })
+    pendingOpMilestones(db, ids),
+    heldIds.length
+      ? db.query.auditLog.findMany({
+          columns: { milestoneId: true, detail: true },
+          where: (t, { and, eq, inArray }) => and(inArray(t.milestoneId, heldIds), eq(t.event, "milestone.needs_operator")),
+          orderBy: (t, { desc }) => [desc(t.createdAt)],
+        })
       : [],
   ]);
+  // Held milestones flagged for an operator (a payout or refund went wrong): the latest flag's reason and failure.
+  const operatorOf = new Map<string, { reason: string; failure: string | null }>();
+  for (const f of flagged) {
+    if (!f.milestoneId || operatorOf.has(f.milestoneId)) continue;
+    const d = (f.detail ?? {}) as { reason?: unknown; failed?: unknown };
+    const failed = d.failed && typeof d.failed === "object" ? Object.values(d.failed as Record<string, unknown>).filter((v): v is string => typeof v === "string") : [];
+    operatorOf.set(f.milestoneId, { reason: typeof d.reason === "string" && d.reason ? d.reason : "A payment for this milestone went wrong", failure: failed.length ? failed.join("; ") : null });
+  }
+  // Milestones that move without anyone on this page acting (the agent, the review window, the client elsewhere, a
+  // PayPal webhook): the page polls them and re-renders when one changes.
+  const liveIds = ms.filter((m) => LIVE_STATUSES.has(m.status) || inFlight.has(m.id)).map((m) => m.id);
+  const live = new Map((await Promise.all(liveIds.map((mid) => loadSnapshot(db, mid)))).flatMap((s) => (s ? [[s.id, s] as const] : [])));
 
   const name = (uid: string) => people.find((p) => p.id === uid)?.name ?? ACTOR_NAMES[uid] ?? uid;
   const names = { client: name(contract.clientId), freelancer: name(contract.freelancerId) };
   const latest = new Map<string, (typeof dels)[number]>();
   for (const d of dels) if (!latest.has(d.milestoneId)) latest.set(d.milestoneId, d);
-  const eventsOf = (mid: string): MilestoneEvent[] => verifyEvents.filter((e) => e.milestoneId === mid).map((e) => ({ at: e.createdAt, event: e.event }));
   const milestoneLabel = new Map(ms.map((m) => [m.id, `${String(m.seq).padStart(2, "0")} ${m.title}`]));
 
   const paidOf = (m: (typeof ms)[number]) => (m.status === "partial_released" ? (m.decision?.amountMinor ?? 0) : m.amountMinor);
@@ -88,6 +106,7 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
 
   return (
     <main>
+      {live.size > 0 ? <LiveRefresh initial={[...live.values()]} /> : null}
       <Link
         href="/"
         className="group inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-fg-faint uppercase transition-colors duration-200 hover:text-fg"
@@ -211,7 +230,8 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
                     actor={actor}
                     crit={crit.filter((c) => c.milestoneId === m.id)}
                     delivery={latest.get(m.id) ?? null}
-                    events={eventsOf(m.id)}
+                    live={live.get(m.id) ?? null}
+                    operator={operatorOf.get(m.id) ?? null}
                     names={names}
                   />
                 </Station>

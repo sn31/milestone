@@ -126,6 +126,8 @@ export interface StampProps {
   ruleIds?: string[];
   /** A short line under the action, e.g. the amount or "on Oct 8, 14:03 UTC". */
   note?: ReactNode;
+  /** md: the receipt's foot (two lines, pressed in on mount). sm: one inked line for a folded receipt's summary. */
+  size?: "sm" | "md";
   className?: string;
 }
 
@@ -133,8 +135,23 @@ const ACTION_TONE: Record<string, ToneKey> = { release: "released", partial: "pa
 const ACTION_LABEL: Record<string, string> = { release: "Release", partial: "Partial", hold: "Hold", ask_client: "Ask client" };
 
 /** The policy decision, inked like a rubber stamp: double-ruled, tilted 4 degrees, pressed in once on mount. */
-export function Stamp({ action, ruleIds, note, className }: StampProps) {
+export function Stamp({ action, ruleIds, note, size = "md", className }: StampProps) {
   const tone = ACTION_TONE[action] ?? "neutral";
+  if (size === "sm") {
+    return (
+      <span
+        data-tone={tone}
+        className={cx("inline-flex -rotate-2 rounded-chip border-[1.5px] border-[color:var(--tone)] p-[2px] opacity-90", className)}
+      >
+        <span className="flex items-center gap-2 rounded-[2px] border border-[color:var(--tone)] px-2 py-[3px] font-mono text-[10.5px] leading-none tracking-[0.16em] whitespace-nowrap text-tone uppercase tabular">
+          <span className="text-[11.5px] tracking-[0.2em]">{ACTION_LABEL[action] ?? action}</span>
+          {ruleIds?.length ? <span className="opacity-80">{ruleIds.join(" · ")}</span> : null}
+          {/* The amount is on the station already; on a phone the stamp keeps to the action and rule. */}
+          {note ? <span className="opacity-80 max-sm:hidden">{note}</span> : null}
+        </span>
+      </span>
+    );
+  }
   return (
     <div data-tone={tone} className={cx("inline-block animate-stamp rounded-chip border-2 border-[color:var(--tone)] p-[3px] opacity-90", className)}>
       <div className="rounded-[2px] border border-[color:var(--tone)] px-3 py-2 text-tone">

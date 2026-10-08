@@ -1,0 +1,59 @@
+{
+  "id": "WH-1KD27719E8190503P-9QZ45310MM402280X",
+  "create_time": "2026-10-07T15:21:03.000Z",
+  "resource_type": "dispute",
+  "event_version": "1.0",
+  "event_type": "CUSTOMER.DISPUTE.CREATED",
+  "summary": "A new dispute was created with ID PP-D-27803.",
+  "resource": {
+    "dispute_id": "PP-D-27803",
+    "create_time": "2026-10-07T15:30:00.000Z",
+    "update_time": "2026-10-07T15:30:00.000Z",
+    "status": "OPEN",
+    "reason": "MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED",
+    "dispute_state": "REQUIRED_ACTION",
+    "dispute_amount": {
+      "currency_code": "USD",
+      "value": "100.00"
+    },
+    "dispute_life_cycle_stage": "INQUIRY",
+    "dispute_channel": "INTERNAL",
+    "disputed_transactions": [
+      {
+        "seller_transaction_id": "3C679366HH908993F",
+        "seller": {
+          "merchant_id": "7KNGBPH2U58GQ",
+          "name": "Milestone Platform"
+        },
+        "buyer": {
+          "name": "Casey Client"
+        },
+        "items": [],
+        "gross_amount": {
+          "currency_code": "USD",
+          "value": "100.00"
+        }
+      }
+    ],
+    "seller_response_due_date": "2026-10-17T15:30:00.000Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v1/customer/disputes/PP-D-27803",
+        "rel": "self",
+        "method": "GET"
+      }
+    ]
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1KD27719E8190503P-9QZ45310MM402280X",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1KD27719E8190503P-9QZ45310MM402280X/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

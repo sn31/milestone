@@ -35,3 +35,21 @@ describe("money formatting", () => {
     expect(toPayPalValue(500, "JPY")).toBe("500");
   });
 });
+
+describe("createPayout retry", () => {
+  it("recovers the existing batch when PayPal rejects a reused sender_batch_id", async () => {
+    const { createPayout } = await import("../src/paypal/money.ts");
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      const u = String(url); calls.push(`${init?.method ?? "GET"} ${u}`);
+      if (u.endsWith("/oauth2/token")) return new Response('{"access_token":"t","expires_in":3600}');
+      if (u.endsWith("/v1/payments/payouts")) return new Response(JSON.stringify({ name: "USER_BUSINESS_ERROR", details: [{ field: "SENDER_BATCH_ID", issue: "Batch with given sender_batch_id already exists", link: [{ href: "https://api.sandbox.paypal.com/v1/payments/payouts/5BEXM4CEXRF7Q" }] }] }), { status: 400 });
+      if (u.endsWith("/v1/payments/payouts/5BEXM4CEXRF7Q")) return new Response('{"batch_header":{"payout_batch_id":"5BEXM4CEXRF7Q","batch_status":"SUCCESS","sender_batch_header":{"sender_batch_id":"s"}}}');
+      return new Response("{}", { status: 404 });
+    };
+    const client = new PayPalClient({ clientId: "a", clientSecret: "b", env: "sandbox", fetchImpl });
+    const batch = await createPayout(client, { requestId: "req", senderBatchId: "s", items: [{ receiverEmail: "f@x.test", amountMinor: 100, currency: "USD", note: "n", senderItemId: "m:freelancer" }] });
+    expect(batch.batch_header.payout_batch_id).toBe("5BEXM4CEXRF7Q");
+    expect(calls.filter((c) => c.startsWith("POST") && c.endsWith("/payouts"))).toHaveLength(1);
+  });
+});

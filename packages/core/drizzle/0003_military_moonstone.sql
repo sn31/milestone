@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "ledger_ref_account_direction" ON "ledger_entries" USING btree ("ref","account","direction");

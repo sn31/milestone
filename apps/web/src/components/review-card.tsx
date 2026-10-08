@@ -28,5 +28,10 @@ export async function ReviewCard(props: ReviewCardProps) {
     const c = m ? await db.query.contracts.findFirst({ columns: { reviewWindowSeconds: true }, where: (t, { eq }) => eq(t.id, m.contractId) }) : undefined;
     windowSeconds = reviewWindowSeconds(c?.reviewWindowSeconds ?? DEFAULT_WINDOW_SECONDS);
   }
-  return <ReviewPanel {...props} windowSeconds={windowSeconds ?? DEFAULT_WINDOW_SECONDS} />;
+  // On the rail the station's own gap spaces the card; the panel's top margin would add a second one.
+  return (
+    <div className="*:mt-0!">
+      <ReviewPanel {...props} windowSeconds={windowSeconds ?? DEFAULT_WINDOW_SECONDS} />
+    </div>
+  );
 }

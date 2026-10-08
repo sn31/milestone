@@ -136,11 +136,6 @@ function AccountCell(p: ICellRendererParams<GridRow, string>) {
   );
 }
 
-function DirectionCell(p: ICellRendererParams<GridRow, string>) {
-  if (isTotal(p) || !p.value) return null;
-  return <span className={cx("font-mono text-[12px]", p.value === "debit" ? "text-fg-muted" : "text-fg-faint")}>{p.value}</span>;
-}
-
 function AmountCell(side: "debit" | "credit") {
   return function LedgerAmountCell(p: ICellRendererParams<GridRow, number | null>) {
     if (isTotal(p)) {
@@ -165,9 +160,23 @@ function RefCell(p: ICellRendererParams<GridRow, string>) {
       </span>
     );
   }
+  return <MiddleTruncate value={p.value ?? ""} className="font-mono text-[11.5px] text-fg-faint" />;
+}
+
+/**
+ * Middle truncation only when needed: the head gives way with an ellipsis, the tail (the part that tells refs apart:
+ * "...SHOW110K2F", "...:partner") always shows. A value that fits prints in full.
+ */
+function MiddleTruncate({ value, className }: { value: string; className?: string }) {
+  // Keep the last segment ("…:partner", "…_repaid", "…-SHOW110K2F") when it is short, else the last 8 characters.
+  const sep = Math.max(value.lastIndexOf(":"), value.lastIndexOf("_"), value.lastIndexOf("-"));
+  const seg = sep > 0 ? value.length - sep : 0;
+  const tail = seg >= 4 && seg <= 13 ? seg : 8;
+  const cut = value.length > tail + 4 ? value.length - tail : value.length;
   return (
-    <span className="truncate font-mono text-[11.5px] text-fg-faint" title={p.value ?? ""}>
-      {p.value}
+    <span className={cx("flex h-full min-w-0 items-center", className)} title={value}>
+      <span className="min-w-0 truncate">{value.slice(0, cut)}</span>
+      {cut < value.length ? <span className="shrink-0">{value.slice(cut)}</span> : null}
     </span>
   );
 }
@@ -258,13 +267,12 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
         getQuickFilterText: (p) => (p.data?.at ? auditTime(p.data.at) : ""),
       },
       { field: "txnId", headerName: "Txn", width: 124, cellRenderer: TxnCell, filter: "agTextColumnFilter" },
-      { field: "milestone", headerName: "Milestone", width: 142, cellRenderer: MilestoneCell, filter: "agTextColumnFilter" },
-      { field: "account", headerName: "Account", width: 198, cellRenderer: AccountCell, filter: "agTextColumnFilter" },
-      { field: "direction", headerName: "Dir", width: 78, cellRenderer: DirectionCell, filter: "agTextColumnFilter" },
+      { field: "milestone", headerName: "Milestone", flex: 1, minWidth: 240, cellRenderer: MilestoneCell, filter: "agTextColumnFilter" },
+      { field: "account", headerName: "Account", width: 208, cellRenderer: AccountCell, filter: "agTextColumnFilter", getQuickFilterText: (p) => `${p.data?.account ?? ""} ${p.data?.direction ?? ""}` },
       {
         colId: "debit",
         headerName: "Debit",
-        width: 102,
+        width: 92,
         type: "rightAligned",
         valueGetter: sideValue("debit"),
         cellRenderer: AmountCell("debit"),
@@ -276,7 +284,7 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
       {
         colId: "credit",
         headerName: "Credit",
-        width: 102,
+        width: 92,
         type: "rightAligned",
         valueGetter: sideValue("credit"),
         cellRenderer: AmountCell("credit"),
@@ -285,7 +293,7 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
         filterValueGetter: sideFilterValue("credit"),
         getQuickFilterText: (p) => (typeof p.value === "number" && p.data ? formatMoney(p.value, p.data.currency) : ""),
       },
-      { field: "ref", headerName: "Ref", flex: 1, minWidth: 160, cellRenderer: RefCell, filter: "agTextColumnFilter" },
+      { field: "ref", headerName: "Ref", flex: 1, minWidth: 150, cellRenderer: RefCell, filter: "agTextColumnFilter" },
     ],
     [narrow],
   );

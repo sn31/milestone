@@ -135,7 +135,12 @@ export const ledgerEntries = pgTable("ledger_entries", {
   direction: ledgerDirection("direction").notNull(),
   ref: text("ref").notNull(),
   createdAt: createdAt(),
-}, (t) => [index("ledger_txn").on(t.txnId), index("ledger_account").on(t.account)]);
+}, (t) => [
+  index("ledger_txn").on(t.txnId),
+  index("ledger_account").on(t.account),
+  // Backstop: a retried job that re-posts the same transaction cannot double-book a line.
+  uniqueIndex("ledger_ref_account_direction").on(t.ref, t.account, t.direction),
+]);
 
 /** Append-only; every verdict, decision, veto and PayPal call. Both parties can read it. */
 export const auditLog = pgTable("audit_log", {

@@ -20,6 +20,9 @@ const client = PayPalClient.fromEnv();
 const currency = "USD";
 const recordings: Record<string, unknown> = {};
 const rl = createInterface({ input: process.stdin, output: process.stdout });
+const out = new URL("../../../fixtures/paypal-recordings/spike.local.json", import.meta.url).pathname;
+const save = () => writeFileSync(out, JSON.stringify(recordings, null, 2));
+process.on("exit", () => { save(); console.log("Recorded to", out); });
 
 // In-memory stand-in for the paypal_ops table: same (kind, key) -> same request id.
 const ids = new Map<string, string>();
@@ -49,8 +52,4 @@ console.log("m1: retry returned the same batch:", JSON.stringify(recordings["m1.
 const m2 = await fund("m2", 40_00);
 recordings["m2.partial"] = await executeRelease(ctx, { milestoneId: m2.milestoneId, currency, captureId: m2.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 40_00, decision: { action: "partial", amountMinor: 30_00, ruleIds: ["P5"], reason: "spike" } });
 console.log("m2: partial release sent (payout 30.00, refund 10.00)");
-
-const out = new URL("../../../fixtures/paypal-recordings/spike.local.json", import.meta.url).pathname;
-writeFileSync(out, JSON.stringify(recordings, null, 2));
-console.log("Recorded to", out);
 rl.close();

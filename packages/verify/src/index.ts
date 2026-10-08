@@ -13,3 +13,5 @@ export type { DeterministicInput, DeterministicOutput } from "./deterministic.ts
 export { runVisualStage } from "./visual.ts";
 export { postVerdictComment, formatVerdictComment, commentMarker } from "./github.ts";
 export type { PostCommentInput, PostCommentResult, VerdictCommentInput } from "./github.ts";
+export { compileEvidencePack, draftResponse, templateResponse, packCites, citationsIn, packHash, RESPONSE_MAX_CHARS } from "./dispute.ts";
+export type { EvidencePack, EvidencePackInput, DraftResponse, PackContract, PackMilestone, PackCriterion, PackDelivery, PackAuditRow, PackLedgerRow, PackDispute, PackFile, PackTimelineItem, PackCriterionRow, PackLedgerItem, PackClientAction, PackEvidenceItem } from "./dispute.ts";

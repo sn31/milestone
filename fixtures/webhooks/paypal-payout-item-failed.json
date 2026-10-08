@@ -1,0 +1,61 @@
+{
+  "id": "WH-4HG50732N1215622P-5RT40118LD9922031",
+  "create_time": "2026-10-07T15:21:03.000Z",
+  "resource_type": "payouts_item",
+  "event_version": "1.0",
+  "event_type": "PAYMENT.PAYOUTS-ITEM.FAILED",
+  "summary": "A payout item has failed",
+  "resource": {
+    "payout_item_id": "6HW9F2S8Q4X7Y",
+    "transaction_id": "5TY05013RG002845M",
+    "activity_id": "6L36S9EV3V6Z2",
+    "transaction_status": "FAILED",
+    "payout_item_fee": {
+      "currency_code": "USD",
+      "value": "0.25"
+    },
+    "payout_batch_id": "FYXMPQTX4JC9N",
+    "sender_batch_id": "2f6b1c0e-4d3a-4b8f-9a77-1e2d3c4b5a69",
+    "payout_item": {
+      "recipient_type": "EMAIL",
+      "amount": {
+        "currency_code": "USD",
+        "value": "96.00"
+      },
+      "note": "Milestone release",
+      "receiver": "frankie.freelancer@example.com",
+      "sender_item_id": "mst_example_1:freelancer",
+      "recipient_wallet": "PAYPAL"
+    },
+    "time_processed": "2026-10-07T15:22:10Z",
+    "errors": {
+      "name": "RECEIVER_UNREGISTERED",
+      "message": "Receiver is unregistered",
+      "information_link": "https://developer.paypal.com/docs/api/payments.payouts-batch/#errors"
+    },
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v1/payments/payouts-item/6HW9F2S8Q4X7Y",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v1/payments/payouts/FYXMPQTX4JC9N",
+        "rel": "batch",
+        "method": "GET"
+      }
+    ]
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-4HG50732N1215622P-5RT40118LD9922031",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-4HG50732N1215622P-5RT40118LD9922031/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

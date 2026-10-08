@@ -11,6 +11,11 @@ export type { WebhookEvent } from "./paypal/webhooks.ts";
 // Simulated PayPal (PAYPAL_MODE=simulated): local loop and demo-day backup. createPayPalClient picks the client.
 export { paypalMode, createPayPalClient, createSimulatedPayPalClient, simulatedFetch, configureSimulator, resetSimulator, isSimulatedWebhook, simulatedWebhookSecret, SIMULATED_WEBHOOK_HEADER, approveSimulatedOrder, simulatedOrder, failNextSimulatedPayout, armedSimulatedFailures } from "./paypal/simulated.ts";
 export type { PayPalMode, SimulatorOptions, SimulatedOrderSummary } from "./paypal/simulated.ts";
+export { openSimulatedDispute } from "./paypal/simulated.ts";
+export type { SimulatedDispute } from "./paypal/simulated.ts";
+// Disputes (week 3): read by REST, respond with evidence (multipart) or accept the claim.
+export { getDispute, provideEvidence, acceptClaim, requestMultipart, multipartBody, parseDispute, recordDisputeEvent, findOpenedDispute, submitDisputeEvidence, acceptDisputeClaim, EVIDENCE_NOTES_MAX, EVIDENCE_FILE_MAX_BYTES, EVIDENCE_TOTAL_MAX_BYTES, EVIDENCE_FILE_TYPES, SERVICE_EVIDENCE_TYPE } from "./paypal/disputes.ts";
+export type { Dispute, DisputeAmount, Evidence, EvidenceFile, DisputeEventInfo, DisputeEventOutcome, DisputeActionResult } from "./paypal/disputes.ts";
 // Policy
 export { decide, applyReviewWindow } from "./policy/decide.ts";
 export type { DecideInput, ReviewWindowState } from "./policy/decide.ts";

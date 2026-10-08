@@ -8,6 +8,9 @@
  *   (errors are not remembered, so a capture refused before approval succeeds later with the same id).
  * - State lives in a module-level Map and is persisted to var/simulated-paypal.json (repo root) so web and worker
  *   share it. Every call reloads, mutates and saves under a lock file; writes go to a temp file and are renamed.
+ * - Disputes: openSimulatedDispute (POST /api/disputes/dev) opens one against a capture and emits
+ *   CUSTOMER.DISPUTE.CREATED; provide-evidence (multipart) puts it under review and emits CUSTOMER.DISPUTE.RESOLVED in
+ *   the seller's favour ~2 s later; accept-claim resolves it in the buyer's favour.
  * - Captures, payouts and refunds emit the matching webhook events to APP_URL/api/webhooks/paypal after ~1.5 s with
  *   header X-Milestone-Simulated: <SIMULATED_WEBHOOK_SECRET or "dev">. The webhook route accepts that header instead of
  *   PayPal's signature only in simulated mode (see isSimulatedWebhook).
@@ -78,6 +81,8 @@ export interface SimulatorOptions {
   deliver?: ((event: WebhookEvent) => Promise<void> | void) | null;
   /** Base for the approve link and the webhook target. Default APP_URL or http://localhost:3000. */
   appUrl?: string;
+  /** Delay between provide-evidence and the dispute resolving (CUSTOMER.DISPUTE.RESOLVED). Default 2000 ms. */
+  disputeResolveDelayMs?: number;
 }
 
 interface Config {
@@ -85,9 +90,10 @@ interface Config {
   webhookDelayMs: number;
   deliver: ((event: WebhookEvent) => Promise<void> | void) | null;
   appUrl: string | undefined;
+  disputeResolveDelayMs: number;
 }
 
-const config: Config = { stateFile: undefined, webhookDelayMs: 1500, deliver: null, appUrl: undefined };
+const config: Config = { stateFile: undefined, webhookDelayMs: 1500, deliver: null, appUrl: undefined, disputeResolveDelayMs: 2000 };
 
 export function configureSimulator(opts: SimulatorOptions): void {
   if (opts.stateFile !== undefined) {
@@ -97,6 +103,7 @@ export function configureSimulator(opts: SimulatorOptions): void {
   if (opts.webhookDelayMs !== undefined) config.webhookDelayMs = opts.webhookDelayMs;
   if (opts.deliver !== undefined) config.deliver = opts.deliver;
   if (opts.appUrl !== undefined) config.appUrl = opts.appUrl;
+  if (opts.disputeResolveDelayMs !== undefined) config.disputeResolveDelayMs = opts.disputeResolveDelayMs;
 }
 
 function appUrl(): string {
@@ -193,7 +200,31 @@ interface FailRec {
   senderItemId: string;
   reason: string;
 }
-type Rec = OrderRec | CaptureRec | RefundRec | BatchRec | InvoiceRec | IndexRec | IdemRec | FailRec;
+interface DisputeEvidenceRec {
+  evidence_type: string;
+  notes?: string;
+  documents: Array<{ name: string; size: number; type: string; sha256: string }>;
+  date: string;
+}
+interface DisputeRec {
+  kind: "dispute";
+  id: string;
+  captureId: string;
+  reason: string;
+  amount: Amount;
+  buyerNote: string;
+  createTime: string;
+  updateTime: string;
+  dueDate: string;
+  /** Set by provide-evidence or accept-claim: the dispute reads RESOLVED with `outcome` from this time (epoch ms). */
+  resolveAt?: number;
+  outcome?: "RESOLVED_SELLER_FAVOUR" | "RESOLVED_BUYER_FAVOUR";
+  /** Set once evidence is in: UNDER_REVIEW until resolveAt. */
+  reviewing?: boolean;
+  evidences: DisputeEvidenceRec[];
+  acceptNote?: string;
+}
+type Rec = OrderRec | CaptureRec | RefundRec | BatchRec | InvoiceRec | IndexRec | IdemRec | FailRec | DisputeRec;
 
 /** The simulator's state, keyed "<kind>:<id>". Mirrors the state file while persistence is on. */
 const store = new Map<string, Rec>();
@@ -300,6 +331,7 @@ const ids = {
   invoice: () => `SIM-INV2-${code(4)}-${code(4)}-${code(4)}-${code(4)}`,
   payment: () => `SIM-EXTR-${code(17)}`,
   event: () => `SIM-WH-${code(17)}-${code(17)}`,
+  dispute: () => `PP-D-SIM${code(8)}`,
   debug: () => `sim${randomBytes(6).toString("hex")}`,
   token: (kind: string) => `SIM-${kind}-${randomBytes(24).toString("base64url")}`,
 };
@@ -717,10 +749,128 @@ function token(req: SimRequest, raw: string): SimResult {
   };
 }
 
+// ---------- Disputes ----------
+
+function disputeView(d: DisputeRec, now: number): Record<string, unknown> {
+  const resolved = d.resolveAt !== undefined && now >= d.resolveAt;
+  const status = resolved ? "RESOLVED" : d.reviewing ? "UNDER_REVIEW" : "WAITING_FOR_SELLER_RESPONSE";
+  const self = `${API}/v1/customer/disputes/${d.id}`;
+  return {
+    dispute_id: d.id,
+    create_time: d.createTime,
+    update_time: resolved && d.resolveAt !== undefined ? iso(d.resolveAt) : d.updateTime,
+    disputed_transactions: [
+      {
+        seller_transaction_id: d.captureId,
+        buyer_transaction_id: `SIM-BUY-${d.captureId.replace(/^SIM-/, "").slice(0, 13)}`,
+        transaction_status: "COMPLETED",
+        gross_amount: d.amount,
+        seller: { merchant_id: MERCHANT.merchant_id, name: "Milestone Platform" },
+        buyer: { name: `${PAYER.name.given_name} ${PAYER.name.surname}` },
+        items: [],
+      },
+    ],
+    reason: d.reason,
+    status,
+    dispute_state: resolved ? "RESOLVED" : d.reviewing ? "UNDER_PAYPAL_REVIEW" : "REQUIRED_ACTION",
+    dispute_amount: d.amount,
+    ...(resolved && d.outcome ? { dispute_outcome: { outcome_code: d.outcome, ...(d.outcome === "RESOLVED_BUYER_FAVOUR" ? { amount_refunded: d.amount } : {}) } } : {}),
+    dispute_life_cycle_stage: "CHARGEBACK",
+    dispute_channel: "INTERNAL",
+    messages: [{ posted_by: "BUYER", time_posted: d.createTime, content: d.buyerNote }],
+    ...(d.evidences.length ? { evidences: d.evidences } : {}),
+    seller_response_due_date: d.dueDate,
+    links: [
+      { href: self, rel: "self", method: "GET" },
+      ...(status === "WAITING_FOR_SELLER_RESPONSE"
+        ? [
+            { href: `${self}/provide-evidence`, rel: "provide_evidence", method: "POST" },
+            { href: `${self}/accept-claim`, rel: "accept_claim", method: "POST" },
+          ]
+        : []),
+    ],
+  };
+}
+
+function disputeOpen(d: DisputeRec, now: number): boolean {
+  return !(d.resolveAt !== undefined && now >= d.resolveAt) && !d.reviewing;
+}
+
+function resolvedEvent(d: DisputeRec): WebhookEvent {
+  const at = d.resolveAt ?? Date.now();
+  return event("CUSTOMER.DISPUTE.RESOLVED", "dispute", `Dispute ${d.id} was resolved.`, disputeView(d, at));
+}
+
+/** The parsed multipart body of provide-evidence: the "input" JSON part and the file parts. */
+interface EvidenceUpload {
+  input: Record<string, unknown> | null;
+  files: Array<{ field: string; name: string; size: number; type: string; sha256: string }>;
+}
+
+function provideEvidence(req: SimRequest, id: string, upload: EvidenceUpload | null): SimResult {
+  const d = get("dispute", id);
+  if (!d) return err(404, "RESOURCE_NOT_FOUND", `The specified resource ${id} does not exist.`, "INVALID_RESOURCE_ID");
+  if (!upload?.input) return err(400, "INVALID_REQUEST", "The input part is required and must be JSON.", "MISSING_REQUIRED_PARAMETER");
+  if (!disputeOpen(d, req.now)) return err(422, "UNPROCESSABLE_ENTITY", "The dispute is not waiting for the seller's evidence.", "INVALID_DISPUTE_STATUS");
+  const evidences = Array.isArray(upload.input.evidences) ? upload.input.evidences.map(obj) : [];
+  if (evidences.length === 0 || evidences.some((e) => !str(e.evidence_type))) return err(400, "INVALID_REQUEST", "evidences[].evidence_type is required.", "MISSING_REQUIRED_PARAMETER");
+  const byName = new Map(upload.files.map((f) => [f.name, f]));
+  const recs: DisputeEvidenceRec[] = [];
+  for (const e of evidences) {
+    const notes = str(e.notes);
+    if (notes && notes.length > 2000) return err(400, "INVALID_REQUEST", "notes must be at most 2000 characters.", "INVALID_STRING_MAX_LENGTH");
+    const docs = Array.isArray(e.documents) ? e.documents.map(obj) : [];
+    const documents: DisputeEvidenceRec["documents"] = [];
+    for (const doc of docs) {
+      const f = byName.get(str(doc.name) ?? "");
+      if (!f) return err(400, "INVALID_REQUEST", `No file part named ${String(doc.name)}.`, "MISSING_REQUIRED_PARAMETER");
+      documents.push({ name: f.name, size: f.size, type: f.type, sha256: f.sha256 });
+    }
+    recs.push({ evidence_type: String(e.evidence_type), ...(notes ? { notes } : {}), documents, date: iso(req.now) });
+  }
+  d.evidences.push(...recs);
+  d.reviewing = true;
+  d.updateTime = iso(req.now);
+  d.resolveAt = req.now + config.disputeResolveDelayMs;
+  d.outcome = "RESOLVED_SELLER_FAVOUR";
+  return {
+    status: 200,
+    body: { links: [{ href: `${API}/v1/customer/disputes/${d.id}`, rel: "self", method: "GET" }] },
+    events: [{ event: resolvedEvent(d), delayMs: config.disputeResolveDelayMs }],
+  };
+}
+
+function acceptClaim(req: SimRequest, id: string): SimResult {
+  const d = get("dispute", id);
+  if (!d) return err(404, "RESOURCE_NOT_FOUND", `The specified resource ${id} does not exist.`, "INVALID_RESOURCE_ID");
+  if (!disputeOpen(d, req.now)) return err(422, "UNPROCESSABLE_ENTITY", "The dispute can no longer be accepted.", "INVALID_DISPUTE_STATUS");
+  d.acceptNote = str(obj(req.body).note) ?? "";
+  d.updateTime = iso(req.now);
+  d.resolveAt = req.now;
+  d.outcome = "RESOLVED_BUYER_FAVOUR";
+  // The refund comes out of the capture when the simulator knows it (showcase captures are display data only).
+  const c = get("capture", d.captureId);
+  if (c) {
+    c.refundedMinor = Math.min(minor(c.amount), c.refundedMinor + minor(d.amount));
+    c.updateTime = iso(req.now);
+  }
+  return {
+    status: 200,
+    body: { links: [{ href: `${API}/v1/customer/disputes/${d.id}`, rel: "self", method: "GET" }] },
+    events: [{ event: resolvedEvent(d) }],
+  };
+}
+
 /** The routing switch. Runs inside transact(): reads and writes `store` synchronously. */
-function route(req: SimRequest): SimResult {
+function route(req: SimRequest, upload: EvidenceUpload | null = null): SimResult {
   const { method, path } = req;
   let m: RegExpExecArray | null;
+  if ((m = /^\/v1\/customer\/disputes\/([^/]+)$/.exec(path)) && method === "GET") {
+    const d = get("dispute", decodeURIComponent(m[1] ?? ""));
+    return d ? { status: 200, body: disputeView(d, req.now) } : err(404, "RESOURCE_NOT_FOUND", "The specified resource does not exist.", "INVALID_RESOURCE_ID");
+  }
+  if ((m = /^\/v1\/customer\/disputes\/([^/]+)\/provide-evidence$/.exec(path)) && method === "POST") return provideEvidence(req, decodeURIComponent(m[1] ?? ""), upload);
+  if ((m = /^\/v1\/customer\/disputes\/([^/]+)\/accept-claim$/.exec(path)) && method === "POST") return acceptClaim(req, decodeURIComponent(m[1] ?? ""));
   if (path === "/v2/checkout/orders" && method === "POST") return createOrder(req);
   if ((m = /^\/v2\/checkout\/orders\/([^/]+)$/.exec(path)) && method === "GET") {
     const o = get("order", decodeURIComponent(m[1] ?? ""));
@@ -774,6 +924,7 @@ export const simulatedFetch: typeof fetch = async (input, init) => {
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
   const raw = typeof init?.body === "string" ? init.body : "";
+  const contentType = headers.get("content-type") ?? "";
   const debugId = ids.debug();
   const now = Date.now();
   if (url.host !== "api-m.sandbox.paypal.com" && url.host !== "api-m.paypal.com") return json(404, { name: "RESOURCE_NOT_FOUND", message: `unknown host ${url.host}` }, debugId);
@@ -786,6 +937,28 @@ export const simulatedFetch: typeof fetch = async (input, init) => {
     return json(401, { error: "invalid_token", error_description: "Authentication failed due to missing Authorization header" }, debugId);
   }
   let body: Record<string, unknown> | null = null;
+  // Multipart (provide-evidence): parsed before the lock, since reading a body is async.
+  let upload: EvidenceUpload | null = null;
+  if (/^multipart\/form-data/i.test(contentType) && init?.body && typeof init.body !== "string") {
+    try {
+      const form = await new Response(init.body, { headers: { "content-type": contentType } }).formData();
+      upload = { input: null, files: [] };
+      for (const [field, value] of form.entries()) {
+        if (typeof value === "string") {
+          if (field === "input") upload.input = obj(JSON.parse(value));
+          continue;
+        }
+        if (field === "input") {
+          upload.input = obj(JSON.parse(await value.text()));
+          continue;
+        }
+        const bytes = new Uint8Array(await value.arrayBuffer());
+        upload.files.push({ field, name: value.name || field, size: bytes.length, type: value.type, sha256: createHash("sha256").update(bytes).digest("hex") });
+      }
+    } catch {
+      return json(400, { name: "INVALID_REQUEST", message: "Request is not well-formed, syntactically incorrect, or violates schema.", debug_id: debugId }, debugId);
+    }
+  }
   if (raw) {
     try {
       body = obj(JSON.parse(raw));
@@ -801,11 +974,11 @@ export const simulatedFetch: typeof fetch = async (input, init) => {
       const key = `idem:${method} ${url.pathname} ${requestId}`;
       const seen = store.get(key);
       if (seen?.kind === "idem") return { status: seen.status, body: seen.body };
-      const r = route(req);
+      const r = route(req, upload);
       if (r.status >= 200 && r.status < 300) put(key, { kind: "idem", status: r.status, body: r.body });
       return r;
     }
-    return route(req);
+    return route(req, upload);
   });
   for (const e of result.events ?? []) scheduleWebhook(e.event, e.delayMs ?? config.webhookDelayMs);
   return json(result.status, result.body, debugId);
@@ -895,4 +1068,48 @@ export function failNextSimulatedPayout(senderItemId: string, reason = "RECEIVER
 /** sender_item_ids with an armed failure. */
 export function armedSimulatedFailures(): Array<{ senderItemId: string; reason: string }> {
   return transact(() => [...store.values()].flatMap((r) => (r.kind === "fail" ? [{ senderItemId: r.senderItemId, reason: r.reason }] : [])));
+}
+
+// ---------- Disputes (POST /api/disputes/dev) ----------
+
+export interface SimulatedDispute {
+  disputeId: string;
+  captureId: string;
+  reason: string;
+  amount: Amount;
+  /** False when an open dispute already existed for this capture and was returned instead. */
+  created: boolean;
+}
+
+const DISPUTE_REASONS = new Set(["MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED", "MERCHANDISE_OR_SERVICE_NOT_RECEIVED", "UNAUTHORISED", "CREDIT_NOT_PROCESSED", "DUPLICATE_TRANSACTION", "INCORRECT_AMOUNT", "PAYMENT_BY_OTHER_MEANS", "CANCELED_RECURRING_BILLING", "PROBLEM_WITH_REMITTANCE", "OTHER"]);
+
+/**
+ * The buyer opens a dispute against a capture (what PayPal's Resolution Center does) and CUSTOMER.DISPUTE.CREATED is
+ * sent after the webhook delay. The capture does not need to exist in the simulator (showcase captures are display
+ * data). One open dispute per capture: a second call returns the open one and sends nothing.
+ */
+export function openSimulatedDispute(input: { captureId: string; amountMinor: number; currency: string; reason?: string; buyerNote?: string; responseDays?: number }): SimulatedDispute {
+  const reason = input.reason && DISPUTE_REASONS.has(input.reason) ? input.reason : "MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED";
+  const now = Date.now();
+  const out = transact((): { d: DisputeRec; created: boolean } => {
+    for (const r of store.values()) {
+      if (r.kind === "dispute" && r.captureId === input.captureId && !(r.resolveAt !== undefined && now >= r.resolveAt)) return { d: r, created: false };
+    }
+    const d: DisputeRec = {
+      kind: "dispute",
+      id: ids.dispute(),
+      captureId: input.captureId,
+      reason,
+      amount: amount(input.amountMinor, input.currency),
+      buyerNote: input.buyerNote ?? "The work I received does not match what was described.",
+      createTime: iso(now),
+      updateTime: iso(now),
+      dueDate: iso(now + (input.responseDays ?? 10) * 86_400_000),
+      evidences: [],
+    };
+    put(`dispute:${d.id}`, d);
+    return { d, created: true };
+  });
+  if (out.created) scheduleWebhook(event("CUSTOMER.DISPUTE.CREATED", "dispute", `A new dispute was created with ID ${out.d.id}.`, disputeView(out.d, now)), config.webhookDelayMs);
+  return { disputeId: out.d.id, captureId: out.d.captureId, reason: out.d.reason, amount: out.d.amount, created: out.created };
 }

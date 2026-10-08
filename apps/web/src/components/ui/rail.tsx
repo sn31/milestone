@@ -66,7 +66,10 @@ function Node({ phase, marker, glyph, live }: { phase: Phase; marker?: string; g
 
 const CONNECTOR: Record<Phase, string> = {
   done: "w-[2px] bg-[color-mix(in_oklab,var(--tone)_60%,transparent)]",
-  current: "w-[2px] bg-[linear-gradient(to_bottom,var(--tone)_0%,color-mix(in_oklab,var(--tone)_45%,transparent)_70%,var(--hairline-strong))]",
+  // The fade is a fixed length at each end, not a share of the station: a tall station (review card, receipt) keeps a
+  // readable line all the way down instead of thinning to a hairline halfway.
+  current:
+    "w-[2px] bg-[linear-gradient(to_bottom,var(--tone)_0px,color-mix(in_oklab,var(--tone)_62%,transparent)_96px,color-mix(in_oklab,var(--tone)_52%,transparent)_calc(100%_-_72px),color-mix(in_oklab,var(--tone)_30%,var(--hairline-strong))_100%)]",
   upcoming: "w-0 border-l border-dashed border-hairline-strong",
 };
 

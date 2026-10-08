@@ -149,7 +149,7 @@ export const PolicyDecision = z.object({
 export type PolicyDecision = z.infer<typeof PolicyDecision>;
 
 // ---------- Jobs and events ----------
-export const JobName = z.enum(["verify", "release", "settle", "advance"]);
+export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute"]);
 export type JobName = z.infer<typeof JobName>;
 
 /** Confirmed against PayPal's webhook event reference on 2026-10-08. */
@@ -170,6 +170,7 @@ export const PAYPAL_EVENTS = {
   payoutsBatchDenied: "PAYMENT.PAYOUTSBATCH.DENIED",
   invoicePaid: "INVOICING.INVOICE.PAID",
   disputeCreated: "CUSTOMER.DISPUTE.CREATED",
+  disputeUpdated: "CUSTOMER.DISPUTE.UPDATED",
   disputeResolved: "CUSTOMER.DISPUTE.RESOLVED",
 } as const;
 export type PayPalEventName = (typeof PAYPAL_EVENTS)[keyof typeof PAYPAL_EVENTS];

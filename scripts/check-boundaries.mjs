@@ -27,6 +27,7 @@ for (const rule of rules) {
     for (const file of files) {
       const rel = relative(root, file);
       if (rule.allowFiles?.includes(rel)) continue;
+      if (/(^|\/)test\//.test(rel) || /\.test\.[cm]?[jt]sx?$/.test(rel)) continue; // tests may exercise money calls directly
       const src = readFileSync(file, "utf8");
       const lines = src.split("\n");
       lines.forEach((line, i) => {
