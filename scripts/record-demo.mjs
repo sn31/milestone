@@ -238,6 +238,7 @@ try {
   log("stopping Chrome, worker and web");
   await stopAll();
   if (shadowDir) rmSync(shadowDir, { recursive: true, force: true });
+  rmSync(join(outDir, "chrome-profile"), { recursive: true, force: true });
   if (!opt["keep-db"]) {
     try { dropDatabase(baseUrl, opt.db); log(`dropped ${opt.db}`); } catch (e) { log(`could not drop ${opt.db}: ${e.message}`); }
   }
