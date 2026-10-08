@@ -47,7 +47,8 @@ recordings["m1.release"] = await executeRelease(ctx, { milestoneId: m1.milestone
 console.log("m1: full release sent", JSON.stringify(recordings["m1.release"]).slice(0, 200));
 // A retry must reuse the same request id and never pay twice.
 recordings["m1.releaseRetry"] = await executeRelease(ctx, { milestoneId: m1.milestoneId, currency, captureId: m1.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 50_00, decision: { action: "release", amountMinor: 50_00, ruleIds: ["P6"], reason: "spike retry" } });
-console.log("m1: retry returned the same batch:", JSON.stringify(recordings["m1.releaseRetry"]) === JSON.stringify(recordings["m1.release"]));
+const batchId = (r: unknown) => (r as { payout?: { batch_header?: { payout_batch_id?: string } } }).payout?.batch_header?.payout_batch_id;
+console.log("m1: retry recovered the same batch:", batchId(recordings["m1.releaseRetry"]) === batchId(recordings["m1.release"]), batchId(recordings["m1.release"]));
 
 const m2 = await fund("m2", 40_00);
 recordings["m2.partial"] = await executeRelease(ctx, { milestoneId: m2.milestoneId, currency, captureId: m2.capture.id, freelancerEmail: freelancer, milestoneAmountMinor: 40_00, decision: { action: "partial", amountMinor: 30_00, ruleIds: ["P5"], reason: "spike" } });

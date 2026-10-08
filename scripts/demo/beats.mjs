@@ -25,9 +25,29 @@ const status = (ctx, id) => ctx.db(`select status from milestones where id='${id
 const waitStatus = (ctx, id, states, timeout = 90_000) =>
   waitDb(ctx, `select status from milestones where id='${id}'`, (s) => states.includes(s), { timeout, what: `${id} in ${states.join("|")}` });
 
-/** Re-renders the page if the server state moved on but the page has not picked it up yet. */
-async function catchUp(ctx, text, ms = 6000) {
-  try { await ctx.d.waitText(text, { timeout: ms }); } catch { await ctx.d.reload(); }
+// Station tone per milestone status (apps/web/src/components/ui/states.ts): each rail <li> carries data-tone.
+const TONE = { draft: "draft", funded: "funded", verifying: "verifying", review: "review", released: "released", partial_released: "partial", held: "held", needs_client: "needs" };
+
+/** Waits for the station of `title` to show `status`; reloads the page when it has not caught up with the server. */
+async function catchUp(ctx, title, statusNow, ms = 6000) {
+  const expr = `(() => { const li = [...document.querySelectorAll('ol[aria-label$=": milestones"] > li')].find((l) => l.innerText.includes(${JSON.stringify(title)})); return !!li && li.dataset.tone === ${JSON.stringify(TONE[statusNow] ?? statusNow)}; })()`;
+  try { await ctx.d.waitFor(expr, { timeout: ms, what: `${title} showing ${statusNow}` }); } catch { await ctx.d.reload(); }
+}
+
+/** Opens the station's folded verdict receipt (criteria, evidence, tamper note) and brings it on screen. */
+async function unfold(ctx, title) {
+  const { d } = ctx;
+  try {
+    // A receipt opened earlier stays open across role switches (client state survives the re-render).
+    const open = await d.eval(`!!window.__demo.find(${JSON.stringify({ within: title, selector: "button[aria-expanded=true]", text: "receipt" })})`);
+    if (!open) {
+      await d.click({ within: title, selector: "button[aria-expanded=false]", text: "receipt" }, { timeout: 8000 });
+      await sleep(700);
+    }
+    await d.show({ within: title, selector: "button[aria-expanded=true]" }, "start");
+  } catch (e) {
+    ctx.note(`no receipt to unfold on "${title}": ${e.message}`);
+  }
 }
 
 /** Client funds a milestone with the simulated PayPal button (create order, approve page, back, capture). */
@@ -104,8 +124,8 @@ export const BEATS = [
       const s = await waitVerdict(ctx, "mst_1", before);
       ctx.note(`m1-pass verdict: ${s}`);
       await d.role("usr_client");
-      await catchUp(ctx, s === "review" ? "Review window" : "Approve in full");
-      await d.show({ within: M1, text: s === "review" ? "Review window" : "Approve in full", selector: "*" }, "center").catch(() => {});
+      await catchUp(ctx, M1, s);
+      await unfold(ctx, M1);
       await sleep(ctx.holdMs);
       if (s === "review") {
         // The window closes on its own; stay on the countdown.
@@ -118,8 +138,7 @@ export const BEATS = [
       }
       const end = status(ctx, "mst_1");
       ctx.note(`mst_1 after release: ${end}`);
-      await catchUp(ctx, "released", 8000);
-      await d.show({ within: M1, selector: "*", text: "Released" }, "center").catch(() => {});
+      await catchUp(ctx, M1, end, 8000);
     },
   },
   {
@@ -135,17 +154,19 @@ export const BEATS = [
       await deliver(ctx, M2, "m2-partial");
       let s = await waitVerdict(ctx, "mst_2", before);
       ctx.note(`m2-partial: ${s}`);
-      await catchUp(ctx, "Held", 6000);
-      await d.show({ within: M2, selector: "*", text: "Deliver" }, "start").catch(() => {});
+      await catchUp(ctx, M2, s);
+      await unfold(ctx, M2);
       await sleep(ctx.holdMs);
       before = verified(ctx, "mst_2");
       await deliver(ctx, M2, "m2-injection");
       s = await waitVerdict(ctx, "mst_2", before);
-      const inj = ctx.db("select suspected_injection from deliveries where milestone_id='mst_2' order by received_at desc limit 1");
+      const inj = ctx.db("select suspected_injection from deliveries where milestone_id='mst_2' order by created_at desc limit 1");
       ctx.note(`m2-injection: ${s}, suspected_injection=${inj}`);
       await d.role("usr_client");
-      await catchUp(ctx, "injection", 6000);
-      await d.show({ within: M2, selector: "*", text: "Hold" }, "center").catch(() => {});
+      await catchUp(ctx, M2, s);
+      await d.show({ within: M2, selector: "*", text: M2 }, "start").catch(() => {});
+      await sleep(ctx.holdMs);
+      await unfold(ctx, M2);
     },
   },
   {
@@ -170,7 +191,8 @@ export const BEATS = [
       const s = await waitVerdict(ctx, "mst_brand_1", before);
       ctx.note(`bakery upload: ${s}`);
       await d.role("usr_client");
-      await d.show({ within: BRAND1, selector: "*", text: "Logo as an SVG" }, "start").catch(() => {});
+      await catchUp(ctx, BRAND1, s);
+      await unfold(ctx, BRAND1);
     },
   },
   {
@@ -213,8 +235,8 @@ export const BEATS = [
         what: "milestone.needs_operator on mst_brand_1",
       });
       ctx.note(`mst_brand_1 after the failed payout: ${status(ctx, "mst_brand_1")}`);
-      await catchUp(ctx, "Held", 6000);
-      await d.show({ within: BRAND1, selector: "*", text: "Held" }, "center").catch(() => {});
+      await catchUp(ctx, BRAND1, status(ctx, "mst_brand_1"));
+      await d.show({ within: BRAND1, selector: "*", text: BRAND1 }, "start").catch(() => {});
       await sleep(ctx.holdMs);
       await d.role("usr_partner");
       await d.go("/ops");

@@ -318,9 +318,9 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
   }
 
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-3.5">
       {/* Which step only matters while the money is in escrow: a draft has everything ahead, a payout everything behind. */}
-      {status !== "draft" && status !== "released" && status !== "partial_released" ? <LifecycleTrack status={status} className="mb-1" /> : null}
+      {status !== "draft" && status !== "released" && status !== "partial_released" ? <LifecycleTrack status={status} /> : null}
       {body}
     </div>
   );

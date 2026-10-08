@@ -164,7 +164,9 @@ const PAGE_LIB = String.raw`(() => {
         root = items[0];
       }
       let els = [...root.querySelectorAll(spec.selector || "button, a, [role=button], input[type=submit]")].filter(visible);
-      if (spec.text) els = els.filter((e) => { const t = norm(e.innerText || e.value || e.getAttribute("aria-label")); return spec.exact ? t === spec.text : t.includes(spec.text); });
+      // Case-insensitive: labels are often uppercased with CSS, and innerText returns the rendered case.
+      const want = spec.text ? spec.text.toLowerCase() : null;
+      if (want) els = els.filter((e) => { const t = norm(e.innerText || e.value || e.getAttribute("aria-label")).toLowerCase(); return spec.exact ? t === want : t.includes(want); });
       if (spec.enabled) els = els.filter((e) => !e.disabled);
       // selector "*" means "whatever shows this text": take the innermost element.
       if (spec.selector === "*") els.sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
@@ -180,7 +182,9 @@ const PAGE_LIB = String.raw`(() => {
       if (!el) return false;
       const r = el.getBoundingClientRect();
       if (r.top >= 80 && r.bottom <= innerHeight - 80 && !block) return false;
-      el.scrollIntoView({ behavior: "smooth", block: block || "center" });
+      // "start" leaves room for the sticky header; otherwise the browser's own alignment.
+      if (block === "start") window.scrollTo({ top: Math.max(0, r.top + scrollY - 96), behavior: "smooth" });
+      else el.scrollIntoView({ behavior: "smooth", block: block || "center" });
       return true;
     },
     rect() { const el = document.querySelector("[data-demo-hit]"); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height, disabled: !!el.disabled }; },
@@ -257,7 +261,7 @@ export class Driver {
   }
 
   async waitText(text, opts = {}) {
-    return this.waitFor(`document.body && document.body.innerText.includes(${JSON.stringify(text)})`, { what: `text "${text}"`, ...opts });
+    return this.waitFor(`document.body && document.body.innerText.toLowerCase().includes(${JSON.stringify(text.toLowerCase())})`, { what: `text "${text}"`, ...opts });
   }
 
   /** Locates spec, scrolls it into view and returns its centre. */

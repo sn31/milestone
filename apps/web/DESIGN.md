@@ -157,7 +157,7 @@ Import from `@/components/ui` (barrel `index.ts`). "client" means the file is `"
 | `LogStream` | `log-stream.tsx` (client) | Verifier logs, PayPal op trail. Props: `lines`, `live`, `stagger`, `maxHeight`. | Always in a sunken well. Lines reveal one by one. |
 | `Receipt` / `ReceiptRow` | `receipt.tsx` | Verdicts: perforated paper with dotted-leader rows. | Verdict rows only. One receipt per delivery. |
 | `EvidenceChip` | `receipt.tsx` | Tear-off evidence stub: kind + id, optional `href`, `status`. | Attached under the receipt row that cites it. |
-| `Stamp` | `receipt.tsx` | The policy decision: rotated, double-ruled, inked in the decision tone, stamps in on mount. | One per decision. Text is the action (`Release`, `Hold`, `Partial`, `Ask client`) plus rule ids. |
+| `Stamp` | `receipt.tsx` | The policy decision: rotated, double-ruled, inked in the decision tone, stamps in on mount. `size="sm"` is a one-line stamp for a folded receipt's summary. | One per decision. Text is the action (`Release`, `Hold`, `Partial`, `Ask client`) plus rule ids. |
 | `eventTone` / `eventGlyph` / `auditTime` | `src/lib/events.ts` | How an audit event looks anywhere it is listed: tone, glyph, "Oct 08 09:14:53" time. | The contract Activity ledger and the audit grid both use it; never re-map events in a screen. |
 | `EmptyState` | `empty-state.tsx` | Nothing to show. Props: `title`, `body`, `action`. | Left-aligned, with the ghost-rail glyph. |
 | `Hash` | `hash.tsx` (client) | Any id or hash: middle-truncated, copies on click. Props: `value`, `head`, `tail`, `label`. | Every PayPal id, delivery id, sha. |
@@ -166,6 +166,8 @@ Import from `@/components/ui` (barrel `index.ts`). "client" means the file is `"
 | `Reveal` | `reveal.tsx` | CSS rise-in for rows and panels (`index` staggers 50ms). Server-safe, so content is never hidden without JS. | Prefer it over motion for static lists. |
 | `NavLink` | `nav-link.tsx` (client) | Header links with the active rule. | Layout only. |
 | `MotionProvider` | `motion-provider.tsx` (client) | Already in the layout. | |
+| `LiveRefresh` / `VerifierLog` | `src/components/live-refresh.tsx` (client) | `LiveRefresh initial={snapshots}`: polls `GET /api/milestones/[id]/status` every 2 s for the page's live milestones and calls `router.refresh()` when one changes. `VerifierLog`: the verifying station's `LogStream`, fed by the same poll. | Live = verifying, review, needs_client, or a capture/payout/refund op still pending. The page renders it only when something is live. Never poll from a screen by hand. |
+| `VerdictView folded` | `src/components/verdict-view.tsx` (client) | The receipt as one summary line (result pill, criteria passed, small stamp) with the full receipt behind it. | Review, needs client, held and paid stations. Verifying shows the receipt open. |
 
 ### Usage rules
 
@@ -285,3 +287,45 @@ Also fixed while walking the flows: after a resubmission, the new delivery's rec
 policy stamp. A receipt now carries the stamp only when `decision.deliveryId` is that delivery. The stamp prints the
 decided amount, and optional criteria are marked on the receipt. The ops summary prints a failure reason in sentence
 case rather than upper case.
+
+## Review 2
+
+Second pass on `/contracts/ctr_demo`, `/contracts/ctr_brand` (client and freelancer), the contract ledger and `/lender`, at
+1280 and 390, dark and light, on the showcase seed. Screenshots in the session scratchpad (`design2/shots`).
+
+### What changed
+
+1. **Live updates.** The contract page no longer needs a reload while money is moving. `LiveRefresh` polls
+   `GET /api/milestones/[id]/status` (status, decidedAt, reviewEndsAt, the latest delivery's verifiedAt, result and evidence
+   count, the newest audit id, a pending capture/payout/refund op) every 2 s for milestones that are verifying, in review,
+   waiting on the client or have an op in flight, and calls `router.refresh()` when the signature changes. It stops when
+   nothing is live, pauses on a hidden tab and slows to 10 s after ten quiet minutes. While verifying, `VerifierLog` prints
+   the delivery and the checks, then appends audit events and the deterministic stage's evidence summaries (pass/fail in
+   tone) one line every 320 ms as they arrive, and holds the page refresh until the new lines have been seen, so the judge
+   watches the lines land before the station moves on to review.
+2. **Receipts fold.** Review, needs client, held and paid stations show one line: `Receipt · PASS · 3 of 3 criteria passed`
+   and a small `RELEASE · P6 · $100.00` stamp (amount dropped on a phone). The full receipt, delivered files and evidence
+   open below it. The review card stays open. At 1280 the review station is ~490px (was 1,149), needs client ~500 (was
+   1,345), held ~240 (was 866). The needs-client note that repeated the card's recommendation is gone.
+3. **Ledger at 1280.** The Dir column is gone (Debit and Credit already say it); Milestone is 240px and flexes, so
+   "Signup form and validation" and "Polish, accessibility and docs" print whole. Refs truncate in the middle only when the
+   cell is too narrow, keeping the last segment (`…:partner`, `…_repaid`).
+4. **Lender concentration.** The stat goes amber on the same rule as the grid's exposure bars: a client above 60% of the
+   outstanding principal (it was 50%, and never with a single client).
+5. **Connector.** The current station's connector fades over a fixed 96px at the top and 72px at the bottom instead of a
+   share of the station, so a tall station keeps a readable line to its foot.
+6. Also found: a held milestone flagged for an operator (payout failed) still offered the freelancer "Resubmit for
+   verification", which the worker refuses. It now says why it is held ("A payout item failed: Receiver is unregistered")
+   in danger tone and offers no resubmission.
+
+### What remains
+
+1. **Verifying is unseen in the showcase.** No seeded milestone is verifying, so the verifier log was checked by unit
+   tests and a faked poll, not on screen. The worker stores all evidence at once with the verdict, so lines arrive in one
+   burst (played out one by one); a real stream needs the worker to persist evidence per check as it runs.
+2. **The funded station for the freelancer** is ~830px at 1280: release conditions, the advance offer and the deliver
+   form, all open. Fold the conditions once the form is the next step, or put the advance offer beside the form.
+3. **The review card** is the tallest thing in an in-escrow station (~300px): the 124px ring and the two-column choices.
+   At 390 the ring alone takes a row; a smaller ring beside the title on phones would save ~140px.
+4. The ledger's txn chip still middle-truncates every showcase id (`txn_sh…st_1`) at 124px.
+

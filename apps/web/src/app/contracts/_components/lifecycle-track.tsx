@@ -79,7 +79,7 @@ export function LifecycleTrack({ status, className }: { status: string; classNam
         ))}
       </ol>
       {side.length > 0 ? (
-        <div className="mt-1 grid grid-cols-5">
+        <div className="grid grid-cols-5">
           {/* The side track drops from the verifying node (column 3). */}
           <div className="col-span-3 col-start-3 flex items-start">
             <svg aria-hidden data-tone={side[0]!.tone} viewBox="0 0 22 18" className="ml-[3px] h-[18px] w-[22px] shrink-0 overflow-visible" fill="none">
