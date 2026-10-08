@@ -1,8 +1,8 @@
 import type { Job } from "pg-boss";
-import { JobName, jobs } from "@milestone/core";
+import { JobName, jobs, loadRootEnv } from "@milestone/core";
 import { handlers, type JobData } from "./handlers.ts";
 
-try { process.loadEnvFile(new URL("../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
+loadRootEnv();
 
 const boss = await jobs();
 boss.on("error", (err) => console.error("pg-boss:", err));

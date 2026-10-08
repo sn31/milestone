@@ -14,6 +14,15 @@ describe("toSnapshot", () => {
     expect(toSnapshot({ ...m, status: "funded" }, null, [], null, { kind: "payout", status: "sent" }).live).toBe(true);
   });
 
+  it("is live, whatever the status, while the latest delivery awaits its verdict (until AWAITING_VERDICT_MS)", () => {
+    const fresh = { id: "dlv_1", receivedAt: at(0), verifiedAt: null, result: null, evidence: [] };
+    const now = at(10).getTime();
+    expect(toSnapshot({ ...m, status: "funded" }, fresh, [], null, null, now).live).toBe(true);
+    expect(toSnapshot({ ...m, status: "held" }, fresh, [], null, null, now).live).toBe(true);
+    expect(toSnapshot({ ...m, status: "funded" }, { ...fresh, result: "pass" as const, verifiedAt: at(5) }, [], null, null, now).live).toBe(false);
+    expect(toSnapshot({ ...m, status: "funded" }, fresh, [], null, null, now + 31 * 60_000).live).toBe(false);
+  });
+
   it("reports the latest delivery's verification and evidence, and events oldest first", () => {
     const delivery = {
       id: "dlv_1",

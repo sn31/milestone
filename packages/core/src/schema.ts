@@ -1,4 +1,6 @@
+import { relations } from "drizzle-orm";
 import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import type { StoredDecision } from "./schemas.ts";
 
 export const userRole = pgEnum("user_role", ["client", "freelancer", "partner", "platform"]);
 export const contractStatus = pgEnum("contract_status", ["draft", "approved", "active", "closed"]);
@@ -55,13 +57,18 @@ export const milestones = pgTable("milestones", {
   paypalCaptureId: text("paypal_capture_id"),
   /** Default branch head when the milestone was funded; the verifier's tamper check diffs deliveries against it. */
   baselineSha: text("baseline_sha"),
-  decision: jsonb("decision").$type<{ action: string; amountMinor: number; ruleIds: string[]; reason: string }>(),
+  decision: jsonb("decision").$type<StoredDecision>(),
   decidedAt: timestamp("decided_at", { withTimezone: true }),
   reviewEndsAt: timestamp("review_ends_at", { withTimezone: true }),
   clientResponse: text("client_response"),
   advanceEligible: boolean("advance_eligible").default(false).notNull(),
   createdAt: createdAt(),
-}, (t) => [uniqueIndex("milestones_contract_seq").on(t.contractId, t.seq)]);
+}, (t) => [
+  uniqueIndex("milestones_contract_seq").on(t.contractId, t.seq),
+  // Webhooks resolve their milestone by PayPal id.
+  index("milestones_paypal_capture_id").on(t.paypalCaptureId),
+  index("milestones_paypal_order_id").on(t.paypalOrderId),
+]);
 
 export const criteria = pgTable("criteria", {
   id: id(),
@@ -70,7 +77,7 @@ export const criteria = pgTable("criteria", {
   description: text("description").notNull(),
   spec: jsonb("spec").$type<Record<string, unknown>>().default({}).notNull(),
   required: boolean("required").default(true).notNull(),
-});
+}, (t) => [index("criteria_milestone").on(t.milestoneId)]);
 
 /** A delivery carries its own verdict and evidence as JSON; logs and screenshots are bounded and inline. */
 export const deliveries = pgTable("deliveries", {
@@ -87,7 +94,7 @@ export const deliveries = pgTable("deliveries", {
   promptHash: text("prompt_hash"),
   receivedAt: createdAt(),
   verifiedAt: timestamp("verified_at", { withTimezone: true }),
-});
+}, (t) => [index("deliveries_milestone_received").on(t.milestoneId, t.receivedAt.desc())]);
 
 export const advances = pgTable("advances", {
   id: id(),
@@ -101,7 +108,7 @@ export const advances = pgTable("advances", {
   fundedAt: timestamp("funded_at", { withTimezone: true }),
   repaidAt: timestamp("repaid_at", { withTimezone: true }),
   createdAt: createdAt(),
-});
+}, (t) => [index("advances_milestone").on(t.milestoneId)]);
 
 export const paypalOps = pgTable("paypal_ops", {
   id: id(),
@@ -114,7 +121,12 @@ export const paypalOps = pgTable("paypal_ops", {
   response: jsonb("response"),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }),
-}, (t) => [uniqueIndex("paypal_ops_request_id").on(t.requestId), uniqueIndex("paypal_ops_kind_key").on(t.kind, t.key)]);
+}, (t) => [
+  uniqueIndex("paypal_ops_request_id").on(t.requestId),
+  uniqueIndex("paypal_ops_kind_key").on(t.kind, t.key),
+  // A milestone's ops are looked up by key across kinds (payout + refund).
+  index("paypal_ops_key").on(t.key),
+]);
 
 export const webhookEvents = pgTable("webhook_events", {
   id: id(),
@@ -151,4 +163,21 @@ export const auditLog = pgTable("audit_log", {
   event: text("event").notNull(),
   detail: jsonb("detail"),
   createdAt: createdAt(),
-});
+}, (t) => [
+  index("audit_milestone_created").on(t.milestoneId, t.createdAt.desc()),
+  index("audit_contract_created").on(t.contractId, t.createdAt.desc()),
+  index("audit_event_milestone").on(t.event, t.milestoneId),
+]);
+
+// ---------- Relations (relational queries only: db.query.x.findFirst({ with: ... }); no schema change) ----------
+
+export const contractsRelations = relations(contracts, ({ many }) => ({ milestones: many(milestones) }));
+export const milestonesRelations = relations(milestones, ({ one, many }) => ({
+  contract: one(contracts, { fields: [milestones.contractId], references: [contracts.id] }),
+  criteria: many(criteria),
+  deliveries: many(deliveries),
+  advances: many(advances),
+}));
+export const criteriaRelations = relations(criteria, ({ one }) => ({ milestone: one(milestones, { fields: [criteria.milestoneId], references: [milestones.id] }) }));
+export const deliveriesRelations = relations(deliveries, ({ one }) => ({ milestone: one(milestones, { fields: [deliveries.milestoneId], references: [milestones.id] }) }));
+export const advancesRelations = relations(advances, ({ one }) => ({ milestone: one(milestones, { fields: [advances.milestoneId], references: [milestones.id] }) }));

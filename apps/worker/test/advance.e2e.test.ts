@@ -41,7 +41,8 @@ describe.skipIf(!run)("advance job end to end", async () => {
   const { advances, contracts, milestones, users } = await import("@milestone/core");
   const { PayPalClient } = await import("@milestone/money");
   const { getDb } = await import("../src/lib/db.ts");
-  const { advance, advanceLedgerRef } = await import("../src/jobs/advance.ts");
+  const { advance } = await import("../src/jobs/advance.ts");
+  const advanceLedgerRef = (await import("@milestone/core")).ledgerRefs.advanceFunding;
   const db = getDb();
   const partner = new PayPalClient({ clientId: "partner-id", clientSecret: "partner-secret", env: "sandbox", fetchImpl: fakeFetch });
   const deps = { partner: () => partner };

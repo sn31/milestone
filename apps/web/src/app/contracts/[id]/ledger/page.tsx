@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { asc, eq, inArray, or } from "drizzle-orm";
-import { advances, ledgerEntries, milestones } from "@milestone/core";
+import { advances, ledgerEntries, ledgerRefs, milestones } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { LedgerGrid, type LedgerRow } from "@/components/ledger-grid";
 import { PageHeader, Stat } from "@/components/ui";
@@ -29,7 +29,7 @@ export default async function LedgerPage({ params }: PageProps<"/contracts/[id]/
   const label = new Map(ms.map((m) => [m.id, `${m.seq} ${m.title}`]));
   const heldOf = new Map(ms.map((m) => [`held:${m.id}`, m.id]));
   const adv = ms.length > 0 ? await db.select({ id: advances.id, milestoneId: advances.milestoneId }).from(advances).where(inArray(advances.milestoneId, ms.map((m) => m.id))) : [];
-  const advOf = new Map(adv.map((a) => [`advance:${a.id}`, a.milestoneId]));
+  const advOf = new Map(adv.map((a) => [ledgerRefs.advanceFunding(a.id), a.milestoneId]));
 
   const entries =
     heldOf.size + advOf.size === 0

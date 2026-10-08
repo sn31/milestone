@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Button, Field, StateGlyph, cx, inputClass } from "@/components/ui";
+import { postJson, thrownText } from "@/lib/api-client";
 
 const MAX = 2000;
 
@@ -36,21 +37,16 @@ export function DisputeResponse(props: DisputeResponseProps) {
     setBusy(action);
     setError(null);
     try {
-      const res = await fetch(`/api/disputes/${encodeURIComponent(props.disputeId)}/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(action === "submit" ? { text } : { confirm: true }),
-      });
+      const res = await postJson(`/api/disputes/${encodeURIComponent(props.disputeId)}/${action}`, action === "submit" ? { text } : { confirm: true });
       if (res.ok) {
         setConfirming(false);
         router.refresh();
         return;
       }
-      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-      setError(typeof body?.error === "string" ? body.error : `request failed (${res.status})`);
+      setError(res.error);
       if (res.status === 409) router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "request failed");
+      setError(thrownText(e));
     } finally {
       setBusy(null);
     }

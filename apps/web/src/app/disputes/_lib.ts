@@ -1,9 +1,7 @@
-import { createHash } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { Db } from "@milestone/core";
+import { readFile, stat } from "node:fs/promises";
+import { asRecord, asString, type Db } from "@milestone/core";
 import { EVIDENCE_FILE_MAX_BYTES, EVIDENCE_FILE_TYPES, EVIDENCE_TOTAL_MAX_BYTES, type EvidenceFile } from "@milestone/money";
-import { uploadRoot, type DraftResponse, type EvidencePack } from "@milestone/verify";
+import { resolveUpload, sha256Hex, type DraftResponse, type EvidencePack } from "@milestone/verify";
 
 /**
  * A dispute as the audit log tells it. There is no disputes table: dispute.opened (webhook), dispute.drafted (job,
@@ -37,9 +35,6 @@ export interface DisputeView {
 
 export type DisputeStatus = "drafting" | "awaiting_response" | "submitted" | "accepted" | "won" | "lost" | "resolved";
 
-const o = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
-const s = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
-
 export function isOpen(d: Pick<DisputeView, "status">): boolean {
   return d.status !== "won" && d.status !== "lost" && d.status !== "resolved";
 }
@@ -58,8 +53,8 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
   });
   const byId = new Map<string, DisputeView>();
   for (const r of rows) {
-    const d = o(r.detail);
-    const id = s(d.disputeId);
+    const d = asRecord(r.detail);
+    const id = asString(d.disputeId);
     if (!id) continue;
     const at = r.createdAt.toISOString();
     if (r.event === "dispute.opened") {
@@ -69,11 +64,11 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
         milestoneId: r.milestoneId,
         contractId: r.contractId,
         openedAt: at,
-        reason: s(d.reason),
+        reason: asString(d.reason),
         amountMinor: typeof d.amountMinor === "number" ? d.amountMinor : null,
-        currency: s(d.currency),
-        captureId: s(d.captureId),
-        dueAt: s(d.dueAt),
+        currency: asString(d.currency),
+        captureId: asString(d.captureId),
+        dueAt: asString(d.dueAt),
         drafted: null,
         submitted: null,
         submissions: 0,
@@ -94,16 +89,16 @@ export async function loadDisputes(db: Db, where: { contractIds?: string[]; disp
       v.submitted = {
         at,
         actor: r.actor,
-        text: s(d.text) ?? "",
-        documents: (Array.isArray(d.documents) ? d.documents : []).map(o).map((x) => ({ name: s(x.name) ?? "", size: typeof x.size === "number" ? x.size : 0 })),
-        skipped: (Array.isArray(d.skipped) ? d.skipped : []).map(o).map((x) => ({ name: s(x.name) ?? "", reason: s(x.reason) ?? "" })),
+        text: asString(d.text) ?? "",
+        documents: (Array.isArray(d.documents) ? d.documents : []).map(asRecord).map((x) => ({ name: asString(x.name) ?? "", size: typeof x.size === "number" ? x.size : 0 })),
+        skipped: (Array.isArray(d.skipped) ? d.skipped : []).map(asRecord).map((x) => ({ name: asString(x.name) ?? "", reason: asString(x.reason) ?? "" })),
       };
     } else if (r.event === "dispute.updated") {
-      const status = s(d.status);
+      const status = asString(d.status);
       if (v.submitted && (status === null || status === "WAITING_FOR_SELLER_RESPONSE")) v.moreRequested = { at, status };
-    } else if (r.event === "dispute.claim_accepted" && !v.accepted) v.accepted = { at, actor: r.actor, note: s(d.note) ?? "" };
-    else if (r.event === "dispute.resolved" && !v.resolved) v.resolved = { at, outcome: s(d.outcome) };
-    else if (r.event === "dispute.evidence_failed" || r.event === "dispute.accept_failed") v.failures.push({ at, event: r.event, error: s(d.error) ?? "" });
+    } else if (r.event === "dispute.claim_accepted" && !v.accepted) v.accepted = { at, actor: r.actor, note: asString(d.note) ?? "" };
+    else if (r.event === "dispute.resolved" && !v.resolved) v.resolved = { at, outcome: asString(d.outcome) };
+    else if (r.event === "dispute.evidence_failed" || r.event === "dispute.accept_failed") v.failures.push({ at, event: r.event, error: asString(d.error) ?? "" });
   }
   for (const v of byId.values()) v.status = statusOf(v);
   return [...byId.values()].sort((a, b) => (a.openedAt < b.openedAt ? 1 : a.openedAt > b.openedAt ? -1 : 0));
@@ -132,16 +127,6 @@ export interface Attachment {
   reason: string | null;
 }
 
-/** Resolves an upload path inside UPLOAD_DIR, refusing anything that escapes it (as the files route does). */
-async function uploadPath(path: string): Promise<string | null> {
-  const root = await realpath(uploadRoot()).catch(() => null);
-  if (!root) return null;
-  const real = await realpath(resolve(root, path)).catch(() => null);
-  const rel = real ? relative(root, real) : "..";
-  if (!real || rel.startsWith(`..${sep}`) || rel === ".." || isAbsolute(rel)) return null;
-  return real;
-}
-
 /**
  * Which delivered files go to PayPal with the response: uploaded files of a type PayPal takes (PDF, PNG, JPEG, GIF),
  * present on disk, each and all together within 10 MB. The rest are named in the pack only.
@@ -159,7 +144,8 @@ export async function planAttachments(pack: EvidencePack | null | undefined): Pr
       out.push({ ...base, attach: false, reason: "type PayPal does not accept" });
       continue;
     }
-    const real = await uploadPath(f.path);
+    // Inside UPLOAD_DIR only, as the files route reads them.
+    const real = await resolveUpload(f.path);
     const size = real ? await stat(real).then((x) => x.size).catch(() => null) : null;
     if (size === null) {
       out.push({ ...base, attach: false, reason: "not on disk" });
@@ -175,7 +161,10 @@ export async function planAttachments(pack: EvidencePack | null | undefined): Pr
   return out;
 }
 
-/** Reads the planned attachments, checking each against the sha256 recorded at delivery. */
+/**
+ * Reads the planned attachments, checking each against the sha256 recorded at delivery. Not readUploadedFile: a pack
+ * file may lack a recorded sha256, and the skip reason tells "not on disk" from "changed since delivery".
+ */
 export async function readAttachments(pack: EvidencePack | null | undefined): Promise<{ files: Array<EvidenceFile & { sha256: string }>; skipped: Array<{ name: string; reason: string }> }> {
   const plan = await planAttachments(pack);
   const files: Array<EvidenceFile & { sha256: string }> = [];
@@ -186,13 +175,13 @@ export async function readAttachments(pack: EvidencePack | null | undefined): Pr
       skipped.push({ name: a.name, reason: a.reason ?? "not attached" });
       continue;
     }
-    const real = await uploadPath(f.path);
+    const real = await resolveUpload(f.path);
     const bytes = real ? await readFile(real).catch(() => null) : null;
     if (!bytes) {
       skipped.push({ name: a.name, reason: "not on disk" });
       continue;
     }
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const sha256 = sha256Hex(bytes);
     if (f.sha256 && f.sha256 !== sha256) {
       skipped.push({ name: a.name, reason: "changed since delivery" });
       continue;

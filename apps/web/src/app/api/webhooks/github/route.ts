@@ -1,5 +1,5 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { storeWebhookOnce, enqueue, deliveries } from "@milestone/core";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { DELIVERABLE_STATUSES, commitDeliveryId, deliveries, enqueue, storeWebhookOnce, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
 
 function verify(raw: string, signature: string | null, secret: string): boolean {
@@ -48,20 +48,21 @@ export async function POST(req: Request) {
   const contractIds = (await db.query.contracts.findMany({ where: (c, { eq }) => eq(c.repoFullName, repoFullName), columns: { id: true } })).map((c) => c.id);
   if (contractIds.length === 0) return Response.json({ ignored: true });
   const milestone = await db.query.milestones.findFirst({
-    where: (m, { and, eq, inArray }) => and(inArray(m.contractId, contractIds), eq(m.seq, seq), inArray(m.status, ["funded", "held"])),
+    where: (m, { and, eq, inArray }) => and(inArray(m.contractId, contractIds), eq(m.seq, seq), inArray(m.status, [...DELIVERABLE_STATUSES])),
     columns: { id: true },
   });
   if (!milestone) return Response.json({ ignored: true });
 
   // Same milestone + same merge commit = same delivery, so a redelivered webhook cannot create a second row.
-  const deliveryId = `dlv_${createHash("sha256").update(`${milestone.id}:${sha}`).digest("hex").slice(0, 24)}`;
+  const deliveryId = commitDeliveryId(milestone.id, sha);
+  // base_sha: the tamper check's baseline when no funding-time baseline was recorded on the milestone.
+  const deliveryPayload: CommitPayload = { sha, title: pr.title ?? "", body: pr.body ?? "", branch: pr.head?.ref ?? "", clone_url: cloneUrl, pr_number: pr.number, repo: repoFullName, base_sha: typeof pr.base?.sha === "string" ? pr.base.sha : null };
   await db.insert(deliveries).values({
     id: deliveryId,
     milestoneId: milestone.id,
     source: "github_pr",
     ref: `${repoFullName}#${pr.number}`,
-    // base_sha: the tamper check's baseline when no funding-time baseline was recorded on the milestone.
-    payload: { sha, title: pr.title ?? "", body: pr.body ?? "", branch: pr.head?.ref ?? "", clone_url: cloneUrl, pr_number: pr.number, repo: repoFullName, base_sha: typeof pr.base?.sha === "string" ? pr.base.sha : null },
+    payload: deliveryPayload,
   }).onConflictDoNothing();
   await enqueue("verify", milestone.id, { deliveryId }, { dedupe: sha });
   return Response.json({ ok: true, milestoneId: milestone.id, deliveryId });

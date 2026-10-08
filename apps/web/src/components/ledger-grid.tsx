@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { createPart, type ColDef, type GridApi, type ICellRendererParams, type IRowNode, type RowClassRules, type ValueGetterParams } from "ag-grid-community";
 import { gridThemeInset } from "./ag-grid-theme";
-import { useNarrow } from "./evidence-panel";
+import { useNarrow } from "@/components/ui/detail-grid";
 import { Hash, Money, Panel, StateGlyph, cx, inputClass, type ToneKey } from "@/components/ui";
 import { formatMoney, minorDigits } from "@/lib/format";
 import { auditTime } from "@/lib/events";

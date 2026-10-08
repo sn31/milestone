@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { cx } from "./cx";
 import { StateGlyph } from "./state-pill";
-import type { ToneKey } from "./states";
+import { VERDICT_GLYPH, verdictTone, type ToneKey } from "./states";
 
 export interface ReceiptProps {
   /** Serif heading, e.g. "Verdict". */
@@ -32,9 +32,6 @@ export function Receipt({ title, meta, children, footer, className }: ReceiptPro
 
 export type CriterionStatus = "pass" | "fail" | "unclear";
 
-const VERDICT_TONE: Record<CriterionStatus, ToneKey> = { pass: "released", fail: "danger", unclear: "needs" };
-const VERDICT_GLYPH = { pass: "check", fail: "cross", unclear: "query" } as const;
-
 export interface ReceiptRowProps {
   /** The criterion, in plain words. */
   label: ReactNode;
@@ -54,7 +51,7 @@ export interface ReceiptRowProps {
 
 /** One criterion on the receipt: label, dotted leader, gauge and status in mono; rationale and evidence underneath. */
 export function ReceiptRow({ label, status, confidence, kind, detail, required, meter, children }: ReceiptRowProps) {
-  const tone = VERDICT_TONE[status];
+  const tone = verdictTone(status);
   return (
     <div data-tone={tone} className="border-b border-dashed border-hairline py-3.5 last:border-b-0">
       <div className="flex items-baseline gap-3">
@@ -94,7 +91,7 @@ export interface EvidenceChipProps {
 
 /** A tear-off evidence stub: the kind on a perforated stub, the id on the body. Links to the evidence when given href. */
 export function EvidenceChip({ kind, id, status, href, title }: EvidenceChipProps) {
-  const tone: ToneKey = status ? VERDICT_TONE[status] : "neutral";
+  const tone = verdictTone(status);
   const body = (
     <>
       <span className="relative flex items-center border-r border-dashed border-hairline-strong bg-tone-soft px-1.5 text-[10px] tracking-[0.1em] text-tone uppercase">

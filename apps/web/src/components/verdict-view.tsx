@@ -2,13 +2,16 @@
 
 import { motion } from "motion/react";
 import { useId, useState, type MouseEvent, type ReactNode } from "react";
-import type { deliveries, milestones } from "@milestone/core";
-import { EvidencePanel, evidenceTone, toEvidenceItems, type EvidenceItem } from "@/components/evidence-panel";
-import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, type CriterionStatus } from "@/components/ui";
+import type { deliveries, StoredDecision } from "@milestone/core";
+import { EvidencePanel, toEvidenceItems, type EvidenceItem } from "@/components/evidence-panel";
+import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, verdictTone, type CriterionStatus } from "@/components/ui";
+import { toggled } from "@/components/ui/detail-grid";
 import { formatDateTime, formatMoney } from "@/lib/format";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
-type Decision = NonNullable<(typeof milestones.$inferSelect)["decision"]>;
+
+/** What the receipt prints of a delivery: no payload (the delivered files are listed by the server, beside it). */
+export type VerdictDelivery = Pick<DeliveryRow, "id" | "ref" | "source" | "model" | "result" | "verifiedAt" | "receivedAt" | "verdict" | "evidence" | "suspectedInjection">;
 
 interface CriterionRow {
   criterion_id: string;
@@ -18,11 +21,10 @@ interface CriterionRow {
   rationale: string;
 }
 
-function rowsOf(verdict: DeliveryRow["verdict"]): CriterionRow[] {
+function rowsOf(verdict: VerdictDelivery["verdict"]): CriterionRow[] {
   const list = verdict && (verdict as { criteria?: unknown }).criteria;
   return Array.isArray(list) ? (list as CriterionRow[]) : [];
 }
-
 const asStatus = (s: string): CriterionStatus => (s === "pass" || s === "fail" ? s : "unclear");
 
 /** The verifier's overall result as a pill: pass reads as released green, partial as partial, fail as danger. */
@@ -32,7 +34,6 @@ const RESULT_PILL: Record<string, { state: string; label: string }> = {
   fail: { state: "failed", label: "Fail" },
   verifying: { state: "verifying", label: "Verifying" },
 };
-
 
 /** Confidence as a short bar in the criterion's tone, filled once on mount, with the percentage in mono. */
 function Confidence({ value }: { value: number }) {
@@ -64,8 +65,8 @@ export function VerdictView({
   folded = false,
   attachments,
 }: {
-  delivery: DeliveryRow | null;
-  decision: Decision | null;
+  delivery: VerdictDelivery | null;
+  decision: StoredDecision | null;
   /** Criterion descriptions by criterion id. */
   descriptions?: Record<string, string>;
   /** Show the delivery's evidence grid under the receipt; the receipt's evidence chips then open its rows. */
@@ -99,13 +100,7 @@ export function VerdictView({
   const passed = rows.filter((r) => r.status === "pass").length;
   const evidenceShown = showEvidence && items.length > 0;
 
-  const toggleRow = (id: string) =>
-    setOpenRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggleRow = (id: string) => setOpenRows((prev) => toggled(prev, id));
 
   /** A receipt chip was clicked: open the grid, expand that row's log and scroll to it. */
   const reveal = (e: MouseEvent, id: string) => {
@@ -207,7 +202,7 @@ export function VerdictView({
               {(["pass", "fail", "unclear"] as const).map((s) => {
                 const n = items.filter((it) => it.status === s).length;
                 return n ? (
-                  <span key={s} data-tone={evidenceTone(s)} className="text-tone tabular">
+                  <span key={s} data-tone={verdictTone(s)} className="text-tone tabular">
                     {n} {s}
                   </span>
                 ) : null;

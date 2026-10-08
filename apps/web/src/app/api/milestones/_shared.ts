@@ -1,34 +1,19 @@
-import { NextResponse } from "next/server";
-import { eq, getOperators, type Operators } from "drizzle-orm";
-import { PayPalError, captureFunding, getOrder, type MoneyContext } from "@milestone/money";
-import { accounts, audit, milestones, postTransaction, recordOpResult, requestIdFor, toPayPalValue, transition, type Db, type MilestoneStatus } from "@milestone/core";
+import { eq } from "drizzle-orm";
+import { PayPalError, captureFunding, getOrder, moneyContextFor, type MoneyContext } from "@milestone/money";
+import { defaultBranchHead } from "@milestone/verify";
+import { AUDIT_EVENTS, OP_KINDS, accounts, asRecord, asString, audit, loadMilestone, milestones, postTransaction, recordOpResult, requestIdFor, toPayPalValue, transition, type Db, type MilestoneStatus } from "@milestone/core";
+import { jsonError } from "@/lib/http";
 import { paypal } from "@/lib/paypal";
-import type { Actor } from "@/lib/session";
 
-/** Drizzle's query operators (eq, and, sql, ...), kept on loadMilestone's result for existing callers. */
-export type Ops = Operators;
-const ops: Ops = getOperators();
+/** Loads a milestone with its contract (one relational query); null when either is missing. */
+export { loadMilestone };
 
-/** Loads a milestone with its contract. */
-export async function loadMilestone(db: Db, id: string) {
-  const milestone = await db.query.milestones.findFirst({ where: (t) => eq(t.id, id) });
-  if (!milestone) return null;
-  const contract = await db.query.contracts.findFirst({ where: (t) => eq(t.id, milestone.contractId) });
-  if (!contract) return null;
-  return { milestone, contract, ops };
-}
+/** Only the contract's own client funds a milestone. Lives in lib/session; re-exported for existing importers. */
+export { isContractClient } from "@/lib/session";
 
-/** Only the contract's own client funds a milestone. */
-export function isContractClient(actor: Actor, contract: { clientId: string }): boolean {
-  return actor.role === "client" && actor.userId === contract.clientId;
-}
-
+/** The process's PayPal client with request ids from paypal_ops through `db`. */
 export function moneyContext(db: Db): MoneyContext {
-  return { client: paypal(), requestIdFor: (kind, key) => requestIdFor(db, kind, key) };
-}
-
-export function jsonError(error: string, status: number, extra?: Record<string, unknown>) {
-  return NextResponse.json({ error, ...extra }, { status, headers: { "Cache-Control": "no-store" } });
+  return moneyContextFor(db, paypal());
 }
 
 export function paypalErrorResponse(e: unknown) {
@@ -37,32 +22,6 @@ export function paypalErrorResponse(e: unknown) {
 }
 
 // ---------- Funding: shared by the capture route and the PayPal webhook ----------
-
-const GITHUB_API = "https://api.github.com";
-const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-
-/**
- * The head commit of the repository's default branch, recorded on the milestone at funding as the verifier's
- * tamper-check baseline. Null without GITHUB_TOKEN, without a repository, or on any GitHub failure: funding never
- * waits on GitHub, and the verifier then falls back to the pull request's base commit.
- */
-export async function defaultBranchHead(repoFullName: string | null, f: typeof fetch = fetch, token = process.env.GITHUB_TOKEN): Promise<string | null> {
-  if (!token || !repoFullName || !REPO_NAME.test(repoFullName)) return null;
-  const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "milestone-escrow" };
-  try {
-    const signal = AbortSignal.timeout(5_000);
-    const repo = await f(`${GITHUB_API}/repos/${repoFullName}`, { headers, signal });
-    if (!repo.ok) return null;
-    const branch = ((await repo.json()) as { default_branch?: unknown }).default_branch;
-    if (typeof branch !== "string" || !branch) return null;
-    const commit = await f(`${GITHUB_API}/repos/${repoFullName}/commits/${encodeURIComponent(branch)}`, { headers, signal });
-    if (!commit.ok) return null;
-    const sha = ((await commit.json()) as { sha?: unknown }).sha;
-    return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-  } catch {
-    return null;
-  }
-}
 
 /** The parts of a PayPal capture we act on (order capture response or PAYMENT.CAPTURE.* resource). */
 export interface CaptureInfo {
@@ -101,7 +60,7 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
   if (capture.amount.currency_code !== c.currency || capture.amount.value !== expected) {
     await audit(db, {
       actor: "paypal",
-      event: "milestone.capture_mismatch",
+      event: AUDIT_EVENTS.milestoneCaptureMismatch,
       milestoneId: m.id,
       contractId: c.id,
       detail: { captureId: capture.id, expected: { value: expected, currency: c.currency }, got: capture.amount },
@@ -115,7 +74,7 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
       if (!row || row.status !== "draft") return row ?? null;
       if (row.captureId !== capture.id) {
         await tx.update(milestones).set({ paypalCaptureId: capture.id }).where(eq(milestones.id, m.id));
-        await audit(tx as unknown as Db, { actor: "paypal", event: "milestone.capture_pending", milestoneId: m.id, contractId: c.id, detail: { captureId: capture.id, captureStatus: capture.status } });
+        await audit(tx, { actor: "paypal", event: AUDIT_EVENTS.milestoneCapturePending, milestoneId: m.id, contractId: c.id, detail: { captureId: capture.id, captureStatus: capture.status } });
       }
       return null;
     });
@@ -123,12 +82,11 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
     return { kind: "pending", status: "draft", captureId: capture.id, captureStatus: capture.status };
   }
 
-  // Outside the row lock: a network call. Recorded only by the call that moves the milestone to funded.
+  // Outside the row lock: a network call (the default branch head, as the verifier's tamper-check baseline; null
+  // without GITHUB_TOKEN or on any GitHub failure). Recorded only by the call that moves the milestone to funded.
   const baselineSha = await defaultBranchHead(c.repoFullName);
 
   return db.transaction(async (tx): Promise<FundResult> => {
-    // The core helpers take Db; a transaction exposes the same query builder.
-    const t = tx as unknown as Db;
     const [row] = await tx.select({ status: milestones.status, captureId: milestones.paypalCaptureId }).from(milestones).where(eq(milestones.id, m.id)).for("update");
     if (!row) throw new Error(`milestone ${m.id} disappeared`);
     if (row.status !== "draft") return { kind: "already", status: row.status, captureId: row.captureId };
@@ -136,7 +94,7 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
     await tx.update(milestones).set({ paypalCaptureId: capture.id, ...(baselineSha ? { baselineSha } : {}) }).where(eq(milestones.id, m.id));
     const posted = await tx.query.ledgerEntries.findFirst({ where: (l) => eq(l.ref, capture.id) });
     if (!posted) {
-      await postTransaction(t, {
+      await postTransaction(tx, {
         ref: capture.id,
         currency: c.currency,
         entries: [
@@ -145,9 +103,9 @@ export async function fundFromCapture(db: Db, milestoneId: string, capture: Capt
         ],
       });
     }
-    await transition(t, m.id, "funded", {
+    await transition(tx, m.id, "funded", {
       actor,
-      event: "milestone.funded",
+      event: AUDIT_EVENTS.milestoneFunded,
       detail: { orderId: orderId ?? m.paypalOrderId, captureId: capture.id, amountMinor: m.amountMinor, currency: c.currency, baselineSha },
     });
     return { kind: "funded", status: "funded", captureId: capture.id };
@@ -167,7 +125,7 @@ export async function captureAndFund(db: Db, milestoneId: string, orderId: strin
   if (c.status !== "active") return { kind: "rejected", httpStatus: 409, error: `contract is ${c.status}` };
   if (!m.paypalOrderId || m.paypalOrderId !== orderId) return { kind: "rejected", httpStatus: 409, error: "orderId does not match this milestone's order" };
 
-  const rid = await requestIdFor(db, "capture", m.id);
+  const rid = await requestIdFor(db, OP_KINDS.capture, m.id);
   let capture: CaptureInfo;
   try {
     ({ capture } = await captureFunding(moneyContext(db), m.id, orderId));
@@ -185,13 +143,17 @@ export async function captureAndFund(db: Db, milestoneId: string, orderId: strin
   return fundFromCapture(db, m.id, capture, actor, orderId);
 }
 
+/** The order id a PAYMENT.CAPTURE.* resource names in supplementary_data.related_ids, if any. */
+export function captureOrderId(resource: Record<string, unknown>): string | null {
+  return asString(asRecord(asRecord(resource.supplementary_data).related_ids).order_id);
+}
+
 /** Resolves the milestone a PAYMENT.CAPTURE.* resource belongs to: reference_id, then the order id, then the capture id. */
 export async function milestoneForCapture(db: Db, resource: Record<string, unknown>): Promise<string | null> {
-  const units = resource.purchase_units as Array<{ reference_id?: unknown }> | undefined;
-  const ref = units?.[0]?.reference_id;
-  if (typeof ref === "string" && ref) return ref;
-  const related = (resource.supplementary_data as { related_ids?: { order_id?: unknown } } | undefined)?.related_ids;
-  const orderId = typeof related?.order_id === "string" ? related.order_id : null;
+  const units = resource.purchase_units;
+  const ref = asString(Array.isArray(units) ? asRecord(units[0]).reference_id : undefined);
+  if (ref) return ref;
+  const orderId = captureOrderId(resource);
   if (orderId) {
     const m = await db.query.milestones.findFirst({ columns: { id: true }, where: (t) => eq(t.paypalOrderId, orderId) });
     if (m) return m.id;

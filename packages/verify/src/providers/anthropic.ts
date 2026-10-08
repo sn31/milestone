@@ -1,14 +1,22 @@
-/** Claude through the Anthropic SDK: the final answer is forced through an `emit_<schema>` tool. */
+/**
+ * Claude through the Anthropic SDK: the final answer is forced through an `emit_<schema>` tool.
+ *
+ * Prompt caching: two ephemeral breakpoints per request. One on the system prompt caches the tools + system prefix,
+ * which every turn of a generateJson loop repeats; one on the latest message caches the history so the next turn
+ * reads it back instead of paying for it again.
+ */
 import Anthropic from "@anthropic-ai/sdk";
+import { DEFAULT_ANTHROPIC_MODEL, textModelFor } from "./config.ts";
 import type { Block, GenerateRequest, GenerateResponse, Message, Provider } from "./types.ts";
 
-export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
+export { DEFAULT_ANTHROPIC_MODEL };
 
-/** MILESTONE_MODEL when it names a Claude model; an Ollama tag left in it is ignored. */
+/** MILESTONE_MODEL when it names a Claude model, else the default (see textModelFor in config.ts). */
 export function anthropicModel(env: NodeJS.ProcessEnv = process.env): string {
-  const m = env.MILESTONE_MODEL?.trim();
-  return m && m.startsWith("claude") ? m : DEFAULT_ANTHROPIC_MODEL;
+  return textModelFor("anthropic", env);
 }
+
+const EPHEMERAL = { type: "ephemeral" } as const;
 
 let client: Anthropic | null = null;
 export function anthropic(): Anthropic {
@@ -45,6 +53,17 @@ function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
   });
 }
 
+/** The same messages with a cache breakpoint on the last block of the latest user turn (a copy; nothing is mutated). */
+function withCacheBreakpoint(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  const last = messages.at(-1);
+  if (!last || last.role !== "user") return messages;
+  const blocks: Anthropic.ContentBlockParam[] = typeof last.content === "string" ? [{ type: "text", text: last.content }] : [...last.content];
+  const end = blocks.at(-1);
+  if (!end) return messages;
+  blocks[blocks.length - 1] = { ...end, cache_control: EPHEMERAL } as Anthropic.ContentBlockParam;
+  return [...messages.slice(0, -1), { role: "user", content: blocks }];
+}
+
 export function createAnthropicProvider(opts: { model?: string; client?: () => Anthropic } = {}): Provider {
   const model = opts.model ?? anthropicModel();
   const getClient = opts.client ?? anthropic;
@@ -57,8 +76,8 @@ export function createAnthropicProvider(opts: { model?: string; client?: () => A
       const res = await getClient().messages.create({
         model,
         max_tokens: req.maxTokens,
-        system: req.system,
-        messages: toAnthropicMessages(req.messages),
+        system: [{ type: "text", text: req.system, cache_control: EPHEMERAL }],
+        messages: withCacheBreakpoint(toAnthropicMessages(req.messages)),
         tools,
         tool_choice: req.forceAnswer ? { type: "tool", name: emit.name } : { type: "any" },
       });

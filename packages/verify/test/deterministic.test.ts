@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
-import { COMMIT_EVIDENCE_ID, commitSummary, DIFF_EVIDENCE_ID, DIFF_EXCERPT_CHARS, diffSummary, findTampering, manifestChanges, parseNameStatus, parseNumstat, removeCommittedDependencies, runDeterministicStage, stripWorkdir, TAMPER_EVIDENCE_ID, TREE_EVIDENCE_ID, TREE_MAX_ENTRIES, treeSummary, type DeterministicInput } from "../src/deterministic.ts";
+import { COMMIT_EVIDENCE_ID, commitSummary, DIFF_EVIDENCE_ID, DIFF_EXCERPT_CHARS, diffSummary, findTampering, manifestChanges, parseNameStatus, parseNumstat, removeCommittedDependencies, runDeterministicStage, stripRoots, TAMPER_EVIDENCE_ID, TREE_EVIDENCE_ID, TREE_MAX_ENTRIES, treeSummary, type DeterministicInput } from "../src/deterministic.ts";
 import { enforce, overall } from "../src/verifier.ts";
 
 const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}) => JSON.stringify({ name: "x", version: "1.0.0", ...extra, scripts }, null, 2);
@@ -258,9 +258,9 @@ describe("context evidence for judgment criteria", () => {
     expect(commitSummary("feat: x\n", { title: "Add x", body: "Adds x." })).toBe("commit message:\nfeat: x\n\ndelivery title: Add x\n\ndelivery description:\nAdds x.");
     expect(commitSummary("  ", {})).toBeNull();
   });
-  it("stripWorkdir removes the workdir and its realpath, longest first", () => {
+  it("stripRoots removes the workdir and its realpath, longest first", () => {
     const roots = ["/var/folders/ab/T/milestone-verify-1", "/private/var/folders/ab/T/milestone-verify-1"];
-    expect(stripWorkdir("at /private/var/folders/ab/T/milestone-verify-1/test/a.test.js:3 in /var/folders/ab/T/milestone-verify-1", roots)).toBe("at test/a.test.js:3 in .");
+    expect(stripRoots("at /private/var/folders/ab/T/milestone-verify-1/test/a.test.js:3 in /var/folders/ab/T/milestone-verify-1", roots)).toBe("at test/a.test.js:3 in .");
   });
 });
 

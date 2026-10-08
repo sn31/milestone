@@ -9,10 +9,19 @@ export const Money = z.object({
 export type Money = z.infer<typeof Money>;
 
 const ZERO_DECIMAL = new Set(["JPY", "KRW", "HUF", "TWD"]);
+/** Digits after the decimal point: 0 for the zero-decimal currencies PayPal lists, else 2. */
+export function minorDigits(currency: string): number {
+  return ZERO_DECIMAL.has(currency.toUpperCase()) ? 0 : 2;
+}
 /** PayPal wants a decimal string; we store integer minor units. */
 export function toPayPalValue(amountMinor: number, currency: string): string {
   if (ZERO_DECIMAL.has(currency.toUpperCase())) return String(amountMinor);
   return (amountMinor / 100).toFixed(2);
+}
+/** Plain-text amount for logs, notes and audit text: 1234 USD -> "12.34 USD", 500 JPY -> "500 JPY". Not localized. */
+export function formatMinor(amountMinor: number, currency: string): string {
+  const digits = minorDigits(currency);
+  return `${(amountMinor / 10 ** digits).toFixed(digits)} ${currency}`;
 }
 export function fromPayPalValue(value: string, currency: string): number {
   if (ZERO_DECIMAL.has(currency.toUpperCase())) return Math.round(Number(value));
@@ -64,6 +73,25 @@ export const UploadedFile = z.object({
   mime: z.string(),
 });
 export type UploadedFile = z.infer<typeof UploadedFile>;
+
+/**
+ * deliveries.payload for a commit delivery (source github_pr, or manual from the deliver route): the GitHub webhook's
+ * shape. Reading is lenient like the verify job: a missing or non-string text field reads as "", an empty base_sha
+ * as null; sha and clone_url are required.
+ */
+export const CommitPayload = z.object({
+  sha: z.string().min(1),
+  clone_url: z.string().min(1),
+  title: z.string().catch(""),
+  body: z.string().catch(""),
+  branch: z.string().catch(""),
+  /** "owner/name" from the webhook, the repository URL from the deliver route. */
+  repo: z.string().optional().catch(undefined),
+  pr_number: z.number().int().optional().catch(undefined),
+  /** The pull request's base commit (webhook) or the milestone's funding-time head (deliver route). */
+  base_sha: z.string().min(1).nullable().catch(null),
+});
+export type CommitPayload = z.output<typeof CommitPayload>;
 
 /** deliveries.payload for source "upload". */
 export const UploadPayload = z.object({ files: z.array(UploadedFile).min(1).max(10) });
@@ -147,6 +175,31 @@ export const PolicyDecision = z.object({
   reason: z.string(),
 });
 export type PolicyDecision = z.infer<typeof PolicyDecision>;
+
+/** milestones.decision: the policy decision plus the delivery it was made for (written by the verify job). */
+export const StoredDecision = PolicyDecision.extend({ deliveryId: z.string().min(1) });
+export type StoredDecision = z.infer<typeof StoredDecision>;
+
+/** The delivery a stored decision was made for; null when the decision is missing or names none (legacy, empty). */
+export function decisionDeliveryId(decision: unknown): string | null {
+  if (!decision || typeof decision !== "object") return null;
+  const v = (decision as Record<string, unknown>).deliveryId;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * Descriptions of the required criteria whose verdict status is not "pass"; a criterion the verdict does not mention
+ * counts as not passed. `verdict` is the raw deliveries.verdict JSON (anything else reads as an empty verdict). The
+ * review route refuses approve / confirm_partial and the release job skips while this is non-empty (F9).
+ */
+export function requiredNotPassed(verdict: unknown, criteria: ReadonlyArray<Pick<CriterionSpec, "id" | "required" | "description">>): string[] {
+  const rows = verdict && typeof verdict === "object" ? (verdict as { criteria?: unknown }).criteria : undefined;
+  const status = new Map<string, unknown>();
+  if (Array.isArray(rows)) {
+    for (const r of rows) if (r && typeof r === "object") status.set(String((r as Record<string, unknown>).criterion_id), (r as Record<string, unknown>).status);
+  }
+  return criteria.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
+}
 
 // ---------- Jobs and events ----------
 export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute"]);

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ actor: { userId: "usr_freelancer", role: "freelancer" }, enqueued: [] as unknown[], db: null as unknown }));
-vi.mock("@/lib/session", () => ({ getActor: async () => state.actor }));
+vi.mock("@/lib/session", async (orig) => ({ ...(await orig<typeof import("@/lib/session")>()), getActor: async () => state.actor }));
 vi.mock("@/lib/paypal", () => ({ paypal: () => { throw new Error("no PayPal in this test"); } }));
 vi.mock("@/lib/db", () => ({ getDb: () => state.db }));
 vi.mock("@milestone/core", async (orig) => ({

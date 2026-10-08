@@ -4,14 +4,20 @@ import { useSyncExternalStore } from "react";
 import { formatCountdown } from "@/lib/format";
 import { cx } from "./cx";
 
-// One shared one-second clock. The server snapshot is 0, so the first paint shows the full ring with "--:--" and the
-// client fills in the real time right after hydration (no mismatch).
 function subscribe(cb: () => void) {
   const id = setInterval(cb, 1000);
   return () => clearInterval(id);
 }
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const serverNow = () => 0;
+
+/**
+ * A one-second clock: the current time in whole epoch seconds. The server snapshot is 0, so the first paint makes no
+ * time claims (the ring shows "--:--") and the client fills in the real time right after hydration (no mismatch).
+ */
+export function useSecondClock(): number {
+  return useSyncExternalStore(subscribe, nowSeconds, serverNow);
+}
 
 export interface CountdownRingProps {
   /** When the window closes. */
@@ -33,7 +39,7 @@ const r2dp = (n: number) => Math.round(n * 100) / 100;
 
 /** The review window as an instrument dial: a teal arc that drains as time runs out, the time left in mono at its centre. */
 export function CountdownRing({ endsAt, totalSeconds, size = 124, label = "review window", closedLabel = "window closed", className }: CountdownRingProps) {
-  const now = useSyncExternalStore(subscribe, nowSeconds, serverNow);
+  const now = useSecondClock();
   const end = Math.floor(new Date(endsAt).getTime() / 1000);
   const known = now > 0;
   const remaining = known ? Math.max(0, end - now) : totalSeconds;

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui";
+import { postJson, type JsonReply } from "@/lib/api-client";
 
 // Minimal local types for the PayPal JS SDK v6 surface we use. Kept local (not a global Window
 // augmentation) so other components can type window.paypal their own way.
@@ -64,7 +65,12 @@ function loadSdk(src: string): Promise<PayPalNamespace> {
 
 async function errorText(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
-  return body?.error ?? `${res.status} ${res.statusText}`;
+  return replyError({ body, status: res.status, statusText: res.statusText });
+}
+
+/** The route's error, or "<status> <status text>". */
+function replyError(r: Pick<JsonReply<unknown>, "body" | "status" | "statusText">): string {
+  return typeof r.body?.error === "string" ? r.body.error : `${r.status} ${r.statusText}`;
 }
 
 function getInstance(env: PayPalEnv): Promise<PayPalSdkInstance> {
@@ -211,20 +217,15 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
   }, []);
 
   async function createOrder(): Promise<{ orderId: string }> {
-    const res = await fetch(`/api/milestones/${milestoneId}/order`, { method: "POST" });
-    if (!res.ok) throw new Error(await errorText(res));
-    const { orderId } = (await res.json()) as { orderId: string };
-    return { orderId };
+    const res = await postJson<{ orderId: string }>(`/api/milestones/${milestoneId}/order`);
+    if (!res.ok || !res.body) throw new Error(replyError(res));
+    return { orderId: res.body.orderId };
   }
 
   /** Captures the approved order; resolves to the HTTP status (202 = PayPal still processing). */
   async function capture(orderId: string): Promise<number> {
-    const res = await fetch(`/api/milestones/${milestoneId}/capture`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId }),
-    });
-    if (!res.ok) throw new Error(await errorText(res));
+    const res = await postJson(`/api/milestones/${milestoneId}/capture`, { orderId });
+    if (!res.ok) throw new Error(replyError(res));
     return res.status;
   }
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ import {
   paypalMode,
   resetSimulator,
   simulatedFetch,
+  simulatedOrder,
 } from "../src/paypal/simulated.ts";
 import { PayPalClient, PayPalError } from "../src/paypal/client.ts";
 import { approveLink, createOrder, getOrder } from "../src/paypal/orders.ts";
@@ -287,6 +288,16 @@ describe("persistence", () => {
     configureSimulator({ stateFile });
     await createPayout(client(), { requestId: "rid-x", senderBatchId: "rid-x", items: [{ receiverEmail: "f@example.com", amountMinor: 100, currency: "USD", note: "n", senderItemId: "ms_x:freelancer" }] });
     await vi.waitFor(() => expect(eventsOf("PAYMENT.PAYOUTS-ITEM.FAILED")).toHaveLength(1));
+  });
+
+  it("reads never rewrite the state file", async () => {
+    const c = client();
+    const order = await createOrder(c, { amountMinor: 900, currency: "USD", referenceId: "ms_r1", returnUrl: "x", cancelUrl: "y" });
+    const before = statSync(stateFile, { bigint: true });
+    expect((await getOrder(c, order.id)).status).toBe("CREATED");
+    expect(simulatedOrder(order.id)?.status).toBe("CREATED");
+    const after = statSync(stateFile, { bigint: true });
+    expect([after.ino, after.mtimeNs]).toEqual([before.ino, before.mtimeNs]);
   });
 
   it("concurrent calls do not lose writes", async () => {

@@ -1,6 +1,5 @@
-// Pure and safe on both sides: which milestones the contract page keeps polling. Server (the page) and client
-// (LiveRefresh) must agree, so the rule lives here and not in either component.
-import type { MilestoneSnapshot } from "@/app/api/milestones/[id]/status/snapshot";
+// Pure and safe on both sides: whether a delivery is still waiting for its verdict. The status snapshot counts such a
+// milestone as live, and the deliver form shows "waiting for the verifier" instead of asking for another delivery.
 
 /**
  * How long a delivery without a verdict keeps its milestone live. The worker usually picks a delivery up within seconds
@@ -22,9 +21,4 @@ export function awaitingVerdict(
   const at = typeof delivery.receivedAt === "string" ? Date.parse(delivery.receivedAt) : delivery.receivedAt.getTime();
   if (!Number.isFinite(at)) return false;
   return now - at < AWAITING_VERDICT_MS;
-}
-
-/** Still worth polling: the server's own rule (a live status, a PayPal operation in flight) or a delivery awaiting its verdict. */
-export function isLiveSnapshot(s: Pick<MilestoneSnapshot, "live" | "delivery">, now: number = Date.now()): boolean {
-  return s.live || awaitingVerdict(s.delivery, now);
 }

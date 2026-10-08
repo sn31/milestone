@@ -1,31 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { PayPalError, applyReviewWindow } from "@milestone/money";
-import type { PolicyDecision } from "@milestone/core";
+import { PayPalError, advanceRepayment, applyReviewWindow } from "@milestone/money";
+import { decisionDeliveryId, requiredNotPassed, type PolicyDecision } from "@milestone/core";
 import {
-  advanceRepayment,
   allocateRepayment,
   canHold,
-  clientOutcome,
-  decisionDeliveryId,
-  isLastAttempt,
   itemOutcomes,
-  LEASE_MS,
-  leaseState,
   itemReversals,
   operatorSummary,
   parseClaim,
-  parseDecision,
-  payoutPlan,
   payoutShares,
-  paypalFailure,
-  refundPlan,
-  releaseGate,
-  requiredNotPassed,
-  reviewWindowState,
-  staleReason,
   type OpView,
   type ReleaseClaim,
-} from "../src/jobs/release.ts";
+} from "../src/jobs/claim.ts";
+import { clientOutcome, leaseState, netDues, parseDecision, payoutPlan, refundPlan, releaseGate, reviewWindowState, staleReason, type OpenDue } from "../src/jobs/release.ts";
+import { LEASE_MS, isLastAttempt, paypalFailure } from "../src/jobs/retry.ts";
 
 const release: PolicyDecision = { action: "release", amountMinor: 50_000, ruleIds: ["P6"], reason: "all passed" };
 const partial: PolicyDecision = { action: "partial", amountMinor: 30_000, ruleIds: ["P5"], reason: "2 of 3" };
@@ -77,12 +65,12 @@ describe("advanceRepayment", () => {
   const base = { principalMinor: 40_000, feeBpsPerDay: 10, fundedAt: new Date("2026-10-10T00:00:00Z") };
 
   it("uses the quoted fee from the offer", () => {
-    expect(advanceRepayment({ ...base, offer: { expectedFeeMinor: 280 } }, now)).toEqual({ principalMinor: 40_000, feeMinor: 280 });
+    expect(advanceRepayment({ ...base, offer: { expectedFeeMinor: 280 } }, now)).toMatchObject({ principalMinor: 40_000, feeMinor: 280 });
   });
 
   it("accrues the fee from fundedAt to the decision when the offer has no quote", () => {
     // 7.5 days rounds up to 8: 40000 * 10bps * 8 = 320
-    expect(advanceRepayment({ ...base, offer: {} }, now)).toEqual({ principalMinor: 40_000, feeMinor: 320 });
+    expect(advanceRepayment({ ...base, offer: {} }, now)).toMatchObject({ principalMinor: 40_000, feeMinor: 320 });
   });
 
   it("charges at least one day and is deterministic without dates", () => {
@@ -222,6 +210,9 @@ describe("release claims", () => {
     freelancerEmail: "f@x.test",
     partnerEmail: "p@x.test",
     shares: { partnerShareMinor: 10_000, freelancerShareMinor: 20_000 },
+    advances: [{ advanceId: "a1", milestoneId: "m1", principalMinor: 10_000, feeMinor: 0 }],
+    jobId: "job-1",
+    claimedAt: "2026-10-17T12:00:00.000Z",
   };
   it("round-trips through the op's request JSON and rejects junk", () => {
     expect(parseClaim(JSON.parse(JSON.stringify({ claim })))).toEqual(claim);
@@ -229,13 +220,9 @@ describe("release claims", () => {
     expect(parseClaim({ claim: { ...claim, refundMinor: -1 } })).toBeNull();
     expect(parseClaim(null)).toBeNull();
   });
-  it("still reads a legacy claim that carries an attempt number", () => {
-    expect(parseClaim({ claim: { ...claim, attempt: 2 } })).toEqual(claim);
-  });
-  it("keeps the claiming job id and the lease start", () => {
-    const leased = { ...claim, jobId: "job-1", claimedAt: "2026-10-17T12:00:00.000Z" };
-    expect(parseClaim(JSON.parse(JSON.stringify({ claim: leased })))).toEqual(leased);
-    expect(parseClaim({ claim: { ...claim, jobId: 7, claimedAt: "" } })).toEqual(claim);
+  it("requires the claiming job id and the lease start", () => {
+    expect(parseClaim({ claim: { ...claim, jobId: 7 } })).toBeNull();
+    expect(parseClaim({ claim: { ...claim, claimedAt: "" } })).toBeNull();
   });
   it("splits into a payout-only and a refund-only plan", () => {
     const p = payoutPlan("m1", claim);
@@ -261,6 +248,10 @@ const claimFor = (deliveryId: string, over: Partial<ReleaseClaim> = {}): Release
   freelancerEmail: "f@x.test",
   partnerEmail: null,
   shares: { partnerShareMinor: 0, freelancerShareMinor: 10_000 },
+  advances: [],
+  // An hour before `now`: the lease has expired, so any job of the claimed delivery may resume it.
+  jobId: "job-0",
+  claimedAt: "2026-10-17T11:00:00.000Z",
   ...over,
 });
 const payoutOp = (deliveryId: string, status: string, paypalId: string | null, response: unknown = null): OpView => ({ kind: "payout", status, paypalId, request: { claim: claimFor(deliveryId) }, response });
@@ -315,8 +306,6 @@ describe("releaseGate (one payout attempt per milestone)", () => {
     expect(other).toMatchObject({ kind: "in_flight", claim: { jobId: "job-1" } });
     const expired = new Date(now.getTime() - LEASE_MS);
     expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [leased("job-1", expired)] })).toMatchObject({ kind: "resume", takeover: true });
-    // A claim written before leases has no job id: any job of the claimed delivery may resume it.
-    expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [payoutOp("d1", "sent", null)] })).toMatchObject({ kind: "resume", takeover: true });
     // Already answered by PayPal: a skip, whoever holds the lease.
     expect(gate({ jobDeliveryId: "d1", decisionDeliveryId: "d1", jobId: "job-9", ops: [leased("job-1", at, "sent", "B1")] }).kind).toBe("skip");
   });
@@ -378,9 +367,7 @@ describe("leaseState (R7)", () => {
     expect(leaseState({ jobId: "j1", claimedAt }, "j2", t(LEASE_MS))).toBe("expired");
     expect(leaseState({ jobId: "j1", claimedAt }, null, t(1))).toBe("held");
   });
-  it("treats a claim without a lease (written before leases, or junk) as expired", () => {
-    expect(leaseState({}, "j2", t(0))).toBe("expired");
-    expect(leaseState({ jobId: "j1" }, "j2", t(0))).toBe("expired");
+  it("treats an unreadable lease start as expired", () => {
     expect(leaseState({ jobId: "j1", claimedAt: "not a date" }, "j2", t(0))).toBe("expired");
   });
 });
@@ -422,12 +409,64 @@ describe("allocateRepayment", () => {
 });
 
 describe("parseClaim advances", () => {
-  const raw = { deliveryId: "d", action: "release", releaseMinor: 1, refundMinor: 0, currency: "USD", captureId: "c", freelancerEmail: "f", shares: { partnerShareMinor: 1, freelancerShareMinor: 0 } };
+  const raw = { deliveryId: "d", action: "release", releaseMinor: 1, refundMinor: 0, currency: "USD", captureId: "c", freelancerEmail: "f", shares: { partnerShareMinor: 1, freelancerShareMinor: 0 }, jobId: "j", claimedAt: "2026-10-17T12:00:00.000Z" };
   it("keeps the advances a claim repays and drops malformed entries", () => {
     const c = parseClaim({ claim: { ...raw, advances: [{ advanceId: "a1", milestoneId: "m1", principalMinor: 10, feeMinor: 1 }, { advanceId: 5 }] } });
     expect(c?.advances).toEqual([{ advanceId: "a1", milestoneId: "m1", principalMinor: 10, feeMinor: 1 }]);
   });
-  it("leaves advances undefined on a claim written before carry-over", () => {
-    expect(parseClaim({ claim: raw })?.advances).toBeUndefined();
+  it("rejects a claim without an advances list", () => {
+    expect(parseClaim({ claim: raw })).toBeNull();
+  });
+});
+
+describe("netDues (property)", () => {
+  // A small deterministic PRNG (mulberry32), so a failure is reproducible from the printed seed.
+  const rng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const int = (r: () => number, max: number) => Math.floor(r() * (max + 1));
+  const pick = <T,>(r: () => number, xs: readonly T[]): T => xs[int(r, xs.length - 1)]!;
+
+  it("nets in-flight repayments, keeps one partner and currency, and loses nothing", () => {
+    for (let seed = 1; seed <= 500; seed++) {
+      const r = rng(seed);
+      const open: OpenDue[] = Array.from({ length: int(r, 5) }, (_, i) => ({
+        advanceId: `a${i}`,
+        milestoneId: `m${int(r, 2)}`,
+        partnerId: pick(r, ["p1", "p2"]),
+        currency: pick(r, ["USD", "EUR"]),
+        principalMinor: int(r, 5_000),
+        feeMinor: int(r, 300),
+      }));
+      const inFlight = new Map(open.filter(() => r() < 0.4).map((o) => [o.advanceId, int(r, 6_000)] as const));
+      const { partnerId, dues, blocked } = netDues(open, inFlight, "USD");
+      const ctx = `seed ${seed}`;
+
+      const net = (o: OpenDue) => Math.max(0, o.principalMinor + o.feeMinor - (inFlight.get(o.advanceId) ?? 0));
+      const owed = open.filter((o) => net(o) > 0);
+      // Every balance still owed after the in-flight repayments is either due now or blocked, in full, never twice.
+      expect([...dues.map((d) => d.advanceId), ...blocked.map((b) => b.advanceId)].sort(), ctx).toEqual(owed.map((o) => o.advanceId).sort());
+      const sum = dues.reduce((s, d) => s + d.principalMinor + d.feeMinor, 0) + blocked.reduce((s, b) => s + b.remainingMinor, 0);
+      expect(sum, ctx).toBe(owed.reduce((s, o) => s + net(o), 0));
+      for (const d of dues) {
+        const o = open.find((x) => x.advanceId === d.advanceId)!;
+        // In flight pays principal first: a due never exceeds what was open, and has no principal left unless no fee was netted.
+        expect(d.principalMinor, ctx).toBeLessThanOrEqual(o.principalMinor);
+        expect(d.feeMinor, ctx).toBeLessThanOrEqual(o.feeMinor);
+        expect(d.principalMinor + d.feeMinor, ctx).toBeGreaterThan(0);
+        if (d.feeMinor < o.feeMinor) expect(d.principalMinor, ctx).toBe(0);
+        expect(d.milestoneId, ctx).toBe(o.milestoneId);
+        // One payout repays one partner in one currency: the first owed balance's partner, in USD.
+        expect(o.partnerId, ctx).toBe(owed[0]!.partnerId);
+        expect(o.currency, ctx).toBe("USD");
+      }
+      expect(partnerId, ctx).toBe(dues.length > 0 ? owed[0]!.partnerId : null);
+      // Dues keep the payment order of the input.
+      const order = dues.map((d) => open.findIndex((o) => o.advanceId === d.advanceId));
+      expect(order, ctx).toEqual([...order].sort((a, b) => a - b));
+    }
   });
 });

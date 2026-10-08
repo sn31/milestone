@@ -2,10 +2,10 @@ import type { Metadata } from "next";
 import { paypalMode } from "@milestone/money";
 import { DisputeCard } from "@/components/dispute-card";
 import { EmptyState, PageHeader, Panel, Reveal, SectionTitle, Stat } from "@/components/ui";
-import { LiveRefresh } from "@/app/contracts/_components/live-refresh";
+import { LiveRefresh } from "@/components/live-refresh";
 import { getDb } from "@/lib/db";
 import { formatMoney } from "@/lib/format";
-import { ACTOR_NAMES, ROLE_LABELS, getActor } from "@/lib/session";
+import { ACTOR_NAMES, ROLE_LABELS, getActor, isContractFreelancer } from "@/lib/session";
 import { SimulateDispute } from "./_components/simulate-dispute";
 import { isOpen, loadDisputes, planAttachments, type Attachment } from "./_lib";
 
@@ -38,7 +38,7 @@ export default async function DisputesPage() {
       const m = milestoneOf.get(d.milestoneId);
       const c = m ? contractOf.get(m.contractId) : undefined;
       if (!m || !c) return null;
-      const isFreelancer = actor.role === "freelancer" && actor.userId === c.freelancerId;
+      const isFreelancer = isContractFreelancer(actor, c);
       const attachments: Attachment[] = isFreelancer && d.status === "awaiting_response" ? await planAttachments(d.drafted?.pack) : [];
       return { d, m, c, isFreelancer, attachments };
     }),
@@ -74,7 +74,7 @@ export default async function DisputesPage() {
 
   return (
     <main>
-      {live ? <LiveRefresh everyMs={2500} maxMinutes={5} /> : null}
+      {live ? <LiveRefresh mode="page" everyMs={2500} maxMinutes={5} /> : null}
       <PageHeader
         eyebrow={
           <>

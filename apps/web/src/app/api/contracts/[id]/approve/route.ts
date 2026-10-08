@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { audit } from "@milestone/core";
+import { AUDIT_EVENTS, audit } from "@milestone/core";
 import { getDb } from "@/lib/db";
+import { jsonError } from "@/lib/http";
 import { getActor } from "@/lib/session";
 
 /**
@@ -11,11 +12,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const { id } = await ctx.params;
   const actor = await getActor();
   const column = actor.role === "client" ? "client_approved_at" : actor.role === "freelancer" ? "freelancer_approved_at" : null;
-  if (!column) return NextResponse.json({ error: "only the client or freelancer can approve" }, { status: 403 });
+  if (!column) return jsonError("only the client or freelancer can approve", 403);
 
   const db = getDb();
   const exists = await db.$client.query(`select status from contracts where id = $1`, [id]);
-  if (!exists.rows[0]) return NextResponse.json({ error: "contract not found" }, { status: 404 });
+  if (!exists.rows[0]) return jsonError("contract not found", 404);
 
   // Column name comes from the fixed set above. Only the first approval sets the time and writes the audit row.
   const first = await db.$client.query(`update contracts set ${column} = now() where id = $1 and ${column} is null returning id`, [id]);
@@ -27,7 +28,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
        returning id`,
     [id],
   );
-  if (activated.rowCount) await audit(db, { actor: actor.userId, event: "contract.approved", contractId: id });
+  if (activated.rowCount) await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.contractApproved, contractId: id });
 
   return NextResponse.redirect(new URL(`/contracts/${id}`, req.url), 303);
 }

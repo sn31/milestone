@@ -1,9 +1,9 @@
-import { NextResponse } from "next/server";
-import { audit, deliveries, enqueue } from "@milestone/core";
+import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, commitDeliveryId, deliveries, enqueue, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
-import { getActor } from "@/lib/session";
-import { jsonError, loadMilestone } from "../../_shared";
-import { commitDeliveryId, normaliseRepoUrl, resolveRef, validRef } from "./resolve";
+import { json, jsonError } from "@/lib/http";
+import { getActor, isContractFreelancer } from "@/lib/session";
+import { loadMilestone } from "../../_shared";
+import { normaliseRepoUrl, resolveRef, validRef } from "./resolve";
 
 /**
  * Manual repository delivery by the contract's freelancer: { repoUrl, ref, title?, note? }. The ref is resolved to a
@@ -17,8 +17,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const found = await loadMilestone(db, id);
   if (!found) return jsonError("milestone not found", 404);
   const { milestone: m, contract: c } = found;
-  if (actor.role !== "freelancer" || actor.userId !== c.freelancerId) return jsonError("only the contract's freelancer can deliver", 403);
-  if (m.status !== "funded" && m.status !== "held") return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
+  if (!isContractFreelancer(actor, c)) return jsonError("only the contract's freelancer can deliver", 403);
+  if (!DELIVERABLE_STATUSES.has(m.status)) return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
 
   const body = (await req.json().catch(() => null)) as { repoUrl?: unknown; ref?: unknown; title?: unknown; note?: unknown } | null;
   const repoUrl = typeof body?.repoUrl === "string" ? normaliseRepoUrl(body.repoUrl) : null;
@@ -33,6 +33,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const title = typeof body?.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : `Manual delivery of ${ref}`;
   const note = typeof body?.note === "string" ? body.note.slice(0, 10_000) : "";
   const deliveryId = commitDeliveryId(m.id, sha);
+  // The GitHub webhook's shape; base_sha is the tamper check's baseline (the milestone's funding-time head).
+  const payload: CommitPayload = { sha, title, body: note, branch: ref, clone_url: repoUrl, repo: repoUrl, base_sha: m.baselineSha ?? null };
   const inserted = await db
     .insert(deliveries)
     .values({
@@ -40,14 +42,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       milestoneId: m.id,
       source: "manual",
       ref: `${repoUrl}@${ref}`,
-      // The GitHub webhook's shape; base_sha is the tamper check's baseline (the milestone's funding-time head).
-      payload: { sha, title, body: note, branch: ref, clone_url: repoUrl, repo: repoUrl, base_sha: m.baselineSha ?? null },
+      payload,
     })
     .onConflictDoNothing()
     .returning({ id: deliveries.id });
   if (inserted.length) {
-    await audit(db, { actor: actor.userId, event: "delivery.manual", milestoneId: m.id, contractId: c.id, detail: { deliveryId, repoUrl, ref, sha } });
+    await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.deliveryManual, milestoneId: m.id, contractId: c.id, detail: { deliveryId, repoUrl, ref, sha } });
   }
   await enqueue("verify", m.id, { deliveryId }, { dedupe: sha });
-  return NextResponse.json({ ok: true, deliveryId, sha, duplicate: inserted.length === 0 }, { headers: { "Cache-Control": "no-store" } });
+  return json({ ok: true, deliveryId, sha, duplicate: inserted.length === 0 });
 }

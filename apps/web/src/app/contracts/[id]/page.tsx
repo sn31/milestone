@@ -1,13 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { cache } from "react";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { AUDIT_EVENTS, RELEASABLE_STATUSES, asRecord, asString, decisionDeliveryId, deliveries, reviewWindowSeconds } from "@milestone/core";
 import { getDb } from "@/lib/db";
-import { ACTOR_NAMES, getActor } from "@/lib/session";
+import { ACTOR_NAMES, getActor, isContractClient, isContractFreelancer } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
 import { MilestoneActions } from "@/components/milestone-actions";
 import { LiveRefresh } from "@/components/live-refresh";
-import { awaitingVerdict } from "@/components/live-rules";
-import { LIVE_STATUSES, loadSnapshot, pendingOpMilestones } from "@/app/api/milestones/[id]/status/snapshot";
+import { loadSnapshots } from "@/app/api/milestones/[id]/status/snapshot";
 import {
   Button,
   EmptyState,
@@ -33,11 +35,16 @@ import { ApprovalStrip } from "../_components/approval-strip";
 
 export const dynamic = "force-dynamic";
 
+/** The contract row, once per request: generateMetadata and the page share it. */
+const loadContract = cache((id: string) => getDb().query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, id) }));
+
 export async function generateMetadata({ params }: PageProps<"/contracts/[id]">): Promise<Metadata> {
   const { id } = await params;
-  const contract = await getDb().query.contracts.findFirst({ columns: { title: true }, where: (t, { eq }) => eq(t.id, id) });
+  const contract = await loadContract(id);
   return { title: contract?.title ?? "Contract not found" };
 }
+
+type DeliveryRow = typeof deliveries.$inferSelect;
 
 /** Where a milestone's station sits on the contract rail: paid out is behind us, unfunded is ahead, anything in escrow is here. */
 function phaseOf(status: string): Phase {
@@ -49,24 +56,45 @@ function phaseOf(status: string): Phase {
 export default async function ContractPage({ params }: PageProps<"/contracts/[id]">) {
   const { id } = await params;
   const db = getDb();
-  const contract = await db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, id) });
-  if (!contract) notFound();
-  const actor = await getActor();
-  const [ms, people, activity] = await Promise.all([
+  const [contract, actor, ms, activity] = await Promise.all([
+    loadContract(id),
+    getActor(),
     db.query.milestones.findMany({ where: (t, { eq }) => eq(t.contractId, id), orderBy: (t, { asc }) => [asc(t.seq)] }),
-    db.query.users.findMany({ columns: { id: true, name: true }, where: (t, { inArray }) => inArray(t.id, [contract.clientId, contract.freelancerId]) }),
     db.query.auditLog.findMany({ where: (t, { eq }) => eq(t.contractId, id), orderBy: (t, { desc }) => [desc(t.createdAt)], limit: 12 }),
   ]);
+  if (!contract) notFound();
   const ids = ms.map((m) => m.id);
   const heldIds = ms.filter((m) => m.status === "held").map((m) => m.id);
-  const [crit, dels, inFlight, flagged] = await Promise.all([
+  // A milestone awaiting the client is checked against the delivery its decision was made for, which may be older.
+  const decidedIds = ms.filter((m) => RELEASABLE_STATUSES.has(m.status)).flatMap((m) => decisionDeliveryId(m.decision) ?? []);
+  const [people, crit, dels, snapshots, flagged] = await Promise.all([
+    db.query.users.findMany({ columns: { id: true, name: true }, where: (t, { inArray }) => inArray(t.id, [contract.clientId, contract.freelancerId]) }),
     ids.length ? db.query.criteria.findMany({ where: (t, { inArray }) => inArray(t.milestoneId, ids) }) : [],
-    ids.length ? db.query.deliveries.findMany({ where: (t, { inArray }) => inArray(t.milestoneId, ids), orderBy: (t, { desc }) => [desc(t.receivedAt)] }) : [],
-    pendingOpMilestones(db, ids),
+    // Each milestone's latest delivery (DISTINCT ON) and the decided ones, in one query.
+    ids.length
+      ? db
+          .select()
+          .from(deliveries)
+          .where(
+            or(
+              inArray(
+                deliveries.id,
+                db
+                  .selectDistinctOn([deliveries.milestoneId], { id: deliveries.id })
+                  .from(deliveries)
+                  .where(inArray(deliveries.milestoneId, ids))
+                  .orderBy(deliveries.milestoneId, desc(deliveries.receivedAt), desc(deliveries.id)),
+              ),
+              decidedIds.length ? inArray(deliveries.id, decidedIds) : undefined,
+            ),
+          )
+      : [],
+    // What can change on its own, as the status poll reports it; the server's own rule says which milestones are live.
+    loadSnapshots(db, ids),
     heldIds.length
       ? db.query.auditLog.findMany({
           columns: { milestoneId: true, detail: true },
-          where: (t, { and, eq, inArray }) => and(inArray(t.milestoneId, heldIds), eq(t.event, "milestone.needs_operator")),
+          where: (t) => and(inArray(t.milestoneId, heldIds), eq(t.event, AUDIT_EVENTS.needsOperator)),
           orderBy: (t, { desc }) => [desc(t.createdAt)],
         })
       : [],
@@ -75,18 +103,20 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
   const operatorOf = new Map<string, { reason: string; failure: string | null }>();
   for (const f of flagged) {
     if (!f.milestoneId || operatorOf.has(f.milestoneId)) continue;
-    const d = (f.detail ?? {}) as { reason?: unknown; failed?: unknown };
-    const failed = d.failed && typeof d.failed === "object" ? Object.values(d.failed as Record<string, unknown>).filter((v): v is string => typeof v === "string") : [];
-    operatorOf.set(f.milestoneId, { reason: typeof d.reason === "string" && d.reason ? d.reason : "A payment for this milestone went wrong", failure: failed.length ? failed.join("; ") : null });
+    const d = asRecord(f.detail);
+    const failed = Object.values(asRecord(d.failed)).filter((v): v is string => typeof v === "string");
+    operatorOf.set(f.milestoneId, { reason: asString(d.reason) ?? "A payment for this milestone went wrong", failure: failed.length ? failed.join("; ") : null });
   }
-  const latest = new Map<string, (typeof dels)[number]>();
-  for (const d of dels) if (!latest.has(d.milestoneId)) latest.set(d.milestoneId, d);
+  const byId = new Map(dels.map((d) => [d.id, d]));
+  const latest = new Map<string, DeliveryRow>();
+  for (const d of dels) {
+    const cur = latest.get(d.milestoneId);
+    if (!cur || d.receivedAt > cur.receivedAt || (d.receivedAt.getTime() === cur.receivedAt.getTime() && d.id > cur.id)) latest.set(d.milestoneId, d);
+  }
   // Milestones that move without anyone on this page acting (the agent, the review window, the client elsewhere, a
   // PayPal webhook, a delivery the worker has not picked up yet): the page polls them and re-renders when one changes.
-  // A delivery awaiting its verdict counts whatever the status: right after Deliver the milestone is still funded (or
-  // held) until the worker moves it to verifying.
-  const liveIds = ms.filter((m) => LIVE_STATUSES.has(m.status) || inFlight.has(m.id) || awaitingVerdict(latest.get(m.id))).map((m) => m.id);
-  const live = new Map((await Promise.all(liveIds.map((mid) => loadSnapshot(db, mid)))).flatMap((s) => (s ? [[s.id, s] as const] : [])));
+  const live = new Map([...snapshots].filter(([, s]) => s.live));
+  const windowSeconds = reviewWindowSeconds(contract.reviewWindowSeconds);
 
   const name = (uid: string) => people.find((p) => p.id === uid)?.name ?? ACTOR_NAMES[uid] ?? uid;
   const names = { client: name(contract.clientId), freelancer: name(contract.freelancerId) };
@@ -99,8 +129,7 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
   const releasedCount = ms.filter((m) => PAID_STATES.has(m.status)).length;
 
   const myApproval = actor.role === "client" ? contract.clientApprovedAt : actor.role === "freelancer" ? contract.freelancerApprovedAt : null;
-  const isParty =
-    (actor.role === "client" && actor.userId === contract.clientId) || (actor.role === "freelancer" && actor.userId === contract.freelancerId);
+  const isParty = isContractClient(actor, contract) || isContractFreelancer(actor, contract);
   const cur = contract.currency;
   const { clientApprovedAt: ca, freelancerApprovedAt: fa } = contract;
   // Both signatures, dated by the later one: the moment funding opened.
@@ -233,6 +262,8 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
                     actor={actor}
                     crit={crit.filter((c) => c.milestoneId === m.id)}
                     delivery={latest.get(m.id) ?? null}
+                    decided={byId.get(decisionDeliveryId(m.decision) ?? "") ?? null}
+                    windowSeconds={windowSeconds}
                     live={live.get(m.id) ?? null}
                     operator={operatorOf.get(m.id) ?? null}
                     names={names}

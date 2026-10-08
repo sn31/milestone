@@ -18,15 +18,21 @@
  * commit the tamper check used: file list with +/- counts and the start of the patch), evd_tree (the delivered
  * commit's file list) and evd_commit (commit message, PR title and body; untrusted text). The judge cites these.
  *
- * Every evidence summary, log and error message has the throwaway workdir prefix stripped: both parties see the
- * summaries, and a worker temp path (/private/var/folders/...) means nothing to them.
+ * Every evidence summary, log and error message has the throwaway workdir prefix stripped (stripRoots, applied once
+ * through scrubEvidence): both parties see the summaries, and a worker temp path (/private/var/folders/...) means
+ * nothing to them.
+ *
+ * npm's cache (npm_config_cache) is a persistent worker directory, MILESTONE_NPM_CACHE or <repo>/var/npm-cache, so
+ * setup does not download every dependency again for each verification. HOME stays the throwaway workdir.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { access, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { CriterionSpec, EvidenceSummary } from "@milestone/core";
+import { repoPath } from "./paths.ts";
 
 export interface DeterministicInput {
   repoUrl: string;
@@ -56,8 +62,16 @@ export interface DeterministicOutput {
   baseline: string | null;
 }
 
-/** No secrets; lifecycle scripts (preinstall, pretest, ...) never run, for setup and criteria commands alike. */
-const CLEAN_ENV = { PATH: process.env.PATH ?? "", CI: "1", NODE_ENV: "test", HOME: "", npm_config_ignore_scripts: "true" };
+/** npm's cache for setup commands: MILESTONE_NPM_CACHE (absolute, or relative to the repo root), default <repo>/var/npm-cache. */
+export function npmCacheDir(env: string | undefined = process.env.MILESTONE_NPM_CACHE, cwd = process.cwd()): string {
+  return repoPath(env, "var/npm-cache", cwd);
+}
+
+/**
+ * No secrets; lifecycle scripts (preinstall, pretest, ...) never run, for setup and criteria commands alike. HOME is
+ * set to the workdir per run; the npm cache persists across runs (see the header).
+ */
+const CLEAN_ENV = { PATH: process.env.PATH ?? "", CI: "1", NODE_ENV: "test", HOME: "", npm_config_ignore_scripts: "true", npm_config_cache: npmCacheDir() };
 const COMMIT_ID = /^[0-9a-f]{7,64}$/i;
 
 export const TAMPER_EVIDENCE_ID = "evd_tamper_check";
@@ -274,7 +288,10 @@ export async function removeCommittedDependencies(root: string): Promise<string[
 
 // ---------- Context evidence for judgment criteria ----------
 
-const cap = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}\n[truncated at ${max} characters]` : s);
+/** `text` cut to `max` characters, with a note saying so. */
+export function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n[truncated at ${max} characters]` : text;
+}
 
 /** Parses `git diff --numstat -z --no-renames` output ("added\tdeleted\tpath\0"; "-" counts for binary files). */
 export function parseNumstat(out: string): Array<{ path: string; added: number | null; deleted: number | null }> {
@@ -305,9 +322,9 @@ export function treeSummary(paths: string[]): string {
 /** The evd_commit summary: commit message and pull request text, each capped; null when there is none. */
 export function commitSummary(message: string, pr: DeterministicInput["pullRequest"]): string | null {
   const parts: string[] = [];
-  if (message.trim()) parts.push(`commit message:\n${cap(message.trim(), COMMIT_TEXT_MAX)}`);
-  if (pr?.title?.trim()) parts.push(`delivery title: ${cap(pr.title.trim(), 500)}`);
-  if (pr?.body?.trim()) parts.push(`delivery description:\n${cap(pr.body.trim(), COMMIT_TEXT_MAX)}`);
+  if (message.trim()) parts.push(`commit message:\n${truncate(message.trim(), COMMIT_TEXT_MAX)}`);
+  if (pr?.title?.trim()) parts.push(`delivery title: ${truncate(pr.title.trim(), 500)}`);
+  if (pr?.body?.trim()) parts.push(`delivery description:\n${truncate(pr.body.trim(), COMMIT_TEXT_MAX)}`);
   return parts.length ? parts.join("\n\n") : null;
 }
 
@@ -339,22 +356,38 @@ async function contextEvidence(workdir: string, head: string, env: Record<string
   return out;
 }
 
-/** Strips the workdir prefix (and its realpath, e.g. /private/var/... for /var/...) from text both parties may see. */
-export function stripWorkdir(text: string, roots: string[]): string {
+/**
+ * Strips worker directories (the checkout, UPLOAD_DIR) from text both parties see, realpaths included
+ * (/var/folders/... is /private/var/folders/... on macOS). A path under a root becomes relative to it; the root itself
+ * becomes ".". Roots are replaced longest first: "/private/var/x" contains "/var/x".
+ */
+export function stripRoots(text: string, roots: string[]): string {
+  const all = new Set<string>();
+  for (const r of roots) {
+    if (!r) continue;
+    const clean = r.replace(/\/+$/, "");
+    all.add(clean);
+    try { all.add(realpathSync(clean)); } catch { /* gone already */ }
+  }
   let out = text;
-  // Longest first: "/private/var/x" contains "/var/x".
-  for (const root of [...new Set(roots.filter(Boolean))].sort((a, b) => b.length - a.length)) {
-    out = out.split(`${root}/`).join("").split(root).join(".");
+  for (const root of [...all].filter((r) => r.length > 1).sort((a, b) => b.length - a.length)) {
+    out = out.split(`${root}${sep}`).join("").split(root).join(".");
   }
   return out;
+}
+
+/** Evidence items with worker directories stripped from their summaries: the one boundary both stages scrub at. */
+export function scrubEvidence(items: EvidenceSummary[], roots: string[]): EvidenceSummary[] {
+  return items.map((e) => ({ ...e, summary: stripRoots(e.summary, roots) }));
 }
 
 // ---------- Stage ----------
 
 export async function runDeterministicStage(input: DeterministicInput): Promise<DeterministicOutput> {
   const workdir = await mkdtemp(join(tmpdir(), "milestone-verify-"));
+  // The realpath is taken now: the error path below removes the workdir before scrubbing.
   const roots = [workdir, await realpath(workdir).catch(() => workdir)];
-  const scrub = (s: string) => stripWorkdir(s, roots);
+  const scrub = (s: string) => stripRoots(s, roots);
   const env = { ...CLEAN_ENV, HOME: workdir };
   const logs: Record<string, string> = {};
   const evidence: EvidenceSummary[] = [];
@@ -421,7 +454,7 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       }
     }
     return {
-      evidence: evidence.map((e) => ({ ...e, summary: scrub(e.summary) })),
+      evidence: scrubEvidence(evidence, roots),
       logs: Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, scrub(v)])),
       workdir,
       tampering: tampering.map(scrub),
@@ -434,8 +467,9 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
   }
 }
 
-export function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
+/** Hex sha256 of text or bytes. */
+export function sha256(data: string | Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
 }
 function tail(s: string, n = 20): string {
   return s.split("\n").slice(-n).join("\n");

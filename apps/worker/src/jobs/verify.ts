@@ -1,37 +1,41 @@
 import { rm } from "node:fs/promises";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Job } from "pg-boss";
-import { audit, deliveries, enqueue, milestones, transition, UploadPayload, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
+import {
+  AUDIT_EVENTS,
+  CommitPayload,
+  UploadPayload,
+  VERIFIABLE_STATUSES,
+  VerdictOutput,
+  VerdictResult,
+  audit,
+  decisionDeliveryId,
+  deliveries,
+  enqueue,
+  hasAudit,
+  loadDeliveryContext,
+  milestones,
+  reviewWindowSeconds,
+  statusForDecision,
+  transition,
+  type CriterionSpec,
+  type Db,
+  type EvidenceSummary,
+  type MilestoneStatus,
+  type StoredDecision,
+} from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
+import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, safePath, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
-import { createEvidenceReader, createUploadEvidenceReader, git, safePath, scrubVerdictPaths } from "../lib/evidence.ts";
-import { isFlaggedForOperator } from "./release.ts";
-
-/** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
-export type StoredDecision = PolicyDecision & { deliveryId: string };
-
-/** The review window can be shortened for demos, never skipped. */
-export const MIN_REVIEW_WINDOW_SECONDS = 30;
-
-const VERIFIABLE: readonly MilestoneStatus[] = ["funded", "held", "verifying"];
-
-interface DeliveryPayload {
-  sha: string;
-  title: string;
-  body: string;
-  branch: string;
-  clone_url: string;
-  /** The pull request's base commit when the delivery was merged (GitHub webhook), if recorded. */
-  base_sha: string | null;
-}
+import { createEvidenceReader, createUploadEvidenceReader, git, scrubVerdictPaths } from "../lib/evidence.ts";
 
 /**
  * One setup step; the deterministic stage clones the repo itself, so the lockfile check runs in the checkout.
  * Lifecycle scripts never run (--ignore-scripts here, npm_config_ignore_scripts in the stage's environment).
+ * --prefer-offline reuses the stage's npm cache instead of revalidating every package.
  */
-const SETUP = [["sh", "-c", "if [ -f package-lock.json ]; then npm ci --ignore-scripts; elif [ -f package.json ]; then npm install --ignore-scripts; fi"]];
+const SETUP = [["sh", "-c", "if [ -f package-lock.json ]; then npm ci --prefer-offline --ignore-scripts; elif [ -f package.json ]; then npm install --prefer-offline --ignore-scripts; fi"]];
 
 function uploadPayloadOf(raw: Record<string, unknown> | null): UploadPayload {
   const parsed = UploadPayload.safeParse(raw ?? {});
@@ -40,23 +44,10 @@ function uploadPayloadOf(raw: Record<string, unknown> | null): UploadPayload {
 }
 
 /** Commit deliveries (GitHub PR, manual) share one payload shape: clone_url + sha. */
-function payloadOf(raw: Record<string, unknown> | null): DeliveryPayload {
-  const p = raw ?? {};
-  const str = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
-  const out = { sha: str("sha"), title: str("title"), body: str("body"), branch: str("branch"), clone_url: str("clone_url"), base_sha: str("base_sha") || null };
-  if (!out.sha || !out.clone_url) throw new Error("delivery payload has no sha or clone_url");
-  return out;
-}
-
-export function reviewWindowSeconds(contractWindow: number, override = process.env.REVIEW_WINDOW_SECONDS): number {
-  const env = Number(override);
-  const chosen = override !== undefined && override.trim() !== "" && Number.isFinite(env) ? Math.floor(env) : contractWindow;
-  return Math.max(MIN_REVIEW_WINDOW_SECONDS, Number.isFinite(chosen) ? chosen : MIN_REVIEW_WINDOW_SECONDS);
-}
-
-function decisionDeliveryId(decision: unknown): string | null {
-  const id = decision && typeof decision === "object" ? (decision as { deliveryId?: unknown }).deliveryId : undefined;
-  return typeof id === "string" ? id : null;
+function commitPayloadOf(raw: Record<string, unknown> | null): CommitPayload {
+  const parsed = CommitPayload.safeParse(raw ?? {});
+  if (!parsed.success) throw new Error("delivery payload has no sha or clone_url");
+  return parsed.data;
 }
 
 /**
@@ -69,12 +60,12 @@ async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): 
   return db.transaction(async (tx) => {
     const [row] = await tx.select({ status: milestones.status, contractId: milestones.contractId }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!row) throw new Error(`milestone ${milestoneId} not found`);
-    if (!VERIFIABLE.includes(row.status)) return row.status;
-    if (await isFlaggedForOperator(tx, milestoneId)) {
-      await audit(tx as unknown as Db, { actor: "system", event: "verify.refused_needs_operator", milestoneId, contractId: row.contractId, detail: { deliveryId, status: row.status } });
+    if (!VERIFIABLE_STATUSES.has(row.status)) return row.status;
+    if (await hasAudit(tx, { event: AUDIT_EVENTS.needsOperator, milestoneId })) {
+      await audit(tx, { actor: "system", event: AUDIT_EVENTS.verifyRefusedNeedsOperator, milestoneId, contractId: row.contractId, detail: { deliveryId, status: row.status } });
       return row.status;
     }
-    await transition(tx as unknown as Db, milestoneId, "verifying", { actor: "system", event: "milestone.verifying", detail: { deliveryId } });
+    await transition(tx, milestoneId, "verifying", { actor: "system", event: AUDIT_EVENTS.milestoneVerifying, detail: { deliveryId } });
     await tx.update(milestones).set({ clientResponse: null, reviewEndsAt: null, decision: null, decidedAt: null }).where(eq(milestones.id, milestoneId));
     return null;
   });
@@ -84,14 +75,14 @@ async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): 
  * The tamper check's baseline: the default branch head recorded at funding, else the PR's base commit. With
  * neither, the stage falls back to the first parent and says so in its evidence.
  */
-export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pick<DeliveryPayload, "base_sha">): { baselineSha: string; baselineSource: string } | null {
+export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pick<CommitPayload, "base_sha">): { baselineSha: string; baselineSource: string } | null {
   if (milestoneBaselineSha) return { baselineSha: milestoneBaselineSha, baselineSource: "funding-time default branch" };
   if (payload.base_sha) return { baselineSha: payload.base_sha, baselineSource: "pull request base" };
   return null;
 }
 
 /** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
-async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
+async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
   try {
     return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, pullRequest: { title: payload.title, body: payload.body }, ...tamperBaseline(baselineSha, payload) });
   } catch (e) {
@@ -125,7 +116,7 @@ async function conclude(deliveryId: string, milestone: Milestone, criteria: Crit
   return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
 }
 
-async function produceVerdict(deliveryId: string, milestone: Milestone, payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null) {
+async function produceVerdict(deliveryId: string, milestone: Milestone, payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null) {
   const stage = await deterministic(payload, criteria, baselineSha);
   try {
     const commitMessage = stage.workdir ? await git(stage.workdir, ["log", "-1", "--format=%B", payload.sha]).catch(() => "") : "";
@@ -165,16 +156,144 @@ async function produceUploadVerdict(deliveryId: string, milestone: Milestone, pa
   return scrubVerdictPaths(v, [root]);
 }
 
-async function loadAll(db: Db, deliveryId: string) {
-  const delivery = await db.query.deliveries.findFirst({ where: (d, { eq }) => eq(d.id, deliveryId) });
-  if (!delivery) throw new Error(`delivery ${deliveryId} not found`);
-  const milestone = await db.query.milestones.findFirst({ where: (m, { eq }) => eq(m.id, delivery.milestoneId) });
-  if (!milestone) throw new Error(`milestone ${delivery.milestoneId} not found`);
-  const contract = await db.query.contracts.findFirst({ where: (c, { eq }) => eq(c.id, milestone.contractId) });
-  if (!contract) throw new Error(`contract ${milestone.contractId} not found`);
-  const rows = await db.query.criteria.findMany({ where: (c, { eq }) => eq(c.milestoneId, milestone.id), orderBy: (c, { asc }) => asc(c.id) });
-  const criteria: CriterionSpec[] = rows.map((r) => ({ id: r.id, kind: r.kind, description: r.description, spec: r.spec, required: r.required }));
-  return { delivery, milestone, contract, criteria };
+type DeliveryContext = NonNullable<Awaited<ReturnType<typeof loadDeliveryContext>>>;
+
+/**
+ * Step 1: the verdict, once per delivery. Enters verifying, runs the stage for the delivery's source (upload files, or
+ * a commit to clone) and stores the verdict; returns the stored one. null when the milestone cannot be verified now.
+ */
+async function ensureVerdict(db: Db, ctx: DeliveryContext): Promise<{ verdict: VerdictOutput; result: VerdictResult } | null> {
+  const { delivery, milestone, contract, criteria } = ctx;
+  const deliveryId = delivery.id;
+  // Upload deliveries carry files; everything else (GitHub PR, manual) a commit to clone. A malformed payload fails the job.
+  const source = delivery.source === "upload" ? { kind: "upload" as const, payload: uploadPayloadOf(delivery.payload) } : { kind: "commit" as const, payload: commitPayloadOf(delivery.payload) };
+  let stored = { verdict: delivery.verdict, result: delivery.result };
+  if (!delivery.verdict || !delivery.result || !delivery.verifiedAt) {
+    const blocked = await enterVerifying(db, milestone.id, deliveryId);
+    if (blocked) {
+      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
+      return null;
+    }
+    const context: Milestone = { title: milestone.title, scope: contract.scopeText };
+    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, context, source.payload, criteria) : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha);
+    const written = await db
+      .update(deliveries)
+      .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })
+      .where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)))
+      .returning({ id: deliveries.id });
+    if (written.length) {
+      await audit(db, { actor: "verifier", event: AUDIT_EVENTS.verdictStored, milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, result: v.result, model: v.model, promptHash: v.promptHash, suspectedInjection: v.verdict.suspected_injection, injectionHits: v.injectionHits, ...(v.judged ?? {}) } });
+    }
+    // Another run may have stored its verdict first: the stored one is the delivery's verdict.
+    const [row] = await db.select({ verdict: deliveries.verdict, result: deliveries.result }).from(deliveries).where(eq(deliveries.id, deliveryId));
+    if (!row) throw new Error(`delivery ${deliveryId} not found`);
+    stored = row;
+  }
+  return { verdict: VerdictOutput.parse(stored.verdict), result: VerdictResult.parse(stored.result) };
+}
+
+/** The milestone's current status and stored decision (the steps after the verdict read them fresh). */
+async function milestoneState(db: Db, milestoneId: string): Promise<{ status: MilestoneStatus; decision: StoredDecision | null }> {
+  const [row] = await db.select({ status: milestones.status, decision: milestones.decision }).from(milestones).where(eq(milestones.id, milestoneId));
+  if (!row) throw new Error(`milestone ${milestoneId} not found`);
+  return row;
+}
+
+/**
+ * Step 2: the decision, once per delivery: decide() on the stored verdict, written only while the milestone is
+ * verifying without a decision. The stored decision names the delivery it was made for. null when the milestone moved
+ * on (another delivery, or the client) and this delivery's decision does not apply.
+ */
+async function ensureDecision(db: Db, ctx: DeliveryContext, verdict: VerdictOutput): Promise<StoredDecision | null> {
+  const { delivery, milestone, contract, criteria } = ctx;
+  const deliveryId = delivery.id;
+  const current = await milestoneState(db, milestone.id);
+  if (current.decision && decisionDeliveryId(current.decision) === deliveryId) return current.decision;
+  if (current.status !== "verifying") {
+    console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${current.status}, not deciding`);
+    return null;
+  }
+  const latest = await db.query.deliveries.findFirst({ columns: { id: true }, where: (d, o) => o.eq(d.milestoneId, milestone.id), orderBy: (d, o) => [o.desc(d.receivedAt), o.desc(d.id)] });
+  if (latest && latest.id !== deliveryId) {
+    console.warn(`[verify] ${deliveryId}: delivery ${latest.id} superseded it, not deciding`);
+    return null;
+  }
+  const decision = decide({
+    verdict,
+    criteria,
+    milestone: { amountMinor: milestone.amountMinor, currency: contract.currency },
+    contract: {
+      confidenceThreshold: contract.confidenceThresholdPct / 100,
+      ...(contract.perReleaseCapMinor !== null ? { perReleaseCapMinor: contract.perReleaseCapMinor } : {}),
+    },
+  });
+  const stored: StoredDecision = { ...decision, deliveryId };
+  const written = await db
+    .update(milestones)
+    .set({ decision: stored, decidedAt: new Date() })
+    .where(and(eq(milestones.id, milestone.id), eq(milestones.status, "verifying"), isNull(milestones.decision)))
+    .returning({ id: milestones.id });
+  if (written.length) {
+    await audit(db, { actor: "policy", event: AUDIT_EVENTS.policyDecided, milestoneId: milestone.id, contractId: contract.id, detail: { ...stored } });
+  }
+  const after = await milestoneState(db, milestone.id);
+  if (!after.decision || decisionDeliveryId(after.decision) !== deliveryId) {
+    // The milestone moved on (another delivery, or the client) between our read and the write.
+    console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} changed while deciding, leaving it`);
+    return null;
+  }
+  return after.decision;
+}
+
+/**
+ * Step 3: state and schedule. Moves a verifying milestone to the decision's state (transition() is a no-op when already
+ * there; a milestone that has moved on is left alone), opens the review window once, and schedules the release job
+ * for when it closes (the release job re-checks the decision's deliveryId and the window; dedupe makes a retry a no-op).
+ */
+async function applyDecision(db: Db, ctx: DeliveryContext, decision: StoredDecision): Promise<void> {
+  const deliveryId = ctx.delivery.id;
+  const milestoneId = ctx.milestone.id;
+  const target = statusForDecision(decision.action); // partial: the client confirms the share on the web
+  const detail = { deliveryId, action: decision.action, ruleIds: decision.ruleIds };
+  const reviewEndsAt = await db.transaction(async (tx) => {
+    const [row] = await tx.select({ status: milestones.status, decision: milestones.decision, reviewEndsAt: milestones.reviewEndsAt }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
+    if (!row || decisionDeliveryId(row.decision) !== deliveryId || (row.status !== "verifying" && row.status !== target)) {
+      console.warn(`[verify] ${deliveryId}: milestone ${milestoneId} is ${row?.status ?? "gone"} with another decision or state, leaving it`);
+      return null;
+    }
+    if (target !== "review") {
+      await transition(tx, milestoneId, target, { actor: "policy", event: `milestone.${target}`, detail });
+      return null;
+    }
+    let endsAt = row.reviewEndsAt;
+    if (row.status === "verifying" || !endsAt) {
+      endsAt = new Date(Date.now() + reviewWindowSeconds(ctx.contract.reviewWindowSeconds) * 1000);
+      await tx.update(milestones).set({ reviewEndsAt: endsAt }).where(eq(milestones.id, milestoneId));
+    }
+    await transition(tx, milestoneId, "review", { actor: "policy", event: AUDIT_EVENTS.milestoneReview, detail: { ...detail, reviewEndsAt: endsAt.toISOString() } });
+    return endsAt;
+  });
+  if (reviewEndsAt) {
+    const delaySeconds = Math.max(0, Math.ceil((reviewEndsAt.getTime() - Date.now()) / 1000));
+    await enqueue("release", milestoneId, { deliveryId }, { delaySeconds, dedupe: deliveryId });
+  }
+}
+
+/** Step 4: the verdict as a PR comment, for GitHub PR deliveries; best effort and marker-deduplicated. */
+async function commentOnPr(db: Db, ctx: DeliveryContext, verdict: VerdictOutput, result: VerdictResult, decision: StoredDecision): Promise<void> {
+  const { delivery, milestone, contract } = ctx;
+  const pr = /#(\d+)$/.exec(delivery.ref);
+  if (delivery.source !== "github_pr" || !pr) return;
+  const repoFullName = delivery.ref.replace(/#\d+$/, "");
+  const body = formatVerdictComment({ key: delivery.id, result, verdict, decision, title: `milestone ${milestone.seq}: ${milestone.title}` });
+  const base = { actor: "system", milestoneId: milestone.id, contractId: contract.id } as const;
+  try {
+    const r = await postVerdictComment({ repoFullName, prNumber: Number(pr[1]), body });
+    if (r.posted) await audit(db, { ...base, event: AUDIT_EVENTS.githubCommented, detail: { deliveryId: delivery.id, url: r.url } });
+  } catch (e) {
+    console.error(`[verify] ${delivery.id}: PR comment failed:`, (e as Error).message);
+    await audit(db, { ...base, event: AUDIT_EVENTS.githubCommentFailed, detail: { deliveryId: delivery.id, error: (e as Error).message } });
+  }
 }
 
 /** Deterministic (or upload) stage -> judge -> verdict on the delivery -> decide() -> state + release schedule -> PR comment. Safe to retry at every step. */
@@ -182,113 +301,13 @@ export async function verify(job: Job<JobData>): Promise<void> {
   const deliveryId = job.data.deliveryId;
   if (typeof deliveryId !== "string" || !deliveryId) throw new Error("verify job needs a deliveryId");
   const db = getDb();
-  let { delivery, milestone, contract, criteria } = await loadAll(db, deliveryId);
-  // Upload deliveries carry files; everything else (GitHub PR, manual) a commit to clone.
-  const source = delivery.source === "upload" ? { kind: "upload" as const, payload: uploadPayloadOf(delivery.payload) } : { kind: "commit" as const, payload: payloadOf(delivery.payload) };
+  const ctx = await loadDeliveryContext(db, deliveryId);
+  if (!ctx) throw new Error(`delivery ${deliveryId} (or its milestone or contract) not found`);
 
-  // 1. Verdict, once per delivery.
-  if (!delivery.verdict || !delivery.result || !delivery.verifiedAt) {
-    const blocked = await enterVerifying(db, milestone.id, deliveryId);
-    if (blocked) {
-      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
-      return;
-    }
-    const context: Milestone = { title: milestone.title, scope: contract.scopeText };
-    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, context, source.payload, criteria) : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha);
-    const stored = await db
-      .update(deliveries)
-      .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })
-      .where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)))
-      .returning({ id: deliveries.id });
-    if (stored.length) {
-      await audit(db, { actor: "verifier", event: "verdict.stored", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, result: v.result, model: v.model, promptHash: v.promptHash, suspectedInjection: v.verdict.suspected_injection, injectionHits: v.injectionHits, ...(v.judged ?? {}) } });
-    }
-    ({ delivery, milestone, contract, criteria } = await loadAll(db, deliveryId));
-  }
-  const verdict = VerdictOutput.parse(delivery.verdict);
-  const result = VerdictResult.parse(delivery.result);
-
-  // 2. Decision, once per delivery: the stored decision names the delivery it was made for.
-  let decision: PolicyDecision;
-  if (milestone.decision && decisionDeliveryId(milestone.decision) === deliveryId) {
-    decision = milestone.decision as StoredDecision;
-  } else {
-    if (milestone.status !== "verifying") {
-      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${milestone.status}, not deciding`);
-      return;
-    }
-    const latest = await db.query.deliveries.findFirst({ where: (d, o) => o.eq(d.milestoneId, milestone.id), orderBy: (d, o) => [o.desc(d.receivedAt), o.desc(d.id)] });
-    if (latest && latest.id !== deliveryId) {
-      console.warn(`[verify] ${deliveryId}: delivery ${latest.id} superseded it, not deciding`);
-      return;
-    }
-    decision = decide({
-      verdict,
-      criteria,
-      milestone: { amountMinor: milestone.amountMinor, currency: contract.currency },
-      contract: {
-        confidenceThreshold: contract.confidenceThresholdPct / 100,
-        ...(contract.perReleaseCapMinor !== null ? { perReleaseCapMinor: contract.perReleaseCapMinor } : {}),
-      },
-    });
-    const stored: StoredDecision = { ...decision, deliveryId };
-    const written = await db
-      .update(milestones)
-      .set({ decision: stored, decidedAt: new Date() })
-      .where(and(eq(milestones.id, milestone.id), eq(milestones.status, "verifying"), isNull(milestones.decision)))
-      .returning({ id: milestones.id });
-    if (written.length) {
-      await audit(db, { actor: "policy", event: "policy.decided", milestoneId: milestone.id, contractId: contract.id, detail: { ...stored } });
-    }
-    milestone = (await loadAll(db, deliveryId)).milestone;
-    if (decisionDeliveryId(milestone.decision) !== deliveryId) {
-      // The milestone moved on (another delivery, or the client) between our read and the write.
-      console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} changed while deciding, leaving it`);
-      return;
-    }
-    decision = milestone.decision as StoredDecision;
-  }
-
-  // 3. State and schedule. transition() is a no-op when already there; a milestone that has moved on is left alone.
-  const target = decision.action === "release" ? "review" : decision.action === "hold" ? "held" : "needs_client"; // partial: the client confirms the share on the web
-  const detail = { deliveryId, action: decision.action, ruleIds: decision.ruleIds };
-  const milestoneId = milestone.id;
-  const reviewEndsAt = await db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    const [row] = await tx.select({ status: milestones.status, decision: milestones.decision, reviewEndsAt: milestones.reviewEndsAt }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
-    if (!row || decisionDeliveryId(row.decision) !== deliveryId || (row.status !== "verifying" && row.status !== target)) {
-      console.warn(`[verify] ${deliveryId}: milestone ${milestoneId} is ${row?.status ?? "gone"} with another decision or state, leaving it`);
-      return null;
-    }
-    if (target !== "review") {
-      await transition(t, milestoneId, target, { actor: "policy", event: `milestone.${target}`, detail });
-      return null;
-    }
-    let endsAt = row.reviewEndsAt;
-    if (row.status === "verifying" || !endsAt) {
-      endsAt = new Date(Date.now() + reviewWindowSeconds(contract.reviewWindowSeconds) * 1000);
-      await tx.update(milestones).set({ reviewEndsAt: endsAt }).where(eq(milestones.id, milestoneId));
-    }
-    await transition(t, milestoneId, "review", { actor: "policy", event: "milestone.review", detail: { ...detail, reviewEndsAt: endsAt.toISOString() } });
-    return endsAt;
-  });
-  if (reviewEndsAt) {
-    // The release job re-checks the decision's deliveryId and the window; dedupe makes a retry a no-op.
-    const delaySeconds = Math.max(0, Math.ceil((reviewEndsAt.getTime() - Date.now()) / 1000));
-    await enqueue("release", milestoneId, { deliveryId }, { delaySeconds, dedupe: deliveryId });
-  }
-
-  // 4. PR comment, best effort and marker-deduplicated.
-  const pr = /#(\d+)$/.exec(delivery.ref);
-  const repoFullName = delivery.ref.replace(/#\d+$/, "");
-  if (delivery.source === "github_pr" && pr) {
-    const body = formatVerdictComment({ key: deliveryId, result, verdict, decision, title: `milestone ${milestone.seq}: ${milestone.title}` });
-    try {
-      const r = await postVerdictComment({ repoFullName, prNumber: Number(pr[1]), body });
-      if (r.posted) await audit(db, { actor: "system", event: "github.commented", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, url: r.url } });
-    } catch (e) {
-      console.error(`[verify] ${deliveryId}: PR comment failed:`, (e as Error).message);
-      await audit(db, { actor: "system", event: "github.comment_failed", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, error: (e as Error).message } });
-    }
-  }
+  const judged = await ensureVerdict(db, ctx);
+  if (!judged) return;
+  const decision = await ensureDecision(db, ctx, judged.verdict);
+  if (!decision) return;
+  await applyDecision(db, ctx, decision);
+  await commentOnPr(db, ctx, judged.verdict, judged.result, decision);
 }

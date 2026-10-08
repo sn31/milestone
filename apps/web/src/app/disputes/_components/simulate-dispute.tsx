@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button, Field, StateGlyph, inputClass } from "@/components/ui";
+import { postJson, thrownText } from "@/lib/api-client";
 
 const REASONS = [
   { value: "MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED", label: "Not as described" },
@@ -33,16 +34,16 @@ export function SimulateDispute({ options }: { options: Array<{ milestoneId: str
     setBusy(true);
     setNote(null);
     try {
-      const res = await fetch("/api/disputes/dev", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ milestoneId, reason }) });
-      const body = (await res.json().catch(() => null)) as { disputeId?: string; created?: boolean; error?: string } | null;
+      const res = await postJson<{ disputeId?: string; created?: boolean }>("/api/disputes/dev", { milestoneId, reason });
+      const body = res.body;
       if (!res.ok || !body?.disputeId) {
-        setNote({ tone: "danger", text: body?.error ?? `request failed (${res.status})` });
+        setNote({ tone: "danger", text: res.error });
         return;
       }
       setNote({ tone: "released", text: body.created ? `Dispute ${body.disputeId} opened. PayPal's webhook arrives in a moment.` : `Dispute ${body.disputeId} is already open for this payment.` });
       setPolling(1);
     } catch (e) {
-      setNote({ tone: "danger", text: e instanceof Error ? e.message : "request failed" });
+      setNote({ tone: "danger", text: thrownText(e) });
     } finally {
       setBusy(false);
     }

@@ -1,14 +1,14 @@
 import type { ReactNode } from "react";
-import { UploadPayload, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { DELIVERABLE_STATUSES, UploadPayload, decisionDeliveryId, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { paypalMode } from "@milestone/money";
-import type { Actor } from "@/lib/session";
+import { isContractClient, isContractFreelancer, type Actor } from "@/lib/session";
+import { auditTime } from "@/lib/events";
 import { formatMoney, humanize, truncateMiddle } from "@/lib/format";
-import { getDb } from "@/lib/db";
 import { AdvanceOffer } from "@/components/advance-offer";
 import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
-import { VerdictView } from "@/components/verdict-view";
+import { VerdictView, type VerdictDelivery } from "@/components/verdict-view";
 import { VerifierLog } from "@/components/live-refresh";
 import { awaitingVerdict } from "@/components/live-rules";
 import { Hash, MoneyTransit, StateGlyph, stateMeta, type LogLine, type ToneKey } from "@/components/ui";
@@ -29,6 +29,13 @@ export interface MilestoneActionsProps {
   crit: CriterionRow[];
   /** The latest delivery, if any. */
   delivery: DeliveryRow | null;
+  /**
+   * The delivery the milestone's decision was made for, when that is not the latest one (null when it is the latest,
+   * there is no decision, or the row is gone). The review card checks its required criteria.
+   */
+  decided?: DeliveryRow | null;
+  /** The review window's length in seconds (core reviewWindowSeconds of the contract), for the countdown ring. */
+  windowSeconds: number;
   /** This milestone's live snapshot (GET /api/milestones/[id]/status) when the page is polling it; feeds the verifier log. */
   live?: MilestoneSnapshot | null;
   names: { client: string; freelancer: string };
@@ -55,8 +62,7 @@ function Note({ tone, children }: { tone?: ToneKey; children: ReactNode }) {
  * shows that instead of asking for another delivery.
  */
 function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor, crit: CriterionRow[], delivery: DeliveryRow | null) {
-  if (actor.role !== "freelancer" || actor.userId !== contract.freelancerId) return null;
-  if (milestone.status !== "funded" && milestone.status !== "held") return null;
+  if (!isContractFreelancer(actor, contract) || !DELIVERABLE_STATUSES.has(milestone.status)) return null;
   const files = crit.some((c) => c.kind === "upload");
   const repo = crit.some((c) => c.kind === "test" || c.kind === "build" || c.kind === "file" || c.kind === "visual") || !files;
   const patterns = crit
@@ -77,18 +83,11 @@ function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor
   );
 }
 
-/**
- * Descriptions of required criteria whose verdict on this delivery is not a pass (a criterion the verdict does not
- * mention counts as not passed). Mirrors requiredNotPassed in app/api/milestones/[id]/review/route.ts, which refuses
- * approve and confirm_partial in that case.
- */
-function requiredNotPassed(delivery: DeliveryRow | null | undefined, crit: CriterionRow[]): string[] {
-  const list = delivery?.verdict && typeof delivery.verdict === "object" ? (delivery.verdict as { criteria?: unknown }).criteria : undefined;
-  const status = new Map<string, unknown>();
-  if (Array.isArray(list)) {
-    for (const r of list) if (r && typeof r === "object") status.set(String((r as Record<string, unknown>).criterion_id), (r as Record<string, unknown>).status);
-  }
-  return crit.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
+/** The receipt's view of a delivery: everything but the payload, which stays on the server. */
+function verdictDelivery(d: DeliveryRow | null): VerdictDelivery | null {
+  if (!d) return null;
+  const { id, ref, source, model, result, verifiedAt, receivedAt, verdict, evidence, suspectedInjection } = d;
+  return { id, ref, source, model, result, verifiedAt, receivedAt, verdict, evidence, suspectedInjection };
 }
 
 /** An upload delivery's files (served only to the contract's parties), as a manifest: name, size, sha256. */
@@ -119,8 +118,6 @@ function DeliveredFiles({ delivery }: { delivery: DeliveryRow | null }) {
   );
 }
 
-const hhmmss = (d: Date) => d.toISOString().slice(11, 19);
-
 /**
  * The head of the verifier's log: what it was given (the delivery) and what it checks. The lines that arrive while it
  * works (audit events, evidence summaries) are appended by VerifierLog from the live snapshot.
@@ -129,7 +126,7 @@ function verifyHead(delivery: DeliveryRow | null, crit: CriterionRow[]): LogLine
   const lines: LogLine[] = [];
   if (delivery) {
     const what = delivery.source === "upload" ? "files" : delivery.source === "github_pr" ? "pull request" : delivery.source;
-    lines.push({ at: hhmmss(delivery.receivedAt), text: `delivery ${delivery.id} received · ${what} ${truncateMiddle(delivery.ref, 14, 6)}` });
+    lines.push({ at: auditTime(delivery.receivedAt, true), text: `delivery ${delivery.id} received · ${what} ${truncateMiddle(delivery.ref, 14, 6)}` });
   }
   crit.forEach((c, i) => lines.push({ text: `check ${String(i + 1).padStart(2, "0")}  ${c.kind.padEnd(8, " ")} ${c.description}` }));
   lines.push({ text: "agent running the checks and weighing the evidence", tone: "verifying" });
@@ -156,21 +153,22 @@ function emptySnapshot(milestone: MilestoneRow, delivery: DeliveryRow | null): M
  * Everything inside one milestone's station on the contract rail: where it sits in its lifecycle, its release conditions
  * or its verdict, and the actions the acting role can take here (fund, deliver, advance, review).
  */
-export async function MilestoneActions({ milestone, contract, actor, crit, delivery, live = null, names, operator = null }: MilestoneActionsProps) {
+export function MilestoneActions({ milestone, contract, actor, crit, delivery, decided = null, windowSeconds, live = null, names, operator = null }: MilestoneActionsProps) {
   const status = milestone.status;
-  const isClient = actor.role === "client" && actor.userId === contract.clientId;
-  const isFreelancer = actor.role === "freelancer" && actor.userId === contract.freelancerId;
+  const isClient = isContractClient(actor, contract);
+  const isFreelancer = isContractFreelancer(actor, contract);
   const decision = milestone.decision ?? null;
   // The decision belongs to the delivery it was made for: once a new delivery is in, its receipt carries no stamp yet.
-  const decisionDeliveryId = (decision as { deliveryId?: unknown } | null)?.deliveryId;
-  const receiptDecision = decision && (typeof decisionDeliveryId !== "string" || decisionDeliveryId === delivery?.id) ? decision : null;
+  const decidedId = decisionDeliveryId(decision);
+  const receiptDecision = decision && (decidedId === null || decidedId === delivery?.id) ? decision : null;
+  const shown = verdictDelivery(delivery);
   const descriptions = Object.fromEntries(crit.map((c) => [c.id, c.description]));
   const items = crit.map((c) => ({ id: c.id, kind: c.kind, description: c.description, required: c.required }));
   const required = Object.fromEntries(crit.map((c) => [c.id, c.required]));
   const verdict = (
     <>
       <DeliveredFiles delivery={delivery} />
-      <VerdictView delivery={delivery} decision={receiptDecision} descriptions={descriptions} currency={contract.currency} required={required} showEvidence />
+      <VerdictView delivery={shown} decision={receiptDecision} descriptions={descriptions} currency={contract.currency} required={required} showEvidence />
     </>
   );
   // Where the decision is what matters (review, needs client, held, paid), the receipt folds to one line: result,
@@ -179,7 +177,7 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
     <VerdictView
       folded
       attachments={<DeliveredFiles delivery={delivery} />}
-      delivery={delivery}
+      delivery={shown}
       decision={receiptDecision}
       descriptions={descriptions}
       currency={contract.currency}
@@ -244,38 +242,29 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
     case "review":
     case "needs_client": {
       // The route checks the delivery the decision was made for (decision.deliveryId), falling back to the latest.
-      const decidedId = (decision as { deliveryId?: unknown } | null)?.deliveryId;
-      const decided =
-        typeof decidedId === "string" && decidedId !== delivery?.id
-          ? await getDb().query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decidedId) })
-          : delivery;
+      const checked = decidedId !== null && decidedId !== delivery?.id ? decided : delivery;
       const card = (
         <ReviewCard
           milestoneId={milestone.id}
           status={status}
           isClient={isClient}
+          windowSeconds={windowSeconds}
           reviewEndsAt={milestone.reviewEndsAt ? milestone.reviewEndsAt.toISOString() : null}
           decisionAction={decision?.action ?? null}
           amountMinor={decision?.amountMinor ?? null}
           amountLabel={decision && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, contract.currency) : null}
           reason={decision?.reason ?? null}
-          requiredNotPassed={requiredNotPassed(decided, crit)}
+          requiredNotPassed={requiredNotPassed(checked?.verdict, crit)}
         />
       );
-      body =
-        status === "review" ? (
-          <>
-            {/* ReviewCard draws the countdown ring and the approve / veto controls for the review window. */}
-            {card}
-            {receipt}
-          </>
-        ) : (
-          <>
-            {/* The card says what the agent recommends and why; the client decides there. */}
-            {card}
-            {receipt}
-          </>
-        );
+      // In review the card draws the countdown ring and the approve / veto controls; on needs_client it says what the
+      // agent recommends and why, and the client decides there.
+      body = (
+        <>
+          {card}
+          {receipt}
+        </>
+      );
       break;
     }
     case "held":

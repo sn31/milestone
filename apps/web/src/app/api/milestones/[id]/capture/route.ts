@@ -1,11 +1,7 @@
-import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
-import { getActor } from "@/lib/session";
-import { captureAndFund, isContractClient, jsonError, loadMilestone, paypalErrorResponse } from "../../_shared";
-
-function ok(body: Record<string, unknown>, status = 200) {
-  return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
-}
+import { json, jsonError } from "@/lib/http";
+import { getActor, isContractClient } from "@/lib/session";
+import { captureAndFund, loadMilestone, paypalErrorResponse } from "../../_shared";
 
 /**
  * Captures the approved order (JS SDK onApprove) and moves the milestone to funded.
@@ -30,9 +26,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     case "funded":
     case "already":
       // Already past draft: a repeated onApprove or a double click. Report the current state.
-      return ok({ status: r.status, captureId: r.captureId });
+      return json({ status: r.status, captureId: r.captureId });
     case "pending":
-      return ok({ status: r.status, captureId: r.captureId, captureStatus: r.captureStatus }, 202);
+      return json({ status: r.status, captureId: r.captureId, captureStatus: r.captureStatus }, 202);
     case "mismatch":
       return jsonError("captured amount does not match the milestone", 409, { captureId: r.captureId });
     case "rejected":

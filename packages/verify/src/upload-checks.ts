@@ -7,12 +7,17 @@
  * (case-insensitive). A criterion passes when one matching file passes every check, is unclear when the best file
  * has a check the stage could not decide (e.g. text inside a PDF with custom font encodings), and fails otherwise.
  * Every delivered file also becomes an evidence item (no criterion, no status) for the judgment stage.
+ *
+ * Reading stored uploads back (safePath, resolveUpload, readUploadedFile) lives here too, shared by the web routes and
+ * the worker's evidence reader: every path resolves under UPLOAD_DIR, symlinks included, and the bytes are checked
+ * against the sha256 recorded at delivery.
  */
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { inflateRawSync, inflateSync } from "node:zlib";
-import { UploadCriterionSpec, type CriterionSpec, type CriterionStatus, type EvidenceSummary, type UploadFormat } from "@milestone/core";
+import { UploadCriterionSpec, type CriterionSpec, type CriterionStatus, type EvidenceSummary, type UploadedFile, type UploadFormat } from "@milestone/core";
+import { scrubEvidence, sha256 } from "./deterministic.ts";
+import { repoPath } from "./paths.ts";
 
 export interface UploadStageFile {
   name: string;
@@ -27,6 +32,8 @@ export interface UploadStageFile {
 export interface UploadStageInput {
   files: UploadStageFile[];
   criteria: CriterionSpec[];
+  /** Directories stripped from evidence summaries (scrubEvidence); default [uploadRoot()]. */
+  roots?: string[];
 }
 
 export interface FileInspection {
@@ -66,15 +73,42 @@ export const MIME_BY_FORMAT: Record<UploadFormat, string> = {
  * pnpm-workspace.yaml, found by walking up from the current directory.
  */
 export function uploadRoot(env: string | undefined = process.env.UPLOAD_DIR, cwd = process.cwd()): string {
-  if (env && isAbsolute(env)) return env;
-  let dir = resolve(cwd);
-  for (;;) {
-    if (existsSync(join(dir, "pnpm-workspace.yaml"))) break;
-    const up = dirname(dir);
-    if (up === dir) { dir = resolve(cwd); break; }
-    dir = up;
-  }
-  return resolve(dir, env || "var/uploads");
+  return repoPath(env, "var/uploads", cwd);
+}
+
+/** Hex sha256 of bytes (or text), as recorded in UploadedFile.sha256. */
+export const sha256Hex: (data: string | Uint8Array) => string = sha256;
+
+function inside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+/**
+ * Resolves `rel` under `root`, refusing traversal, absolute paths, symlink escapes and a .git directory; returns the
+ * real path or throws ("path outside the delivery", "no such file", "path not readable").
+ */
+export async function safePath(root: string, rel: string): Promise<string> {
+  const base = await realpath(root);
+  const candidate = resolve(base, rel);
+  if (!inside(base, candidate)) throw new Error(`path outside the delivery: ${rel}`);
+  const real = await realpath(candidate).catch(() => { throw new Error(`no such file: ${rel}`); });
+  if (!inside(base, real)) throw new Error(`path outside the delivery: ${rel}`);
+  const r = relative(base, real);
+  if (r === ".git" || r.startsWith(`.git${sep}`)) throw new Error(`path not readable: ${rel}`);
+  return real;
+}
+
+/** An upload path resolved inside UPLOAD_DIR (safePath), or null when it escapes it or does not exist. */
+export function resolveUpload(rel: string, root = uploadRoot()): Promise<string | null> {
+  return safePath(root, rel).catch(() => null);
+}
+
+/** A stored upload's bytes, read under `root` and checked against the sha256 recorded at delivery; throws otherwise. */
+export async function readUploadedFile(file: Pick<UploadedFile, "name" | "path" | "sha256">, root = uploadRoot()): Promise<Buffer> {
+  const bytes = await readFile(await safePath(root, file.path));
+  if (sha256Hex(bytes) !== file.sha256) throw new Error(`${file.name} changed since it was uploaded`);
+  return bytes;
 }
 
 /** Evidence id for the i-th delivered file (0-based). */
@@ -150,13 +184,26 @@ function svgSize(text: string): { width: number; height: number } | null {
 
 // ---------- PDF ----------
 
+/** Page count and best-effort text of a PDF, inflating its streams once. */
+export function pdfInfo(b: Uint8Array): { pages: number | null; text: string } {
+  const raw = latin1(b);
+  const streams = pdfStreams(b, raw);
+  return { pages: pageCount(raw, streams), text: textOf(raw, streams) };
+}
+
 /** Pages: /Type /Page objects; with object streams those are compressed, so look inside streams, then /Pages /Count. */
 export function pdfPageCount(b: Uint8Array): number | null {
-  const PAGE = /\/Type\s*\/Page(?![a-zA-Z])/g;
   const raw = latin1(b);
+  return pageCount(raw, () => pdfStreams(b, raw));
+}
+
+const PAGE = /\/Type\s*\/Page(?![a-zA-Z])/g;
+
+/** `streams` may be a thunk: the count inflates nothing when /Type /Page objects are in plain sight. */
+function pageCount(raw: string, streamsOf: string[] | (() => string[])): number | null {
   const direct = raw.match(PAGE)?.length ?? 0;
   if (direct > 0) return direct;
-  const streams = pdfStreams(b);
+  const streams = typeof streamsOf === "function" ? streamsOf() : streamsOf;
   const inStreams = streams.reduce((n, s) => n + (s.match(PAGE)?.length ?? 0), 0);
   if (inStreams > 0) return inStreams;
   let max = 0;
@@ -172,9 +219,8 @@ function latin1(b: Uint8Array): string {
 
 const MAX_INFLATE = 20 * 1024 * 1024;
 
-/** Decompressed FlateDecode streams (best effort; anything that does not inflate is skipped). */
-function pdfStreams(b: Uint8Array): string[] {
-  const raw = latin1(b);
+/** Decompressed FlateDecode streams (best effort; anything that does not inflate is skipped). `raw` is latin1(b). */
+function pdfStreams(b: Uint8Array, raw: string): string[] {
   const out: string[] = [];
   let total = 0;
   const re = /(?<!end)stream\r?\n/g;
@@ -207,8 +253,13 @@ function pdfUnescape(s: string): string {
 
 /** Text from Tj/TJ string operators in content streams. Fonts with custom encodings yield nothing useful. */
 export function pdfText(b: Uint8Array): string {
+  const raw = latin1(b);
+  return textOf(raw, pdfStreams(b, raw));
+}
+
+function textOf(raw: string, streams: string[]): string {
   const parts: string[] = [];
-  for (const s of [latin1(b), ...pdfStreams(b)]) {
+  for (const s of [raw, ...streams]) {
     if (!/\bBT\b/.test(s)) continue;
     for (const m of s.matchAll(/\[((?:\((?:\\.|[^\\)])*\)|[^\]])*)\]\s*TJ|\(((?:\\.|[^\\)])*)\)\s*(?:Tj|'|")|(?<![A-Za-z/])(T\*|Td|TD|Tm|ET)\b/g)) {
       if (m[1] !== undefined) {
@@ -313,10 +364,9 @@ export function inspect(bytes: Uint8Array, file: Pick<UploadStageFile, "name" | 
     const d = ins.text ? svgSize(ins.text) : null;
     if (d) Object.assign(ins, d);
   } else if (format === "pdf") {
-    const pages = pdfPageCount(bytes);
+    const { pages, text } = pdfInfo(bytes);
     if (pages !== null) ins.pages = pages;
     else ins.notes.push("page count not found (compressed object streams)");
-    const text = pdfText(bytes);
     ins.text = text.trim() ? text : null;
     ins.words = ins.text ? countWords(ins.text) : 0;
     ins.notes.push("PDF text extraction is best effort");
@@ -484,5 +534,5 @@ export async function runUploadStage(input: UploadStageInput): Promise<UploadSta
       evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "note", status: "unclear", summary: `${c.kind} criterion cannot run on a file delivery (no repository)` });
     }
   }
-  return { evidence, inspections };
+  return { evidence: scrubEvidence(evidence, input.roots ?? [uploadRoot()]), inspections };
 }

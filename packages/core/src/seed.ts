@@ -3,16 +3,15 @@ import { sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
+import { loadRootEnv, paypalMode } from "./env.ts";
+import { ledgerRefs } from "./ledger.ts";
 import { advances, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paypalOps, users } from "./schema.ts";
+import type { PolicyDecision } from "./schemas.ts";
 
-try {
-  process.loadEnvFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env"));
-} catch {
-  // no .env, rely on process.env
-}
+loadRootEnv(); // no .env: rely on process.env
 
 const db = createDb();
-const simulated = process.env.PAYPAL_MODE === "simulated" || (!process.env.PAYPAL_MODE && !process.env.PAYPAL_CLIENT_ID && process.env.NODE_ENV !== "production");
+const simulated = paypalMode() === "simulated";
 
 // `pnpm db:seed -- --reset` wipes every table (and the PayPal simulator state) before seeding, so a demo
 // never starts with stale payout rows that would send a milestone to needs_operator.
@@ -172,7 +171,7 @@ if (process.argv.includes("--showcase")) {
     await db.insert(advances).values({ id: a.id, milestoneId: m.id, partnerId: "usr_partner", principalMinor: a.principalMinor, feeBpsPerDay: a.feeBpsPerDay, status: "funded", offer, explanation: `Advance of ${(a.principalMinor / 100).toFixed(2)} USD at ${a.feeBpsPerDay} bps a day, repaid from the release of ${m.id}.`, fundedAt, createdAt: acceptedAt });
     const batchId = `SIM-BATCH-${a.id.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
     await op("advance-payout", a.id, batchId, fundedAt, { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" } }, { request: { advanceId: a.id, milestoneId: m.id, principalMinor: a.principalMinor, currency: "USD" } });
-    await post(`txn_show_adv_${a.id}`, `advance:${a.id}`, fundedAt, [
+    await post(`txn_show_adv_${a.id}`, ledgerRefs.advanceFunding(a.id), fundedAt, [
       { account: "partner:usr_partner:receivable", amountMinor: a.principalMinor, direction: "debit" },
       { account: "partner:usr_partner:cash", amountMinor: a.principalMinor, direction: "credit" },
     ]);
@@ -200,7 +199,7 @@ if (process.argv.includes("--showcase")) {
 
   type Crit = { criterion_id: string; status: "pass" | "fail" | "unclear"; confidence: number; evidence_ids: string[]; rationale: string };
   /** A verified delivery: delivery row with verdict + evidence, verifying -> decided, with audit rows. */
-  const deliver = async (m: Ms, opts: { deliveryId: string; ago: number; source: "github_pr" | "upload"; ref: string; payload: Record<string, unknown>; evidence: unknown[]; criteria: Crit[]; result: "pass" | "partial" | "fail"; decision: { action: string; amountMinor: number; ruleIds: string[]; reason: string } }) => {
+  const deliver = async (m: Ms, opts: { deliveryId: string; ago: number; source: "github_pr" | "upload"; ref: string; payload: Record<string, unknown>; evidence: unknown[]; criteria: Crit[]; result: "pass" | "partial" | "fail"; decision: PolicyDecision }) => {
     const received = min(-opts.ago);
     const verified = min(-opts.ago + 2);
     const promptHash = sha(`prompt-${opts.deliveryId}`);
@@ -300,12 +299,12 @@ if (process.argv.includes("--showcase")) {
   await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: freelancer3, partnerShareMinor: partner3, refundMinor: 0, advanceId: "adv_show_repaid" });
   await auditRow(m3, "paypal", "paypal.payout", min(-11), { deliveryId: "dlv_show_3", payoutBatchId: batchId, amountMinor: 10000, currency: "USD" });
   // settle.ts books one transaction per paid item: the partner's (principal to receivable, fee to fees), then the freelancer's.
-  await post("txn_show_release_mst_3_partner", "release:mst_3:partner", min(-10), [
+  await post("txn_show_release_mst_3_partner", ledgerRefs.release("mst_3", "partner"), min(-10), [
     { account: "held:mst_3", amountMinor: partner3, direction: "debit" },
     { account: "partner:usr_partner:receivable", amountMinor: 5000, direction: "credit" },
     { account: "partner:usr_partner:fees", amountMinor: fee3, direction: "credit" },
   ]);
-  await post("txn_show_release_mst_3", "release:mst_3", min(-10), [
+  await post("txn_show_release_mst_3", ledgerRefs.release("mst_3"), min(-10), [
     { account: "held:mst_3", amountMinor: freelancer3, direction: "debit" },
     { account: "freelancer:usr_freelancer", amountMinor: freelancer3, direction: "credit" },
   ]);

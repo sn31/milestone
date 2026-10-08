@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { auditLog, contracts, criteria, fromPayPalValue, milestones, type ContractSpec } from "@milestone/core";
+import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, type ContractSpec } from "@milestone/core";
 import { compileContract, isModelConfigured } from "@milestone/verify";
 import { getDb } from "@/lib/db";
+import { jsonError } from "@/lib/http";
 import { getActor } from "@/lib/session";
 
 interface Compiled { contract: ContractSpec; advanceEligible: Record<number, boolean> }
@@ -44,7 +45,7 @@ function fail(req: Request, error: string, status: number) {
     url.searchParams.set("error", error);
     return NextResponse.redirect(url, 303);
   }
-  return NextResponse.json({ error }, { status });
+  return jsonError(error, status);
 }
 
 export async function POST(req: Request) {
@@ -105,7 +106,7 @@ export async function POST(req: Request) {
         })));
       }
     }
-    await tx.insert(auditLog).values({ id: randomUUID(), contractId, actor: actor.userId, event: "contract.created", detail: { milestones: result.contract.milestones.length } });
+    await audit(tx, { actor: actor.userId, event: AUDIT_EVENTS.contractCreated, contractId, detail: { milestones: result.contract.milestones.length } });
   });
   return NextResponse.redirect(new URL(`/contracts/${contractId}`, req.url), 303);
 }

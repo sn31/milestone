@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { milestones } from "@milestone/core";
 import { approveSimulatedOrder } from "@milestone/money";
 import { getDb } from "@/lib/db";
+import { jsonError, noStore } from "@/lib/http";
 import { notSimulated } from "../_guard";
 
 export const dynamic = "force-dynamic";
@@ -16,19 +17,19 @@ export async function GET(req: Request) {
   if (blocked) return blocked;
   const url = new URL(req.url);
   const orderId = url.searchParams.get("order") ?? "";
-  if (!orderId) return Response.json({ error: "order is required" }, { status: 400 });
+  if (!orderId) return jsonError("order is required", 400);
 
   const order = approveSimulatedOrder(orderId);
-  if (!order) return Response.json({ error: `simulated order ${orderId} not found` }, { status: 404 });
+  if (!order) return jsonError(`simulated order ${orderId} not found`, 404);
   const milestoneId = order.referenceId;
-  if (!milestoneId) return Response.json({ error: "order has no reference_id" }, { status: 409 });
+  if (!milestoneId) return jsonError("order has no reference_id", 409);
 
   const [m] = await getDb().select({ id: milestones.id, contractId: milestones.contractId }).from(milestones).where(eq(milestones.id, milestoneId)).limit(1);
-  if (!m) return Response.json({ error: `milestone ${milestoneId} not found` }, { status: 404 });
+  if (!m) return jsonError(`milestone ${milestoneId} not found`, 404);
 
   const base = (process.env.APP_URL || url.origin).replace(/\/+$/, "");
   const back = new URL(`${base}/contracts/${encodeURIComponent(m.contractId)}`);
   back.searchParams.set("approved", order.id);
   back.searchParams.set("milestone", m.id);
-  return new Response(null, { status: 303, headers: { Location: back.toString(), "Cache-Control": "no-store" } });
+  return new Response(null, { status: 303, headers: { ...noStore, Location: back.toString() } });
 }

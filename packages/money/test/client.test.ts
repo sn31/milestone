@@ -53,3 +53,27 @@ describe("createPayout retry", () => {
     expect(calls.filter((c) => c.startsWith("POST") && c.endsWith("/payouts"))).toHaveLength(1);
   });
 });
+
+describe("requestMultipart", () => {
+  it("posts multipart through the client's own transport with its token and request id", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string>, body: init?.body });
+      if (String(url).endsWith("/oauth2/token")) return new Response('{"access_token":"tok","expires_in":3600}');
+      return new Response('{"links":[]}');
+    };
+    const client = new PayPalClient({ clientId: "a", clientSecret: "b", env: "sandbox", fetchImpl });
+    const res = await client.requestMultipart<{ links: unknown[] }>("/v1/customer/disputes/D1/provide-evidence", [{ name: "input", contentType: "application/json", data: "{}" }], { requestId: "ev-1" });
+    expect(res).toEqual({ links: [] });
+    const call = calls.find((c) => c.url.endsWith("/provide-evidence"));
+    expect(call?.headers.Authorization).toBe("Bearer tok");
+    expect(call?.headers["PayPal-Request-Id"]).toBe("ev-1");
+    expect(call?.headers["Content-Type"]).toMatch(/^multipart\/form-data; boundary=/);
+    expect(call?.body).toBeInstanceOf(Uint8Array);
+  });
+
+  it("treats accept-claim as a money path", () => {
+    expect(isMoneyPath("/v1/customer/disputes/D1/accept-claim")).toBe(true);
+    expect(isMoneyPath("/v1/customer/disputes/D1/provide-evidence")).toBe(false);
+  });
+});

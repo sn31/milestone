@@ -8,7 +8,7 @@ import { e2e, loadRootEnv } from "./helpers";
 
 loadRootEnv();
 const state = vi.hoisted(() => ({ actor: { userId: "usr_client", role: "client" } as { userId: string; role: string }, enqueued: [] as unknown[][], db: null as unknown }));
-vi.mock("@/lib/session", () => ({ getActor: async () => state.actor }));
+vi.mock("@/lib/session", async (orig) => ({ ...(await orig<typeof import("@/lib/session")>()), getActor: async () => state.actor }));
 vi.mock("@/lib/db", () => ({ getDb: () => state.db }));
 vi.mock("@/lib/paypal", () => ({ paypal: () => { throw new Error("no PayPal client in this test"); } }));
 vi.mock("@milestone/core", async (orig) => ({

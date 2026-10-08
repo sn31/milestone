@@ -1,18 +1,15 @@
 import { desc, eq } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { advances, contracts, milestones, users } from "@milestone/core";
-import { loadAdvanceBalances } from "@milestone/money";
+import { advances, asNumber, contracts, milestones, users } from "@milestone/core";
+import { DAY_MS, advanceRepayment, loadAdvanceBalances } from "@milestone/money";
 import { getDb } from "@/lib/db";
-import { getActor } from "@/lib/session";
+import { ACTOR_NAMES, getActor, isOperator } from "@/lib/session";
 import { LenderBook, type LenderRow } from "@/components/lender-book";
 import { Button, EmptyState, PageHeader } from "@/components/ui";
-import { ACTOR_NAMES } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
-const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
-const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** Where the partner's money stands, from the advance and its milestone. */
 function repaymentStatus(advance: string, milestone: string): string {
@@ -32,17 +29,13 @@ function repaymentStatus(advance: string, milestone: string): string {
  */
 export default async function LenderPage() {
   const actor = await getActor();
-  const allowed = actor.role === "partner" || (actor.role as string) === "platform";
+  const allowed = isOperator(actor);
   if (!allowed) {
     return (
       <main>
         <PageHeader
           eyebrow="Capital / restricted"
-          title={
-            <>
-              Lender&rsquo;s book
-            </>
-          }
+          title={<>Lender&rsquo;s book</>}
           description="The advance book belongs to the capital partner who funds it, and to the platform."
         />
         <EmptyState
@@ -59,7 +52,7 @@ export default async function LenderPage() {
   const freelancer = alias(users, "freelancer");
   const client = alias(users, "client");
   const rows = await db
-    .select({ a: advances, m: { id: milestones.id, seq: milestones.seq, title: milestones.title, status: milestones.status, amountMinor: milestones.amountMinor }, c: { id: contracts.id, title: contracts.title, currency: contracts.currency }, freelancer: { id: freelancer.id, name: freelancer.name }, client: { id: client.id, name: client.name } })
+    .select({ a: advances, m: { id: milestones.id, seq: milestones.seq, title: milestones.title, status: milestones.status, amountMinor: milestones.amountMinor, decidedAt: milestones.decidedAt }, c: { id: contracts.id, title: contracts.title, currency: contracts.currency }, freelancer: { id: freelancer.id, name: freelancer.name }, client: { id: client.id, name: client.name } })
     .from(advances)
     .innerJoin(milestones, eq(milestones.id, advances.milestoneId))
     .innerJoin(contracts, eq(contracts.id, milestones.contractId))
@@ -75,7 +68,7 @@ export default async function LenderPage() {
     const end = a.repaidAt ?? now;
     const b = balances.get(a.id);
     const outstandingMinor = Math.max(0, b?.outstandingMinor ?? 0);
-    const pFail = num(offer.pFail);
+    const pFail = asNumber(offer.pFail);
     return {
       id: a.id,
       contractId: c.id,
@@ -88,7 +81,8 @@ export default async function LenderPage() {
       currency: c.currency,
       amountMinor: m.amountMinor,
       principalMinor: a.principalMinor,
-      feeMinor: Math.max(0, Math.trunc(num(offer.expectedFeeMinor) ?? 0)),
+      // What the partner is owed back out of the release (the quoted fee, else accrued to the decision or to now).
+      feeMinor: advanceRepayment(a, m.decidedAt ?? now).feeMinor,
       feeBpsPerDay: a.feeBpsPerDay,
       status: a.status,
       daysOutstanding: a.fundedAt ? Math.max(0, Math.floor((end.getTime() - a.fundedAt.getTime()) / DAY_MS)) : null,
@@ -112,15 +106,11 @@ export default async function LenderPage() {
             Capital <span className="text-hairline-strong">/</span> {actor.role === "partner" ? (ACTOR_NAMES[actor.userId] ?? actor.userId) : "every partner"}
           </>
         }
-        title={
-          <>
-            Lender&rsquo;s book
-          </>
-        }
+        title={<>Lender&rsquo;s book</>}
         description="Milestone Advances go out from the capital partner's PayPal account and come back first, out of the release of the milestone they were lent against."
       />
       <div className="mt-12">
-        <LenderBook rows={book} now={now.toISOString()} />
+        <LenderBook rows={book} />
       </div>
     </main>
   );

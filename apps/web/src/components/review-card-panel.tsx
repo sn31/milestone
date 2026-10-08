@@ -1,37 +1,12 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { Button, CountdownRing, DUR, EASE, Eyebrow, Panel, StateGlyph, type ButtonVariant } from "@/components/ui";
+import { Button, CountdownRing, DUR, EASE, Eyebrow, Panel, StateGlyph, useSecondClock, type ButtonVariant } from "@/components/ui";
+import { postJson, refusalText, thrownText } from "@/lib/api-client";
 
 type Action = "approve" | "veto" | "confirm_partial" | "hold";
-
-// A one-second clock shared by every panel. 0 on the server, so the first paint makes no time claims.
-function subscribe(cb: () => void) {
-  const id = setInterval(cb, 1000);
-  return () => clearInterval(id);
-}
-const clientNow = () => Math.floor(Date.now() / 1000) * 1000;
-const serverNow = () => 0;
-
-/** Human text for the 409 reasons the review route returns; falls back to the route's own error message. */
-function refusalText(body: { error?: unknown; reason?: unknown; criteria?: unknown } | null, status: number): string {
-  const error = typeof body?.error === "string" ? body.error : `request failed (${status})`;
-  const reason = typeof body?.reason === "string" ? body.reason : null;
-  if (!reason) return error;
-  if (reason === "needs_operator") return "An earlier payout or refund for this milestone went wrong and needs an operator. Nothing more can be approved or stopped here.";
-  if (reason === "review_window_closed") return "The review window has closed, so the release can no longer be vetoed.";
-  if (reason === "required_criteria_not_passed") {
-    const list = Array.isArray(body?.criteria) ? body.criteria.filter((c): c is string => typeof c === "string") : [];
-    return list.length > 0 ? `Required criteria did not pass: ${list.join(", ")}.` : "Required criteria did not pass.";
-  }
-  if (/^(payout|refund)_(sent|succeeded|failed)$/.test(reason)) {
-    const kind = reason.startsWith("payout") ? "payout" : "refund";
-    return `The ${kind} has already been sent to PayPal, so it can no longer be changed or stopped.`;
-  }
-  return error;
-}
 
 export interface ReviewPanelProps {
   milestoneId: string;
@@ -77,7 +52,8 @@ export function offersPartial(decisionAction: string | null, amountMinor: number
 /** The client's choices on a milestone in review or needs_client, each with its consequence spelled out underneath. */
 export function ReviewPanel(props: ReviewPanelProps) {
   const router = useRouter();
-  const now = useSyncExternalStore(subscribe, clientNow, serverNow);
+  // Whole seconds in ms; 0 on the server, so the first paint makes no time claims.
+  const now = useSecondClock() * 1000;
   const [busy, setBusy] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,20 +61,16 @@ export function ReviewPanel(props: ReviewPanelProps) {
     setBusy(action);
     setError(null);
     try {
-      const res = await fetch(`/api/milestones/${props.milestoneId}/review`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
+      const res = await postJson(`/api/milestones/${props.milestoneId}/review`, { action });
       if (res.ok) {
         router.refresh();
         return;
       }
-      setError(refusalText((await res.json().catch(() => null)) as Parameters<typeof refusalText>[0], res.status));
+      setError(refusalText(res.body, res.status));
       // A 409 means the milestone moved on (payout sent, window closed): show the current state behind the message.
       if (res.status === 409) router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "request failed");
+      setError(thrownText(e));
     } finally {
       setBusy(null);
     }

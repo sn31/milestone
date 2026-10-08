@@ -1,5 +1,5 @@
 /**
- * The contract page's pure rules: which milestones it keeps polling after a delivery (F3), when the review card offers
+ * The contract page's pure rules: when a delivery still waits for its verdict (F3), when the review card offers
  * a partial release (F4), the PayPal background-tab error (F7), what counts as one of a contract's PayPal calls (F9),
  * and when a dispute's claim can be accepted. countContractOps also runs against Postgres when MILESTONE_E2E=1.
  */
@@ -9,7 +9,7 @@ import { e2e, loadRootEnv } from "./helpers";
 
 vi.mock("@/lib/db", () => ({ getDb: () => { throw new Error("no database in this test"); } }));
 
-import { AWAITING_VERDICT_MS, awaitingVerdict, isLiveSnapshot } from "../src/components/live-rules";
+import { AWAITING_VERDICT_MS, awaitingVerdict } from "../src/components/live-rules";
 import { offersPartial } from "../src/components/review-card-panel";
 import { BACKGROUND_TAB_NOTICE, isBackgroundTabError } from "../src/components/fund-button";
 import { canAcceptClaim } from "../src/components/dispute-card";
@@ -32,25 +32,6 @@ describe("awaitingVerdict", () => {
     expect(awaitingVerdict(undefined, NOW)).toBe(false);
     expect(awaitingVerdict({ result: null, receivedAt: ago(AWAITING_VERDICT_MS + 1) }, NOW)).toBe(false);
     expect(awaitingVerdict({ result: null, receivedAt: "not a date" }, NOW)).toBe(false);
-  });
-});
-
-describe("isLiveSnapshot", () => {
-  const delivery = (over: Partial<{ result: string | null; verifiedAt: string | null }> = {}) => ({
-    id: "dlv_1",
-    receivedAt: ago(3_000).toISOString(),
-    verifiedAt: null,
-    result: null,
-    evidenceCount: 0,
-    ...over,
-  });
-  it("keeps a funded milestone live while its new delivery waits for the verifier", () => {
-    expect(isLiveSnapshot({ live: false, delivery: delivery() }, NOW)).toBe(true);
-  });
-  it("lets it go once the verdict is in, unless the server still says live", () => {
-    expect(isLiveSnapshot({ live: false, delivery: delivery({ result: "fail", verifiedAt: ago(1_000).toISOString() }) }, NOW)).toBe(false);
-    expect(isLiveSnapshot({ live: true, delivery: delivery({ result: "pass", verifiedAt: ago(1_000).toISOString() }) }, NOW)).toBe(true);
-    expect(isLiveSnapshot({ live: false, delivery: null }, NOW)).toBe(false);
   });
 });
 

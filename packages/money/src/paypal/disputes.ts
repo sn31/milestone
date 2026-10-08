@@ -13,9 +13,8 @@
  * accept-claim makes PayPal refund the buyer from the platform account, so it moves money: the REST call lives in
  * ./money.ts and is reached only through acceptDisputeClaim in ../policy/execute.ts. This module only builds its plan.
  */
-import { randomBytes } from "node:crypto";
-import { audit, fromPayPalValue, recordOpResult, requestIdFor, type Db } from "@milestone/core";
-import { PayPalError, type PayPalClient, type RequestOptions } from "./client.ts";
+import { AUDIT_EVENTS, OP_KINDS, asRecord, asString, audit, fromPayPalValue, hasAudit, recordOpResult, requestIdFor, type Db, type Executor } from "@milestone/core";
+import { PayPalError, type MultipartPart, type PayPalClient, type RequestOptions } from "./client.ts";
 import type { WebhookEvent } from "./webhooks.ts";
 
 // ---------- Types (the subset of PayPal's dispute resource Milestone reads) ----------
@@ -72,55 +71,12 @@ export async function getDispute(client: PayPalClient, disputeId: string): Promi
   return client.request<Dispute>("GET", path(disputeId));
 }
 
-/** Builds a multipart/form-data body by hand so each part's headers are exactly what PayPal documents. */
-export function multipartBody(parts: Array<{ name: string; filename?: string; contentType: string; data: Uint8Array | string }>, boundary = `----milestone${randomBytes(12).toString("hex")}`): { body: Uint8Array<ArrayBuffer>; contentType: string } {
-  const enc = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const quote = (s: string) => s.replace(/["\r\n\\]/g, "_");
-  for (const p of parts) {
-    const disposition = `form-data; name="${quote(p.name)}"${p.filename !== undefined ? `; filename="${quote(p.filename)}"` : ""}`;
-    chunks.push(enc.encode(`--${boundary}\r\nContent-Disposition: ${disposition}\r\nContent-Type: ${p.contentType}\r\n\r\n`));
-    chunks.push(typeof p.data === "string" ? enc.encode(p.data) : p.data);
-    chunks.push(enc.encode("\r\n"));
-  }
-  chunks.push(enc.encode(`--${boundary}--\r\n`));
-  const total = chunks.reduce((s, c) => s + c.length, 0);
-  const body = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    body.set(c, at);
-    at += c.length;
-  }
-  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
-}
-
-/**
- * The transport the client was built with, so the simulator answers multipart calls too.
- * DESIGN: PayPalClient keeps fetchImpl private and has no multipart helper; a requestMultipart on the client would
- * replace this accessor (client.ts is shared, so it is left alone here).
- */
-function transport(client: PayPalClient): typeof fetch {
-  return (client as unknown as { fetchImpl?: typeof fetch }).fetchImpl ?? fetch;
-}
-
-/** A multipart POST with the client's token, PayPal-Request-Id and error handling. */
-export async function requestMultipart<T>(client: PayPalClient, p: string, parts: Parameters<typeof multipartBody>[0], opts: RequestOptions = {}): Promise<T> {
-  const { body, contentType } = multipartBody(parts);
-  const headers: Record<string, string> = { Authorization: `Bearer ${await client.accessToken()}`, "Content-Type": contentType, ...opts.headers };
-  if (opts.requestId) headers["PayPal-Request-Id"] = opts.requestId;
-  const res = await transport(client)(`${client.baseUrl}${p}`, { method: "POST", headers, body });
-  const text = await res.text();
-  const json: unknown = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new PayPalError(res.status, json, res.headers.get("paypal-debug-id") ?? undefined);
-  return json as T;
-}
-
 /** POST provide-evidence: the "input" JSON part plus one part per file (named as in evidences[].documents). */
 export async function provideEvidence(client: PayPalClient, disputeId: string, input: { evidences: Evidence[]; files?: EvidenceFile[] }, opts: RequestOptions & { requestId: string }): Promise<{ links?: unknown[] }> {
   const evidences = input.evidences.map((e) => ({ ...e, ...(e.notes !== undefined ? { notes: e.notes.slice(0, EVIDENCE_NOTES_MAX) } : {}) }));
-  const parts: Parameters<typeof multipartBody>[0] = [{ name: "input", contentType: "application/json", data: JSON.stringify({ evidences }) }];
+  const parts: MultipartPart[] = [{ name: "input", contentType: "application/json", data: JSON.stringify({ evidences }) }];
   for (const f of input.files ?? []) parts.push({ name: f.name, filename: f.name, contentType: f.mime, data: f.bytes });
-  return requestMultipart(client, path(disputeId, "/provide-evidence"), parts, opts);
+  return client.requestMultipart(path(disputeId, "/provide-evidence"), parts, opts);
 }
 
 // ---------- Events ----------
@@ -138,28 +94,25 @@ export interface DisputeEventInfo {
   dueAt: string | null;
 }
 
-const s = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
-const o = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
-
 /** Reads a dispute resource (a CUSTOMER.DISPUTE.* event's resource or a GET response). Null without a dispute id. */
 export function parseDispute(resource: unknown): DisputeEventInfo | null {
-  const r = o(resource);
-  const disputeId = s(r.dispute_id);
+  const r = asRecord(resource);
+  const disputeId = asString(r.dispute_id);
   if (!disputeId) return null;
-  const amount = o(r.dispute_amount);
-  const currency = s(amount.currency_code);
-  const value = s(amount.value);
+  const amount = asRecord(r.dispute_amount);
+  const currency = asString(amount.currency_code);
+  const value = asString(amount.value);
   const txns = Array.isArray(r.disputed_transactions) ? r.disputed_transactions : [];
   return {
     disputeId,
-    reason: s(r.reason),
-    status: s(r.status),
-    stage: s(r.dispute_life_cycle_stage),
-    outcome: s(o(r.dispute_outcome).outcome_code),
-    transactionIds: txns.map((t) => s(o(t).seller_transaction_id)).filter((t): t is string => t !== null),
+    reason: asString(r.reason),
+    status: asString(r.status),
+    stage: asString(r.dispute_life_cycle_stage),
+    outcome: asString(asRecord(r.dispute_outcome).outcome_code),
+    transactionIds: txns.map((t) => asString(asRecord(t).seller_transaction_id)).filter((t): t is string => t !== null),
     amountMinor: currency && value ? fromPayPalValue(value, currency) : null,
     currency,
-    dueAt: s(r.seller_response_due_date),
+    dueAt: asString(r.seller_response_due_date),
   };
 }
 
@@ -171,21 +124,13 @@ export type DisputeEventOutcome =
 /** The dispute.opened audit row of a dispute: where every later step finds its milestone and contract. */
 export async function findOpenedDispute(db: Db, disputeId: string) {
   return db.query.auditLog.findFirst({
-    where: (t, { and, eq, sql }) => and(eq(t.event, "dispute.opened"), sql`${t.detail}->>'disputeId' = ${disputeId}`),
+    where: (t, { and, eq, sql }) => and(eq(t.event, AUDIT_EVENTS.disputeOpened), sql`${t.detail}->>'disputeId' = ${disputeId}`),
   });
 }
 
 /** The audit scope of a dispute's rows: its milestone and contract. */
 function scope(milestoneId: string, contractId: string | null): { milestoneId: string; contractId?: string } {
   return contractId ? { milestoneId, contractId } : { milestoneId };
-}
-
-async function hasAudit(db: Db, event: string, key: string, value: string): Promise<boolean> {
-  const row = await db.query.auditLog.findFirst({
-    columns: { id: true },
-    where: (t, { and, eq, sql }) => and(eq(t.event, event), sql`${t.detail}->>${key} = ${value}`),
-  });
-  return Boolean(row);
 }
 
 /**
@@ -209,15 +154,15 @@ export async function recordDisputeEvent(db: Db, event: WebhookEvent): Promise<D
       if (milestone) break;
     }
     if (!milestone) {
-      if (!(await hasAudit(db, "paypal.dispute_unmatched", "eventId", event.id))) {
-        await audit(db, { actor: "paypal", event: "paypal.dispute_unmatched", detail: { eventId: event.id, disputeId, eventType: event.event_type, transactionIds: info.transactionIds } });
+      if (!(await hasAudit(db, { event: AUDIT_EVENTS.paypalDisputeUnmatched, detail: ["eventId", event.id] }))) {
+        await audit(db, { actor: "paypal", event: AUDIT_EVENTS.paypalDisputeUnmatched, detail: { eventId: event.id, disputeId, eventType: event.event_type, transactionIds: info.transactionIds } });
       }
       return { outcome: "unmatched", disputeId, enqueue: false };
     }
     // Any dispute event can be the first we see (CREATED lost or reordered): open it from whichever arrives.
     await audit(db, {
       actor: "paypal",
-      event: "dispute.opened",
+      event: AUDIT_EVENTS.disputeOpened,
       milestoneId: milestone.id,
       contractId: milestone.contractId,
       detail: { disputeId, reason: info.reason, status: info.status, stage: info.stage, amountMinor: info.amountMinor, currency: info.currency, captureId: info.transactionIds[0] ?? null, dueAt: info.dueAt, eventId: event.id },
@@ -231,13 +176,13 @@ export async function recordDisputeEvent(db: Db, event: WebhookEvent): Promise<D
   const where = scope(milestoneId, opened.contractId);
 
   if (event.event_type === "CUSTOMER.DISPUTE.RESOLVED") {
-    if (await hasAudit(db, "dispute.resolved", "disputeId", disputeId)) return { outcome: "already", disputeId, milestoneId, enqueue: false };
-    await audit(db, { actor: "paypal", event: "dispute.resolved", ...where, detail: { disputeId, outcome: info.outcome, status: info.status, amountMinor: info.amountMinor, currency: info.currency, eventId: event.id } });
+    if (await hasAudit(db, { event: AUDIT_EVENTS.disputeResolved, detail: ["disputeId", disputeId] })) return { outcome: "already", disputeId, milestoneId, enqueue: false };
+    await audit(db, { actor: "paypal", event: AUDIT_EVENTS.disputeResolved, ...where, detail: { disputeId, outcome: info.outcome, status: info.status, amountMinor: info.amountMinor, currency: info.currency, eventId: event.id } });
     return { outcome: "resolved", disputeId, milestoneId, enqueue: false };
   }
   if (event.event_type === "CUSTOMER.DISPUTE.UPDATED") {
-    if (await hasAudit(db, "dispute.updated", "eventId", event.id)) return { outcome: "already", disputeId, milestoneId, enqueue: false };
-    await audit(db, { actor: "paypal", event: "dispute.updated", ...where, detail: { disputeId, status: info.status, stage: info.stage, eventId: event.id } });
+    if (await hasAudit(db, { event: AUDIT_EVENTS.disputeUpdated, detail: ["eventId", event.id] })) return { outcome: "already", disputeId, milestoneId, enqueue: false };
+    await audit(db, { actor: "paypal", event: AUDIT_EVENTS.disputeUpdated, ...where, detail: { disputeId, status: info.status, stage: info.stage, eventId: event.id } });
     return { outcome: "updated", disputeId, milestoneId, enqueue: false };
   }
   // A redelivered CREATED: the job may not have run (enqueue failed after the audit), so ask for it again; the job
@@ -251,15 +196,15 @@ export async function recordDisputeEvent(db: Db, event: WebhookEvent): Promise<D
  * Disputes on this milestone that were opened and not resolved since (a dispute.opened row with no later
  * dispute.resolved for the same dispute id). The release job refuses to pay while any is open.
  */
-export async function openDisputesFor(db: Db, milestoneId: string): Promise<string[]> {
+export async function openDisputesFor(db: Executor, milestoneId: string): Promise<string[]> {
   const rows = await db.query.auditLog.findMany({
     columns: { event: true, detail: true, createdAt: true },
-    where: (t, { and, eq, inArray }) => and(eq(t.milestoneId, milestoneId), inArray(t.event, ["dispute.opened", "dispute.resolved"])),
+    where: (t, { and, eq, inArray }) => and(eq(t.milestoneId, milestoneId), inArray(t.event, [AUDIT_EVENTS.disputeOpened, AUDIT_EVENTS.disputeResolved])),
   });
-  const id = (d: unknown) => s(o(d).disputeId);
-  const resolved = rows.filter((r) => r.event === "dispute.resolved");
+  const id = (d: unknown) => asString(asRecord(d).disputeId);
+  const resolved = rows.filter((r) => r.event === AUDIT_EVENTS.disputeResolved);
   const open = rows
-    .filter((r) => r.event === "dispute.opened" && id(r.detail) !== null)
+    .filter((r) => r.event === AUDIT_EVENTS.disputeOpened && id(r.detail) !== null)
     .filter((r) => !resolved.some((x) => id(x.detail) === id(r.detail) && x.createdAt >= r.createdAt))
     .map((r) => id(r.detail)!);
   return [...new Set(open)];
@@ -280,7 +225,7 @@ export interface DisputeActionResult {
 export async function evidenceOpKey(db: Db, disputeId: string): Promise<string> {
   const rows = await db.query.auditLog.findMany({
     columns: { id: true },
-    where: (t, { and, eq, sql }) => and(eq(t.event, "dispute.evidence_submitted"), sql`${t.detail}->>'disputeId' = ${disputeId}`),
+    where: (t, { and, eq, sql }) => and(eq(t.event, AUDIT_EVENTS.disputeEvidenceSubmitted), sql`${t.detail}->>'disputeId' = ${disputeId}`),
   });
   return `${disputeId}:${rows.length}`;
 }
@@ -294,7 +239,7 @@ export async function submitDisputeEvidence(db: Db, client: PayPalClient, input:
   const opened = await findOpenedDispute(db, input.disputeId);
   if (!opened?.milestoneId) return { ok: false, requestId: "", error: "dispute not found", status: 404 };
   const opKey = await evidenceOpKey(db, input.disputeId);
-  const requestId = await requestIdFor(db, "dispute_evidence", opKey);
+  const requestId = await requestIdFor(db, OP_KINDS.disputeEvidence, opKey);
   const notes = input.text.trim().slice(0, EVIDENCE_NOTES_MAX);
   const evidence: Evidence = { evidence_type: input.evidenceType ?? SERVICE_EVIDENCE_TYPE, notes, ...(input.files.length ? { documents: input.files.map((f) => ({ name: f.name })) } : {}) };
   const where = scope(opened.milestoneId, opened.contractId);
@@ -302,10 +247,10 @@ export async function submitDisputeEvidence(db: Db, client: PayPalClient, input:
     const res = await provideEvidence(client, input.disputeId, { evidences: [evidence], files: input.files }, { requestId });
     await recordOpResult(db, requestId, { status: "succeeded", paypalId: input.disputeId, response: res });
     // Two racing submits of one round share the request id (PayPal answers once); only one of them is recorded.
-    if (!(await hasAudit(db, "dispute.evidence_submitted", "requestId", requestId))) {
+    if (!(await hasAudit(db, { event: AUDIT_EVENTS.disputeEvidenceSubmitted, detail: ["requestId", requestId] }))) {
       await audit(db, {
         actor: input.actor,
-        event: "dispute.evidence_submitted",
+        event: AUDIT_EVENTS.disputeEvidenceSubmitted,
         ...where,
         detail: { disputeId: input.disputeId, requestId, opKey, evidenceType: evidence.evidence_type, text: notes, documents: input.files.map((f) => ({ name: f.name, size: f.bytes.length, mime: f.mime, sha256: f.sha256 ?? null })), skipped: input.skipped ?? [] },
       });
@@ -314,7 +259,7 @@ export async function submitDisputeEvidence(db: Db, client: PayPalClient, input:
   } catch (e) {
     // The op row stays pending so a retry reuses the same PayPal-Request-Id.
     const message = e instanceof Error ? e.message : String(e);
-    await audit(db, { actor: input.actor, event: "dispute.evidence_failed", ...where, detail: { disputeId: input.disputeId, requestId, error: message.slice(0, 500) } });
+    await audit(db, { actor: input.actor, event: AUDIT_EVENTS.disputeEvidenceFailed, ...where, detail: { disputeId: input.disputeId, requestId, error: message.slice(0, 500) } });
     return { ok: false, requestId, error: message, status: e instanceof PayPalError ? 502 : 500 };
   }
 }
@@ -350,8 +295,8 @@ export async function disputeAcceptPlan(db: Db, input: { disputeId: string; acto
   if (!ACCEPT_CLAIM_STATUSES.has(m.status)) {
     return { ok: false, status: 409, reason: "milestone_not_final", error: `the milestone is ${m.status}: its money is still in escrow, so the claim cannot be accepted here; an operator settles it` };
   }
-  const d = o(opened.detail);
-  const disputed = typeof d.amountMinor === "number" && s(d.currency) === c.currency ? d.amountMinor : m.amountMinor;
+  const d = asRecord(opened.detail);
+  const disputed = typeof d.amountMinor === "number" && asString(d.currency) === c.currency ? d.amountMinor : m.amountMinor;
   return {
     ok: true,
     plan: { disputeId: input.disputeId, milestoneId, contractId: c.id, clientId: c.clientId, amountMinor: Math.min(disputed, m.amountMinor), currency: c.currency, actor: input.actor, note: input.note.slice(0, 2000) },

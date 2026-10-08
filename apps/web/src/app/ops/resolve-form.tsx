@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, DUR, EASE, Field, StateGlyph, cx, inputClass } from "@/components/ui";
+import { postJson } from "@/lib/api-client";
 
 /**
  * Clears a needs_operator flag with a note (recorded as ops.resolved in the audit log). Moves no money: the operator
@@ -23,12 +24,8 @@ export function ResolveForm({ milestoneId, disabled }: { milestoneId: string; di
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch(`/api/ops/${milestoneId}/resolve`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ note }),
-      });
-      if (!res.ok) setErr(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `failed (${res.status})`);
+      const res = await postJson(`/api/ops/${milestoneId}/resolve`, { note });
+      if (!res.ok) setErr(typeof res.body?.error === "string" ? res.body.error : `failed (${res.status})`);
       else {
         setDone(true);
         router.refresh();

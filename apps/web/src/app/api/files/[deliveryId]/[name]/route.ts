@@ -1,14 +1,13 @@
-import { readFile, realpath } from "node:fs/promises";
-import { relative, resolve, sep, isAbsolute } from "node:path";
-import { UploadPayload } from "@milestone/core";
-import { uploadRoot } from "@milestone/verify";
+import { UploadPayload, loadMilestone } from "@milestone/core";
+import { readUploadedFile, resolveUpload } from "@milestone/verify";
 import { getDb } from "@/lib/db";
-import { getActor } from "@/lib/session";
+import { noStore } from "@/lib/http";
+import { getActor, isContractParty } from "@/lib/session";
 
 const INLINE = new Set(["image/png", "image/jpeg", "image/svg+xml", "application/pdf"]);
 
 function deny(status: number, message: string) {
-  return new Response(message, { status, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+  return new Response(message, { status, headers: { ...noStore, "Content-Type": "text/plain; charset=utf-8" } });
 }
 
 /**
@@ -21,21 +20,18 @@ export async function GET(_req: Request, ctx: { params: Promise<{ deliveryId: st
   const db = getDb();
   const delivery = await db.query.deliveries.findFirst({ where: (d, { eq }) => eq(d.id, deliveryId) });
   if (!delivery || delivery.source !== "upload") return deny(404, "not found");
-  const milestone = await db.query.milestones.findFirst({ where: (m, { eq }) => eq(m.id, delivery.milestoneId) });
-  const contract = milestone ? await db.query.contracts.findFirst({ where: (c, { eq }) => eq(c.id, milestone.contractId) }) : undefined;
-  if (!contract) return deny(404, "not found");
-  if (actor.userId !== contract.clientId && actor.userId !== contract.freelancerId) return deny(403, "only the contract's parties can see delivered files");
+  const found = await loadMilestone(db, delivery.milestoneId);
+  if (!found) return deny(404, "not found");
+  if (!isContractParty(actor, found.contract)) return deny(403, "only the contract's parties can see delivered files");
 
   const payload = UploadPayload.safeParse(delivery.payload);
   const file = payload.success ? payload.data.files.find((f) => f.name === name) : undefined;
   if (!file) return deny(404, "not found");
 
-  const root = await realpath(uploadRoot()).catch(() => null);
-  if (!root) return deny(404, "not found");
-  const real = await realpath(resolve(root, file.path)).catch(() => null);
-  const rel = real ? relative(root, real) : "..";
-  if (!real || rel.startsWith(`..${sep}`) || rel === ".." || isAbsolute(rel)) return deny(404, "not found");
-  const bytes = await readFile(real);
+  // Inside UPLOAD_DIR only (no traversal or symlink escape), and the bytes must still match the sha256 recorded at delivery.
+  if (!(await resolveUpload(file.path))) return deny(404, "not found");
+  const bytes = await readUploadedFile(file).catch(() => null);
+  if (!bytes) return deny(409, "the file changed since it was delivered");
 
   const mime = file.mime.startsWith("text/") ? "text/plain; charset=utf-8" : file.mime;
   const disposition = INLINE.has(file.mime) ? "inline" : "attachment";

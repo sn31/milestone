@@ -60,7 +60,12 @@ vi.mock("@/lib/paypal", async () => {
   const c = await fake.client();
   return { paypal: () => c };
 });
-vi.mock("@/lib/session", () => ({ getActor: async () => fake.state.actor }));
+// The web app's own session and response helpers (its "@/" alias does not resolve from here), with the actor faked.
+vi.mock("@/lib/session", async () => ({
+  ...(await import(/* @vite-ignore */ new URL("../../web/src/lib/session.ts", import.meta.url).pathname)),
+  getActor: async () => fake.state.actor,
+}));
+vi.mock("@/lib/http", () => import(/* @vite-ignore */ new URL("../../web/src/lib/http.ts", import.meta.url).pathname));
 vi.mock("@/lib/db", async () => {
   const { getDb } = await import("../src/lib/db.ts");
   return { getDb };

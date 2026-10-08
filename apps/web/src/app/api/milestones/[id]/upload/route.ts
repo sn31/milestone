@@ -1,11 +1,11 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { NextResponse } from "next/server";
-import { audit, deliveries, enqueue } from "@milestone/core";
+import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, deliveries, enqueue } from "@milestone/core";
 import { uploadRoot } from "@milestone/verify";
 import { getDb } from "@/lib/db";
-import { getActor } from "@/lib/session";
-import { jsonError, loadMilestone } from "../../_shared";
+import { json, jsonError } from "@/lib/http";
+import { getActor, isContractFreelancer } from "@/lib/session";
+import { loadMilestone } from "../../_shared";
 import { checkFiles, MAX_FILE_BYTES, MAX_FILES, newUploadDeliveryId, storeFiles, type IncomingFile } from "./store";
 
 /**
@@ -20,8 +20,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const found = await loadMilestone(db, id);
   if (!found) return jsonError("milestone not found", 404);
   const { milestone: m, contract: c } = found;
-  if (actor.role !== "freelancer" || actor.userId !== c.freelancerId) return jsonError("only the contract's freelancer can deliver", 403);
-  if (m.status !== "funded" && m.status !== "held") return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
+  if (!isContractFreelancer(actor, c)) return jsonError("only the contract's freelancer can deliver", 403);
+  if (!DELIVERABLE_STATUSES.has(m.status)) return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
 
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (declared > MAX_FILES * MAX_FILE_BYTES + 1024 * 1024) return jsonError(`upload too large (max ${MAX_FILES} files of ${MAX_FILE_BYTES / 1024 / 1024} MB)`, 413);
@@ -54,7 +54,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     await rm(join(root, deliveryId), { recursive: true, force: true });
     throw e;
   }
-  await audit(db, { actor: actor.userId, event: "delivery.upload", milestoneId: m.id, contractId: c.id, detail: { deliveryId, files: stored.map((f) => ({ name: f.name, size: f.size, sha256: f.sha256 })) } });
+  await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.deliveryUpload, milestoneId: m.id, contractId: c.id, detail: { deliveryId, files: stored.map((f) => ({ name: f.name, size: f.size, sha256: f.sha256 })) } });
   await enqueue("verify", m.id, { deliveryId }, { dedupe: deliveryId });
-  return NextResponse.json({ ok: true, deliveryId, files: stored.map(({ name, size, sha256, mime }) => ({ name, size, sha256, mime })) }, { headers: { "Cache-Control": "no-store" } });
+  return json({ ok: true, deliveryId, files: stored.map(({ name, size, sha256, mime }) => ({ name, size, sha256, mime })) });
 }

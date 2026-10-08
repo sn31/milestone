@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { DEFAULT_PRICING } from "../src/policy/pricing.ts";
-import { advanceBalances, advanceRefs, criteriaCounts, daysUntil, describeOffer, isAdvanceRef, remainingOwed, underwrite, DEFAULT_HORIZON_DAYS, type AdvanceLedgerRow, type UnderwriteInput } from "../src/policy/advance.ts";
+import { advanceBalances, advanceRefs, advanceRepayment, criteriaCounts, daysUntil, describeOffer, isAdvanceRef, remainingOwed, underwrite, DEFAULT_HORIZON_DAYS, type AdvanceLedgerRow, type UnderwriteInput } from "../src/policy/advance.ts";
 
 const base = (): UnderwriteInput => ({
   freelancer: { verifiedPasses: 5, verifiedFails: 0, outstandingMinor: 0, limitMinor: 50_000 },
@@ -168,5 +168,22 @@ describe("advance balances from the ledger", () => {
         return x.outstandingMinor === funded - pays.reduce((s, p) => s + p, 0) && x.principalRepaidMinor + x.outstandingMinor === x.fundedMinor;
       }),
     );
+  });
+});
+
+describe("advanceRepayment", () => {
+  const a = { principalMinor: 40_000, feeBpsPerDay: 10, fundedAt: new Date("2026-10-10T00:00:00Z") };
+  const decidedAt = new Date("2026-10-17T12:00:00Z");
+
+  it("uses the quoted fee from the offer", () => {
+    expect(advanceRepayment({ ...a, offer: { expectedFeeMinor: 280 } }, decidedAt)).toEqual({ principalMinor: 40_000, feeMinor: 280, repaymentMinor: 40_280 });
+  });
+
+  it("accrues from fundedAt to the decision when the offer has no usable quote, at least one day", () => {
+    // 7.5 days rounds up to 8: 40000 * 10bps * 8 = 320
+    expect(advanceRepayment({ ...a, offer: {} }, decidedAt).feeMinor).toBe(320);
+    expect(advanceRepayment({ ...a, fundedAt: null, offer: {} }, null).feeMinor).toBe(40);
+    expect(advanceRepayment({ ...a, offer: { expectedFeeMinor: "280" } }, a.fundedAt).feeMinor).toBe(40);
+    expect(advanceRepayment({ ...a, offer: { expectedFeeMinor: -1 } }, a.fundedAt).feeMinor).toBe(40);
   });
 });

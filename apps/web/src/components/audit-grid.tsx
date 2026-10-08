@@ -1,12 +1,10 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, ICellRendererParams, IRowNode, PostSortRowsParams } from "ag-grid-community";
-import { gridThemeInset } from "./ag-grid-theme";
-import { logRowHeight, useNarrow, useWidth } from "./evidence-panel";
-import { LogStream, Panel, StateGlyph, cx, inputClass, type LogLine } from "@/components/ui";
+import { Panel, StateGlyph, cx, inputClass, type LogLine } from "@/components/ui";
+import { DetailLogRow, ToggleCell, detailGridProps, expandRows, logRowHeight, toggled, useDetailGrid, type DetailCtx, type DetailRow, type ToggleCellParams } from "@/components/ui/detail-grid";
 import { auditTime, eventGlyph, eventTone } from "@/lib/events";
 
 export interface AuditRow {
@@ -15,34 +13,19 @@ export interface AuditRow {
   milestone: string; // "2 Title" or ""
   actor: string;
   event: string;
-  detail: unknown;
+  /** The detail as one short `key=value` line (the server cuts it); the full detail is loaded when the row opens. */
+  summary: string;
+  /** Whether there is any detail to open. */
+  hasDetail: boolean;
 }
 
-type GridRow = AuditRow & { rowKind: "item" | "detail"; rowKey: string; expanded: boolean };
-
-export function ActivityLink({ contractId }: { contractId: string }) {
-  return (
-    <Link href={`/contracts/${contractId}/activity`} className="font-mono text-[12px] text-fg-muted underline decoration-hairline-strong underline-offset-4 hover:text-fg">
-      Activity log
-    </Link>
-  );
-}
-
-function summarize(detail: unknown): string {
-  if (detail === null || detail === undefined) return "";
-  if (typeof detail !== "object") return String(detail);
-  const parts = Object.entries(detail as Record<string, unknown>).map(([k, v]) => {
-    const s = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
-    return `${k}=${s}`;
-  });
-  return parts.join("  ");
-}
-
-const hasDetail = (d: unknown) => d !== null && d !== undefined && !(typeof d === "object" && Object.keys(d as object).length === 0);
+/** An open row's detail row carries its loaded log lines. */
+type AuditItem = AuditRow & { lines?: LogLine[] };
+type GridRow = DetailRow<AuditItem>;
 
 /** The detail object as log lines: one `key  value` line per field, nested values pretty-printed underneath. */
 function detailLines(detail: unknown): LogLine[] {
-  if (!hasDetail(detail)) return ["(no detail)"];
+  if (detail === null || detail === undefined || (typeof detail === "object" && Object.keys(detail as object).length === 0)) return ["(no detail)"];
   if (typeof detail !== "object") return [String(detail)];
   const entries = Object.entries(detail as Record<string, unknown>);
   const w = Math.min(18, Math.max(...entries.map(([k]) => k.length)));
@@ -65,31 +48,14 @@ function detailLines(detail: unknown): LogLine[] {
 }
 
 const LOG_MAX = 260;
+const NOT_LOADED: LogLine[] = [{ text: "could not load this event's detail", tone: "err" }];
 
-const fmt = (iso: string, short = false) => auditTime(iso, short);
+const toggleParams: ToggleCellParams<AuditItem> = { label: (r) => `detail for ${r.event}`, expandable: (r) => r.hasDetail };
 
-interface Ctx {
-  onToggle: (id: string) => void;
-}
-
-function ToggleCell(p: ICellRendererParams<GridRow, unknown, Ctx>) {
-  if (!p.data || p.data.rowKind !== "item" || !hasDetail(p.data.detail)) return null;
-  const { id, expanded } = p.data;
-  return (
-    <div className="flex h-full items-center">
-      <button
-        type="button"
-        onClick={() => p.context.onToggle(id)}
-        aria-expanded={expanded}
-        aria-label={`${expanded ? "Hide" : "Show"} detail for ${p.data.event}`}
-        className="grid size-6 place-items-center rounded-chip text-fg-faint transition-colors duration-200 hover:bg-surface-raised hover:text-fg"
-      >
-        <svg aria-hidden viewBox="0 0 10 10" className={cx("size-2.5 transition-transform duration-200 ease-glide", expanded && "rotate-90")} fill="none" stroke="currentColor" strokeWidth={1.5}>
-          <path d="M3.5 1.8 L6.8 5 L3.5 8.2" />
-        </svg>
-      </button>
-    </div>
-  );
+function AuditLogRow(p: ICellRendererParams<GridRow>) {
+  if (!p.data) return null;
+  const r = p.data;
+  return <DetailLogRow lines={r.lines ?? ["(no detail)"]} maxHeight={LOG_MAX} title={`${r.event} · ${auditTime(r.at)} UTC · ${r.actor}`} />;
 }
 
 function EventCell(p: ICellRendererParams<GridRow>) {
@@ -119,16 +85,6 @@ function MilestoneCell(p: ICellRendererParams<GridRow>) {
   );
 }
 
-function DetailRow(p: ICellRendererParams<GridRow>) {
-  if (!p.data) return null;
-  const r = p.data;
-  return (
-    <div className="h-full px-3 py-3 sm:pl-[52px]">
-      <LogStream lines={detailLines(r.detail)} maxHeight={LOG_MAX} stagger={0.03} title={`${r.event} · ${fmt(r.at)} UTC · ${r.actor}`} />
-    </div>
-  );
-}
-
 /** Keeps each open detail row directly under its event whatever the sort. */
 function keepDetailsUnderParents(p: PostSortRowsParams<GridRow>) {
   const details = new Map<string, IRowNode<GridRow>>();
@@ -147,62 +103,56 @@ function keepDetailsUnderParents(p: PostSortRowsParams<GridRow>) {
 
 /**
  * The contract's audit log as a grid: newest first, each event in the colour of the state it belongs to. A row's
- * chevron opens its detail as a log. The grid takes the height of its page of rows (no empty band below).
+ * chevron loads its detail (`loadDetail`, once per row) and opens it as a log. The grid takes the height of its page of
+ * rows (no empty band below).
  */
-export function AuditGrid({ rows }: { rows: AuditRow[] }) {
+export function AuditGrid({ rows, loadDetail }: { rows: AuditRow[]; loadDetail: (id: string) => Promise<unknown> }) {
   const [quick, setQuick] = useState("");
-  const [open, setOpen] = useState<Set<string>>(new Set());
-  const narrow = useNarrow();
-  const box = useRef<HTMLDivElement>(null);
-  const grid = useRef<AgGridReact<GridRow>>(null);
-  const width = useWidth(box);
-  useEffect(() => {
-    grid.current?.api?.resetRowHeights();
-  }, [width, narrow]);
-  const onToggle = (id: string) =>
-    setOpen((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  // Detail log lines by row id, filled the first time a row is opened.
+  const [lines, setLines] = useState<ReadonlyMap<string, LogLine[]>>(new Map());
+  const [loading, setLoading] = useState<ReadonlySet<string>>(new Set());
+  const { narrow, box, grid, width } = useDetailGrid<AuditItem>();
 
-  const data = useMemo<GridRow[]>(
-    () =>
-      rows.flatMap((r) => {
-        const expanded = open.has(r.id);
-        const base: GridRow = { ...r, rowKind: "item", rowKey: r.id, expanded };
-        return expanded ? [base, { ...r, rowKind: "detail" as const, rowKey: `${r.id}:detail`, expanded }] : [base];
-      }),
-    [rows, open],
-  );
+  const onToggle = (id: string) => {
+    if (open.has(id) || lines.has(id)) return setOpen((prev) => toggled(prev, id));
+    if (loading.has(id)) return;
+    setLoading((prev) => new Set(prev).add(id));
+    loadDetail(id)
+      .then(detailLines, () => NOT_LOADED)
+      .then((l) => {
+        setLines((prev) => new Map(prev).set(id, l));
+        setOpen((prev) => new Set(prev).add(id));
+        setLoading((prev) => toggled(prev, id));
+      });
+  };
+  const data = useMemo<GridRow[]>(() => expandRows<AuditItem>(rows, open).map((r) => (r.rowKind === "detail" ? { ...r, lines: lines.get(r.id) } : r)), [rows, open, lines]);
 
   const cols = useMemo<ColDef<GridRow>[]>(
     () => [
-      { colId: "toggle", headerName: "", width: narrow ? 40 : 48, resizable: false, sortable: false, filter: false, cellRenderer: ToggleCell },
+      { colId: "toggle", headerName: "", width: narrow ? 40 : 48, resizable: false, sortable: false, filter: false, cellRenderer: ToggleCell, cellRendererParams: toggleParams },
       {
         field: "at",
         headerName: narrow ? "Time" : "Time (UTC)",
         width: narrow ? 96 : 150,
         sort: "desc",
-        valueFormatter: (v) => (v.value ? fmt(String(v.value), narrow) : ""),
+        valueFormatter: (v) => (v.value ? auditTime(String(v.value), narrow) : ""),
         cellClass: "font-mono text-[12px] text-fg-muted tabular",
       },
       { field: "event", headerName: "Event", width: 250, flex: narrow ? 1 : undefined, minWidth: 180, cellRenderer: EventCell },
       { field: "milestone", headerName: "Milestone", width: 210, hide: narrow, cellRenderer: MilestoneCell },
       { field: "actor", headerName: "Actor", width: 150, hide: narrow, cellClass: "text-fg-muted" },
       {
-        field: "detail",
+        field: "summary",
         headerName: "Detail",
         flex: 1,
         minWidth: 220,
         hide: narrow,
         sortable: false,
         filter: "agTextColumnFilter",
-        filterValueGetter: (p) => summarize(p.data?.detail),
-        // detail is an object; a formatter silences AG Grid warning #48 and gives copy/export a readable string.
-        valueFormatter: (p) => summarize(p.value),
-        tooltipValueGetter: (p) => summarize(p.data?.detail) || undefined,
+        // The search box filters events, as it did when this column held the detail object.
+        getQuickFilterText: () => "",
+        tooltipValueGetter: (p) => p.data?.summary || undefined,
         cellClass: "font-mono text-[11.5px] text-fg-faint",
       },
     ],
@@ -237,22 +187,16 @@ export function AuditGrid({ rows }: { rows: AuditRow[] }) {
             // Remount across the breakpoint: rows rendered before it would keep the other time format.
             key={narrow ? "narrow" : "wide"}
             ref={grid}
-            theme={gridThemeInset}
+            {...detailGridProps<AuditItem>((r) => logRowHeight(r.lines ?? ["(no detail)"], width, narrow, LOG_MAX))}
             rowData={data}
             columnDefs={cols}
-            context={{ onToggle } satisfies Ctx}
-            domLayout="autoHeight"
-            suppressCellFocus
-            tooltipShowDelay={400}
+            context={{ onToggle } satisfies DetailCtx}
             defaultColDef={{ sortable: true, filter: true, resizable: true, suppressMovable: true }}
             quickFilterText={quick}
             pagination={rows.length > pageSize}
             paginationPageSize={pageSize}
             paginationPageSizeSelector={[10, 20, 50, 100]}
-            getRowId={(p) => p.data.rowKey}
-            isFullWidthRow={(p) => p.rowNode.data?.rowKind === "detail"}
-            fullWidthCellRenderer={DetailRow}
-            getRowHeight={(p) => (p.data?.rowKind === "detail" ? logRowHeight(detailLines(p.data.detail), width, narrow, LOG_MAX) : 44)}
+            fullWidthCellRenderer={AuditLogRow}
             postSortRows={keepDetailsUnderParents}
             overlayNoRowsTemplate="<span>No events match.</span>"
           />

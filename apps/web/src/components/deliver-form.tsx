@@ -3,6 +3,7 @@
 import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Field, inputClass, cx } from "@/components/ui";
+import { postJson, thrownText } from "@/lib/api-client";
 
 const MAX_FILES = 10;
 const MAX_MB = 20;
@@ -46,15 +47,15 @@ export function DeliverForm(props: {
   const waitingId = sent?.deliveryId ?? props.pending?.deliveryId ?? null;
   const waiting = waitingId !== null && waitingId !== again;
 
-  async function send(kind: "files" | "repo", req: () => Promise<Response>) {
+  async function send(kind: "files" | "repo", url: string, data: FormData | { repoUrl: string; ref: string }) {
     setBusy(kind);
     setError(null);
     setDone(null);
     try {
-      const res = await req();
-      const body = (await res.json().catch(() => null)) as { error?: string; deliveryId?: string; sha?: string; duplicate?: boolean; files?: unknown[] } | null;
+      const res = await postJson<{ deliveryId?: string; sha?: string; duplicate?: boolean; files?: unknown[] }>(url, data);
+      const body = res.body;
       if (!res.ok) {
-        setError(body?.error ?? `request failed (${res.status})`);
+        setError(res.error);
         if (res.status === 409) router.refresh();
         return;
       }
@@ -75,7 +76,7 @@ export function DeliverForm(props: {
       // The re-render finds the delivery without a verdict and starts polling the milestone (see LiveRefresh).
       router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "request failed");
+      setError(thrownText(e));
     } finally {
       setBusy(null);
     }
@@ -115,18 +116,12 @@ export function DeliverForm(props: {
     if (big) return setError(`${big.name} is larger than ${MAX_MB} MB.`);
     const form = new FormData();
     for (const f of picked) form.append("files", f);
-    void send("files", () => fetch(`/api/milestones/${props.milestoneId}/upload`, { method: "POST", body: form }));
+    void send("files", `/api/milestones/${props.milestoneId}/upload`, form);
   }
 
   function deliverRepo(e: React.FormEvent) {
     e.preventDefault();
-    void send("repo", () =>
-      fetch(`/api/milestones/${props.milestoneId}/deliver`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repoUrl, ref }),
-      }),
-    );
+    void send("repo", `/api/milestones/${props.milestoneId}/deliver`, { repoUrl, ref });
   }
 
   return (

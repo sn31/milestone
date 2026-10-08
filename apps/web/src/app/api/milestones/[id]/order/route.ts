@@ -1,11 +1,11 @@
-import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { audit, milestones, recordOpResult, requestIdFor } from "@milestone/core";
+import { AUDIT_EVENTS, OP_KINDS, audit, milestones, recordOpResult, requestIdFor } from "@milestone/core";
 import { createOrder } from "@milestone/money";
 import { getDb } from "@/lib/db";
+import { json, jsonError } from "@/lib/http";
 import { paypal } from "@/lib/paypal";
-import { getActor } from "@/lib/session";
-import { isContractClient, jsonError, loadMilestone, paypalErrorResponse } from "../../_shared";
+import { getActor, isContractClient } from "@/lib/session";
+import { loadMilestone, paypalErrorResponse } from "../../_shared";
 
 /**
  * Creates (or replays) the PayPal order that funds one milestone. Called by the JS SDK's createOrder.
@@ -25,7 +25,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const base = (process.env.APP_URL || new URL(req.url).origin).replace(/\/+$/, "");
   const back = `${base}/contracts/${c.id}`;
-  const requestId = await requestIdFor(db, "order", m.id);
+  const requestId = await requestIdFor(db, OP_KINDS.order, m.id);
 
   let orderId: string;
   try {
@@ -47,7 +47,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   if (m.paypalOrderId !== orderId) {
     await db.update(milestones).set({ paypalOrderId: orderId }).where(eq(milestones.id, m.id));
-    await audit(db, { actor: actor.userId, event: "milestone.order_created", milestoneId: m.id, contractId: c.id, detail: { orderId } });
+    await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.milestoneOrderCreated, milestoneId: m.id, contractId: c.id, detail: { orderId } });
   }
-  return NextResponse.json({ orderId }, { headers: { "Cache-Control": "no-store" } });
+  return json({ orderId });
 }

@@ -140,10 +140,6 @@
   --color-state-held: var(--state-held);
   --color-state-needs: var(--state-needs);
   --color-state-danger: var(--state-danger);
-  /* legacy names kept so older screens keep rendering until they are restyled */
-  --color-background: var(--bg);
-  --color-foreground: var(--fg);
-  --color-accent: var(--state-funded);
 
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;

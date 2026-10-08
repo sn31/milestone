@@ -1,31 +1,55 @@
 /**
  * The only place the codebase talks to a model. The provider comes from MODEL_PROVIDER: "ollama" (a local model,
  * the default) or "anthropic" (Claude, used when ANTHROPIC_API_KEY is set and MODEL_PROVIDER is not "ollama").
+ * modelConfig() is the one reading of the environment: isModelConfigured, getProvider and both providers use it.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { anthropicModel, createAnthropicProvider, toAnthropicContent } from "./providers/anthropic.ts";
-import { createOllamaProvider, ollamaModel, ollamaReachable } from "./providers/ollama.ts";
+import { stripRoots } from "./deterministic.ts";
+import { createAnthropicProvider, toAnthropicContent } from "./providers/anthropic.ts";
+import { modelSettings, providerName, type ModelSettings } from "./providers/config.ts";
+import { createOllamaProvider, ollamaReachable } from "./providers/ollama.ts";
 import { wrapUntrusted, type Block, type Message, type Provider, type ToolResult } from "./providers/types.ts";
 
 export { anthropic } from "./providers/anthropic.ts";
+export { providerName } from "./providers/config.ts";
+export type { ProviderName } from "./providers/config.ts";
 export { wrapUntrusted } from "./providers/types.ts";
 export type { Provider } from "./providers/types.ts";
 
-export type ProviderName = "ollama" | "anthropic";
+export interface ModelConfig extends ModelSettings {
+  /**
+   * Whether a model can be called: the Anthropic key exists (anthropic), or the Ollama server answers GET /api/tags
+   * within 1 s and has the text model pulled (ollama; cached for 30 s). Callers fall back to deterministic-only.
+   */
+  configured(): Promise<boolean>;
+}
 
-/** "ollama" unless an Anthropic key is set and MODEL_PROVIDER does not say "ollama". MODEL_PROVIDER wins when set. */
-export function providerName(env: NodeJS.ProcessEnv = process.env): ProviderName {
-  const p = env.MODEL_PROVIDER?.trim().toLowerCase();
-  if (p === "ollama" || p === "anthropic") return p;
-  return env.ANTHROPIC_API_KEY ? "anthropic" : "ollama";
+let reach: { at: number; key: string; ok: Promise<boolean> } | null = null;
+const REACH_TTL_MS = 30_000;
+
+/** The provider, models and server the environment selects, and whether that model can be called. */
+export function modelConfig(env: NodeJS.ProcessEnv = process.env): ModelConfig {
+  const s = modelSettings(env);
+  return {
+    ...s,
+    async configured() {
+      if (s.provider === "anthropic") return Boolean(env.ANTHROPIC_API_KEY);
+      const key = `${s.baseUrl}|${s.textModel}`;
+      if (!reach || reach.key !== key || Date.now() - reach.at > REACH_TTL_MS) {
+        reach = { at: Date.now(), key, ok: ollamaReachable({ baseUrl: s.baseUrl, model: s.textModel }) };
+      }
+      return reach.ok;
+    },
+  };
 }
 
 /** The model id text requests use under the current provider (MILESTONE_MODEL, else the provider's default). */
 export function currentModel(env: NodeJS.ProcessEnv = process.env): string {
-  return providerName(env) === "anthropic" ? anthropicModel(env) : ollamaModel(env);
+  return modelSettings(env).textModel;
 }
 
+/** The text model at import time; kept for compatibility. A result's own `model` field is what actually ran. */
 export const MODEL = currentModel();
 
 const providers = new Map<string, Provider>();
@@ -33,11 +57,11 @@ let override: Provider | null = null;
 
 export function getProvider(): Provider {
   if (override) return override;
-  const name = providerName();
-  const key = `${name}:${currentModel()}`;
+  const c = modelConfig();
+  const key = `${c.provider}|${c.textModel}|${c.visionModel}|${c.baseUrl}`;
   let p = providers.get(key);
   if (!p) {
-    p = name === "anthropic" ? createAnthropicProvider() : createOllamaProvider();
+    p = c.provider === "anthropic" ? createAnthropicProvider({ model: c.textModel }) : createOllamaProvider({ baseUrl: c.baseUrl, model: c.textModel, visionModel: c.visionModel });
     providers.set(key, p);
   }
   return p;
@@ -48,20 +72,9 @@ export function setProviderForTests(p: Provider | null): void {
   override = p;
 }
 
-let reach: { at: number; key: string; ok: Promise<boolean> } | null = null;
-const REACH_TTL_MS = 30_000;
-
-/**
- * Whether a model can be called: the Anthropic key exists (anthropic), or the Ollama server answers GET /api/tags
- * within 1 s and has the text model pulled (ollama; cached for 30 s). Callers fall back to deterministic-only.
- */
-export async function isModelConfigured(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  if (providerName(env) === "anthropic") return Boolean(env.ANTHROPIC_API_KEY);
-  const key = `${env.OLLAMA_HOST ?? ""}|${ollamaModel(env)}`;
-  if (!reach || reach.key !== key || Date.now() - reach.at > REACH_TTL_MS) {
-    reach = { at: Date.now(), key, ok: ollamaReachable({ model: ollamaModel(env) }) };
-  }
-  return reach.ok;
+/** Whether a model can be called (modelConfig(env).configured()); ask this, never the key. */
+export function isModelConfigured(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+  return modelConfig(env).configured();
 }
 
 export function promptHash(...parts: string[]): string {
@@ -92,6 +105,13 @@ export function toolResultBlocks(out: ToolOutput): Block[] {
   return [{ type: "text", text: label }, { type: "document", mediaType: out.mediaType, base64: out.base64 }];
 }
 
+/** A tool's output with worker directories stripped from its text (stripRoots); images and PDFs keep their bytes. */
+function scrubOutput(out: ToolOutput, roots: string[]): ToolOutput {
+  if (!roots.length) return out;
+  if (typeof out === "string") return stripRoots(out, roots);
+  return out.note === undefined ? out : { ...out, note: stripRoots(out.note, roots) };
+}
+
 /** The same, in Anthropic's tool_result content shape. */
 export function toolResultContent(out: ToolOutput) {
   return toAnthropicContent(toolResultBlocks(out));
@@ -106,6 +126,8 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
   tools?: Tool[];
   maxTurns?: number;
   maxTokens?: number;
+  /** Worker directories (checkout, UPLOAD_DIR) stripped from every tool result and tool error before the model sees it. */
+  roots?: string[];
 }
 
 /**
@@ -139,7 +161,7 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
         const input = tool.input.safeParse(u.input);
         content = input.success ? await tool.run(input.data).catch((e: Error) => `tool error: ${e.message}`) : `bad input: ${input.error.message}`;
       }
-      results.push({ callId: u.id, name: u.name, content: toolResultBlocks(content) });
+      results.push({ callId: u.id, name: u.name, content: toolResultBlocks(scrubOutput(content, o.roots ?? [])) });
     }
     messages.push({ role: "tool", results });
   }

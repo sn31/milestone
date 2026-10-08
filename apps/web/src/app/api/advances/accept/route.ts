@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
-import { advances, audit, enqueue, milestones, users, type Db } from "@milestone/core";
-import { describeOffer, loadUnderwriting, paypalMode } from "@milestone/money";
+import { AUDIT_EVENTS, advances, audit, enqueue, loadMilestone, milestones, payoutReceiver, users } from "@milestone/core";
+import { describeOffer, loadUnderwriting } from "@milestone/money";
 import { getDb } from "@/lib/db";
+import { json, jsonError } from "@/lib/http";
 import { getActor } from "@/lib/session";
-import { advanceView, json, partnerIdFor } from "../_shared";
+import { advanceView, partnerIdFor } from "../_shared";
 
 export const dynamic = "force-dynamic";
 
@@ -31,20 +32,18 @@ async function queue(a: AdvanceRow): Promise<boolean> {
  */
 export async function POST(req: Request) {
   const actor = await getActor();
-  if (actor.role !== "freelancer") return json({ error: "only the freelancer can accept an advance" }, 403);
+  if (actor.role !== "freelancer") return jsonError("only the freelancer can accept an advance", 403);
   const body = (await req.json().catch(() => null)) as { milestoneId?: unknown } | null;
   const milestoneId = typeof body?.milestoneId === "string" && body.milestoneId ? body.milestoneId : null;
-  if (!milestoneId) return json({ error: "milestoneId is required" }, 400);
+  if (!milestoneId) return jsonError("milestoneId is required", 400);
 
   const db = getDb();
-  const m = await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, milestoneId) });
-  if (!m) return json({ error: "milestone not found" }, 404);
-  const c = await db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, m.contractId) });
-  if (!c) return json({ error: "contract not found" }, 404);
-  if (c.freelancerId !== actor.userId) return json({ error: "not your milestone" }, 403);
+  const found = await loadMilestone(db, milestoneId);
+  if (!found) return jsonError("milestone not found", 404);
+  const { contract: c } = found;
+  if (c.freelancerId !== actor.userId) return jsonError("not your milestone", 403);
 
   const outcome = await db.transaction(async (tx): Promise<Outcome> => {
-    const t = tx as unknown as Db;
     const refuse = (error: string, status = 409, reason?: string): Outcome => ({ refused: { error, status, ...(reason ? { reason } : {}) } });
     const [locked] = await tx.select({ id: milestones.id }).from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!locked) return refuse("milestone not found", 404);
@@ -55,13 +54,13 @@ export async function POST(req: Request) {
     const people = await tx.select().from(users).where(inArray(users.id, parties)).orderBy(users.id).for("update");
     const freelancer = people.find((p) => p.id === c.freelancerId);
     if (!freelancer?.paypalEmail) return refuse("add a PayPal email to your profile before taking an advance", 409, "no_paypal_email");
-    const partnerId = await partnerIdFor(t);
+    const partnerId = await partnerIdFor(tx);
     if (!partnerId) return refuse("no capital partner is configured", 503, "no_partner");
     // The release repays the partner by PayPal payout: without a receiver it could never be repaid. Simulated PayPal
-    // (local demo) pays the account email, as the release job does.
+    // (local demo) pays the account email, as the release job does (payoutReceiver).
     const partner = await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, partnerId) });
     if (!partner) return refuse("the capital partner does not exist", 503, "no_partner");
-    if (!(partner.paypalEmail ?? (paypalMode() === "simulated" ? partner.email : null))) {
+    if (!payoutReceiver(partner)) {
       return refuse("the capital partner has no PayPal email, so an advance could not be repaid", 409, "no_partner_paypal_email");
     }
 
@@ -85,9 +84,9 @@ export async function POST(req: Request) {
         explanation: describeOffer(u, u.currency),
       })
       .returning();
-    await audit(t, {
+    await audit(tx, {
       actor: actor.userId,
-      event: "advance.accepted",
+      event: AUDIT_EVENTS.advanceAccepted,
       milestoneId,
       contractId: c.id,
       detail: { advanceId: row!.id, partnerId, principalMinor: u.terms.principalMinor, feeBpsPerDay: u.terms.feeBpsPerDay, expectedFeeMinor: u.terms.expectedFeeMinor, repaymentMinor: u.terms.repaymentMinor, currency: u.currency },
@@ -95,7 +94,7 @@ export async function POST(req: Request) {
     return { advance: row!, created: true };
   });
 
-  if ("refused" in outcome) return json({ error: outcome.refused.error, ...(outcome.refused.reason ? { reason: outcome.refused.reason } : {}) }, outcome.refused.status);
+  if ("refused" in outcome) return jsonError(outcome.refused.error, outcome.refused.status, outcome.refused.reason ? { reason: outcome.refused.reason } : undefined);
   const queued = await queue(outcome.advance);
   return json({ advance: advanceView(outcome.advance), created: outcome.created, queued }, outcome.created ? 201 : 200);
 }

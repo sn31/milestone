@@ -1,4 +1,5 @@
-import { PayPalClient, createPayPalClient, paypalMode } from "@milestone/money";
+import { paypalMode } from "@milestone/core";
+import { createPayPalClient, type PayPalClient } from "@milestone/money";
 
 let client: PayPalClient | null = null;
 

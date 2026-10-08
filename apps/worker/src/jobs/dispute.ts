@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Job } from "pg-boss";
-import { audit, ledgerEntries, type Db } from "@milestone/core";
+import { AUDIT_EVENTS, accounts, asString, audit, decisionDeliveryId, ledgerEntries, loadMilestone, type Db } from "@milestone/core";
 import { findOpenedDispute, getDispute, parseDispute } from "@milestone/money";
 import { compileEvidencePack, draftResponse, type EvidencePack, type EvidencePackInput } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
@@ -14,26 +14,25 @@ import { paypal } from "../lib/paypal.ts";
  * contract's freelancer. Idempotent: a dispute is drafted once.
  */
 export async function dispute(job: Job<JobData>): Promise<void> {
-  const disputeId = typeof job.data.disputeId === "string" ? job.data.disputeId : null;
+  const disputeId = asString(job.data.disputeId);
   if (!disputeId) throw new Error("dispute job needs disputeId");
   await draftDispute(getDb(), disputeId);
 }
 
 /** Loads the milestone's record as compileEvidencePack takes it. Exported for the e2e test and the page. */
 export async function loadPackInput(db: Db, milestoneId: string, disputeInfo: EvidencePackInput["dispute"] = null): Promise<EvidencePackInput | null> {
-  const milestone = await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, milestoneId) });
-  if (!milestone) return null;
-  const contract = await db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, milestone.contractId) });
-  if (!contract) return null;
+  const loaded = await loadMilestone(db, milestoneId);
+  if (!loaded) return null;
+  const { milestone, contract } = loaded;
   // Deterministic checks first, judgment last (criteria have no position of their own).
   const kindOrder = ["test", "build", "file", "upload", "visual", "judgment"];
   const criteria = (await db.query.criteria.findMany({ where: (t, { eq }) => eq(t.milestoneId, milestone.id), orderBy: (t, { asc }) => [asc(t.id)] })).sort(
     (a, b) => kindOrder.indexOf(a.kind) - kindOrder.indexOf(b.kind) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   // The delivery the decision was made for; else the latest one.
-  const decided = (milestone.decision as { deliveryId?: unknown } | null)?.deliveryId;
+  const decided = decisionDeliveryId(milestone.decision);
   const delivery =
-    (typeof decided === "string" ? await db.query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decided) }) : undefined) ??
+    (decided ? await db.query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decided) }) : undefined) ??
     (await db.query.deliveries.findFirst({ where: (t, { eq }) => eq(t.milestoneId, milestone.id), orderBy: (t, { desc }) => [desc(t.receivedAt)] })) ??
     null;
   // The milestone's rows plus the contract-wide ones (signatures).
@@ -42,7 +41,7 @@ export async function loadPackInput(db: Db, milestoneId: string, disputeInfo: Ev
   });
   // Every transaction that touched this milestone's escrow account, in full (both legs).
   const ledgerRows = await db.query.ledgerEntries.findMany({
-    where: (t, { inArray, eq }) => inArray(t.txnId, db.select({ txnId: ledgerEntries.txnId }).from(ledgerEntries).where(eq(ledgerEntries.account, `held:${milestone.id}`))),
+    where: (t, { inArray, eq }) => inArray(t.txnId, db.select({ txnId: ledgerEntries.txnId }).from(ledgerEntries).where(eq(ledgerEntries.account, accounts.held(milestone.id)))),
   });
   return { contract, milestone, criteria, delivery, auditRows, ledgerRows, dispute: disputeInfo };
 }
@@ -57,7 +56,7 @@ export async function draftDispute(db: Db, disputeId: string): Promise<DraftOutc
   }
   const already = await db.query.auditLog.findFirst({
     columns: { id: true },
-    where: (t, { and, eq, sql }) => and(eq(t.event, "dispute.drafted"), sql`${t.detail}->>'disputeId' = ${disputeId}`),
+    where: (t, { and, eq, sql }) => and(eq(t.event, AUDIT_EVENTS.disputeDrafted), sql`${t.detail}->>'disputeId' = ${disputeId}`),
   });
   if (already) return { kind: "already" };
 
@@ -77,7 +76,7 @@ export async function draftDispute(db: Db, disputeId: string): Promise<DraftOutc
   const draft = await draftResponse(pack);
   await audit(db, {
     actor: "verifier",
-    event: "dispute.drafted",
+    event: AUDIT_EVENTS.disputeDrafted,
     milestoneId: opened.milestoneId,
     ...(opened.contractId ? { contractId: opened.contractId } : {}),
     // The pack and draft are the freelancer's working copy: the activity page shows anyone else only these hashes.

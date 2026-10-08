@@ -1,9 +1,11 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { and, asc, desc, inArray } from "drizzle-orm";
-import { auditLog, contracts, milestones, paypalOps } from "@milestone/core";
+import { and, asc, inArray } from "drizzle-orm";
+import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps } from "@milestone/core";
+import { paypalMode } from "@milestone/money";
 import { getDb } from "@/lib/db";
-import { ACTOR_NAMES, getActor } from "@/lib/session";
+import { ACTOR_NAMES, getActor, isOperator } from "@/lib/session";
+import { auditTime, eventTone } from "@/lib/events";
 import { formatDateTime, formatMoney, humanize } from "@/lib/format";
 import { Button, EmptyState, Hash, LogStream, Money, PageHeader, Panel, Reveal, Stat, StatePill, cx, type LogLine, type ToneKey } from "@/components/ui";
 import { ResolveForm } from "./resolve-form";
@@ -11,9 +13,6 @@ import { ResolveForm } from "./resolve-form";
 export const dynamic = "force-dynamic";
 
 type Party = "partner" | "freelancer";
-const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
-const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 /** paypal_ops.status as a pill: in flight reads as money moving (funded blue), settled as released, failed as danger. */
 const OP_PILL: Record<string, { state: string; label: string }> = {
@@ -32,20 +31,14 @@ function age(from: Date, now: Date): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-const hms = (d: Date) => d.toISOString().slice(11, 19);
+const hms = (d: Date) => auditTime(d, true);
 
-/** One audit row as a log line, toned by what it means for the money. */
+/** One audit row as a log line, in its event's tone (lib/events) like every other list of events; plain when neutral. */
 function trailLine(e: { event: string; actor: string; detail: unknown; createdAt: Date }): LogLine {
   const d = obj(e.detail);
-  const tone: ToneKey | undefined = /needs_operator|failed|denied|reversed|returned|blocked|refused/.test(e.event)
-    ? "danger"
-    : /held/.test(e.event)
-      ? "held"
-      : /released|succeeded|completed|resolved/.test(e.event)
-        ? "released"
-        : undefined;
+  const tone = eventTone(e.event);
   const why = str(d.reason) ?? str(d.note);
-  return { at: hms(e.createdAt), text: `${e.event}  ${e.actor}${why ? `  · ${why}` : ""}`, tone };
+  return { at: hms(e.createdAt), text: `${e.event}  ${e.actor}${why ? `  · ${why}` : ""}`, tone: tone === "neutral" || tone === "verifying" ? undefined : tone };
 }
 
 /**
@@ -56,27 +49,12 @@ function trailLine(e: { event: string; actor: string; detail: unknown; createdAt
 export default async function OpsPage() {
   const db = getDb();
   const actor = await getActor();
-  const canAct = actor.role === "partner" || (actor.role as string) === "platform";
-  const simulated = process.env.PAYPAL_MODE === "simulated";
+  const canAct = isOperator(actor);
+  const mode = paypalMode();
+  const simulated = mode === "simulated";
 
-  const events = await db
-    .select()
-    .from(auditLog)
-    .where(inArray(auditLog.event, ["milestone.needs_operator", "ops.resolved"]))
-    .orderBy(desc(auditLog.createdAt));
-  const latestFlag = new Map<string, (typeof events)[number]>();
-  const latestResolved = new Map<string, Date>();
-  for (const e of events) {
-    if (!e.milestoneId) continue;
-    if (e.event === "milestone.needs_operator" && !latestFlag.has(e.milestoneId)) latestFlag.set(e.milestoneId, e);
-    if (e.event === "ops.resolved" && !latestResolved.has(e.milestoneId)) latestResolved.set(e.milestoneId, e.createdAt);
-  }
-  const open = [...latestFlag.values()]
-    .filter((f) => {
-      const r = latestResolved.get(f.milestoneId!);
-      return !r || r < f.createdAt;
-    })
-    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  // Oldest case first.
+  const open = [...(await openOperatorFlags(db)).values()].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const ids = open.map((f) => f.milestoneId!);
   const [ms, ops, trail] = ids.length
     ? await Promise.all([
@@ -106,11 +84,7 @@ export default async function OpsPage() {
             Operations <span className="text-hairline-strong">/</span> {ACTOR_NAMES[actor.userId] ?? actor.userId}
           </>
         }
-        title={
-          <>
-            Operator queue
-          </>
-        }
+        title="Operator queue"
         description="A payout item that fails, is blocked, returned or reversed stops its milestone here, held. Nothing on it is paid again automatically; a person reads the trail and resolves it."
         aside={
           <>
@@ -127,7 +101,7 @@ export default async function OpsPage() {
           {open.length > 0 ? `${open.length} waiting` : "all clear"}
         </span>
         <span>
-          paypal <span className="text-fg-muted">{process.env.PAYPAL_MODE ?? "sandbox"}</span>
+          paypal <span className="text-fg-muted">{mode}</span>
         </span>
         <span>
           oldest <span className="text-fg-muted">{open[0] ? age(open[0].createdAt, now) : "none"}</span>

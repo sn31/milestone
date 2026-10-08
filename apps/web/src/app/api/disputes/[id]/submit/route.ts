@@ -1,10 +1,10 @@
-import { NextResponse } from "next/server";
 import { EVIDENCE_NOTES_MAX, submitDisputeEvidence } from "@milestone/money";
 import { getDb } from "@/lib/db";
+import { json, jsonError } from "@/lib/http";
 import { paypal } from "@/lib/paypal";
 import { getActor } from "@/lib/session";
 import { readAttachments } from "@/app/disputes/_lib";
-import { disputeForFreelancer, jsonError, noStore } from "../../_shared";
+import { disputeForFreelancer } from "../../_shared";
 
 export const dynamic = "force-dynamic";
 
@@ -28,5 +28,5 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const { files, skipped } = await readAttachments(found.dispute.drafted?.pack);
   const r = await submitDisputeEvidence(db, paypal(), { disputeId: id, actor: actor.userId, text, files, skipped });
   if (!r.ok) return jsonError(r.error ?? "PayPal refused the evidence", r.status ?? 502);
-  return NextResponse.json({ ok: true, requestId: r.requestId, attached: files.map((f) => f.name), skipped }, { headers: noStore });
+  return json({ ok: true, requestId: r.requestId, attached: files.map((f) => f.name), skipped });
 }

@@ -3,14 +3,14 @@
  * terms the freelancer agrees to. `loadRecords` / `loadUnderwriting` read the inputs from Postgres (audit_log,
  * advances, contracts, milestones, criteria) and never write. Nothing here moves money.
  */
-import type { Db } from "@milestone/core";
+import { accounts, asInt, formatMinor, ledgerRefs, loadMilestone, type Db, type Executor } from "@milestone/core";
 import { DEFAULT_PRICING, priceAdvance, type AdvanceOffer, type ClientRecord, type FreelancerRecord, type MilestoneForPricing, type PricingParams } from "./pricing.ts";
 
 /** Default credit limits in minor units when nothing more specific is known. */
 export const DEFAULT_LIMITS = { freelancerMinor: 50_000, clientMinor: 100_000 } as const;
 /** Days assumed until release when a milestone has no due date. */
 export const DEFAULT_HORIZON_DAYS = 14;
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
 
 /** What the freelancer signs up to. The partner is repaid principal + fee out of the release, before the freelancer. */
 export interface AdvanceTerms {
@@ -85,7 +85,7 @@ export function describeOffer(u: Underwriting, currency: string): string {
   if (!u.offer.eligible) return `No advance is offered: ${u.offer.reason}.`;
   if (!u.terms) return "No advance is offered.";
   const t = u.terms;
-  const fmt = (minor: number) => `${(minor / 100).toFixed(2)} ${currency}`;
+  const fmt = (minor: number) => formatMinor(minor, currency);
   return (
     `You can get ${fmt(t.principalMinor)} now for a fee of ${(t.feeBpsPerDay / 100).toFixed(2)}% per day, ` +
     `${fmt(t.expectedFeeMinor)} over ${t.days} day${t.days === 1 ? "" : "s"}, so ${fmt(t.repaymentMinor)} is deducted from the release; ` +
@@ -100,10 +100,8 @@ export interface Records {
   client: ClientRecord;
 }
 
-const one = async (db: Db, text: string, values: unknown[]): Promise<number> => {
-  const res = await db.$client.query<{ n: string | number | null }>(text, values);
-  return Number(res.rows[0]?.n ?? 0);
-};
+/** Advance statuses whose principal still counts against both limits. */
+const OUTSTANDING_ADVANCE_STATUSES = ["offered", "funded", "shortfall"];
 
 /**
  * Derives both records from the database:
@@ -115,53 +113,39 @@ const one = async (db: Db, text: string, values: unknown[]): Promise<number> => 
  *  - outstanding: principal of advances that are offered (accepted, awaiting funding), funded, or in shortfall
  *    (repaid short, the rest still owed), through milestones -> contracts. An accepted advance counts so two accepts
  *    cannot both use the same headroom; a shortfall counts until it is collected in full.
- * Limits default to DEFAULT_LIMITS.
+ * Limits default to DEFAULT_LIMITS. Two reads: one pass over audit_log, one over advances.
  */
 export async function loadRecords(db: Db, freelancerId: string, clientId: string, limits: { freelancerMinor?: number; clientMinor?: number } = {}): Promise<Records> {
-  const passes = one(
-    db,
-    `select count(*) as n from audit_log a
-      where a.event = 'milestone.released' and (a.detail->>'verifiedPass') = 'true'
-        and (a.detail->>'freelancerId' = $1 or a.contract_id in (select id from contracts where freelancer_id = $1))`,
-    [freelancerId],
+  const audits = db.$client.query<{ passes: string; fails: string; vetoes: string; disputes: string }>(
+    `with fc as (select id from contracts where freelancer_id = $1),
+          cc as (select id from contracts where client_id = $2)
+     select
+       count(*) filter (where a.event = 'milestone.released' and (a.detail->>'verifiedPass') = 'true'
+                          and (a.detail->>'freelancerId' = $1 or a.contract_id in (select id from fc))) as passes,
+       count(*) filter (where a.event = 'milestone.held'
+                          and (a.detail->>'freelancerId' = $1 or a.contract_id in (select id from fc))) as fails,
+       count(*) filter (where a.event = 'client.veto' and (a.actor = $2 or a.contract_id in (select id from cc))) as vetoes,
+       count(*) filter (where a.event = 'dispute.opened' and a.contract_id in (select id from cc))
+         - count(*) filter (where a.event = 'dispute.resolved' and a.contract_id in (select id from cc)) as disputes
+       from audit_log a
+      where a.event in ('milestone.released', 'milestone.held', 'client.veto', 'dispute.opened', 'dispute.resolved')`,
+    [freelancerId, clientId],
   );
-  const fails = one(
-    db,
-    `select count(*) as n from audit_log a
-      where a.event = 'milestone.held'
-        and (a.detail->>'freelancerId' = $1 or a.contract_id in (select id from contracts where freelancer_id = $1))`,
-    [freelancerId],
-  );
-  const fOut = one(
-    db,
-    `select coalesce(sum(ad.principal_minor), 0) as n from advances ad
+  const outstanding = db.$client.query<{ f_out: string; c_out: string }>(
+    `select coalesce(sum(ad.principal_minor) filter (where c.freelancer_id = $1), 0) as f_out,
+            coalesce(sum(ad.principal_minor) filter (where c.client_id = $2), 0) as c_out
+       from advances ad
        join milestones m on m.id = ad.milestone_id join contracts c on c.id = m.contract_id
-      where c.freelancer_id = $1 and ad.status in ('offered', 'funded', 'shortfall')`,
-    [freelancerId],
+      where ad.status = any($3) and (c.freelancer_id = $1 or c.client_id = $2)`,
+    [freelancerId, clientId, OUTSTANDING_ADVANCE_STATUSES],
   );
-  const vetoes = one(
-    db,
-    `select count(*) as n from audit_log a
-      where a.event = 'client.veto' and (a.actor = $1 or a.contract_id in (select id from contracts where client_id = $1))`,
-    [clientId],
-  );
-  const disputes = one(
-    db,
-    `select count(*) filter (where a.event = 'dispute.opened') - count(*) filter (where a.event = 'dispute.resolved') as n
-       from audit_log a where a.contract_id in (select id from contracts where client_id = $1)`,
-    [clientId],
-  );
-  const cOut = one(
-    db,
-    `select coalesce(sum(ad.principal_minor), 0) as n from advances ad
-       join milestones m on m.id = ad.milestone_id join contracts c on c.id = m.contract_id
-      where c.client_id = $1 and ad.status in ('offered', 'funded', 'shortfall')`,
-    [clientId],
-  );
-  const [p, f, fo, v, d, co] = await Promise.all([passes, fails, fOut, vetoes, disputes, cOut]);
+  const [a, o] = await Promise.all([audits, outstanding]);
+  const n = (v: string | number | null | undefined) => Number(v ?? 0);
+  const ar = a.rows[0];
+  const or = o.rows[0];
   return {
-    freelancer: { verifiedPasses: p, verifiedFails: f, outstandingMinor: fo, limitMinor: limits.freelancerMinor ?? DEFAULT_LIMITS.freelancerMinor },
-    client: { vetoes: v, openDisputes: Math.max(0, d), outstandingMinor: co, limitMinor: limits.clientMinor ?? DEFAULT_LIMITS.clientMinor },
+    freelancer: { verifiedPasses: n(ar?.passes), verifiedFails: n(ar?.fails), outstandingMinor: n(or?.f_out), limitMinor: limits.freelancerMinor ?? DEFAULT_LIMITS.freelancerMinor },
+    client: { vetoes: n(ar?.vetoes), openDisputes: Math.max(0, n(ar?.disputes)), outstandingMinor: n(or?.c_out), limitMinor: limits.clientMinor ?? DEFAULT_LIMITS.clientMinor },
   };
 }
 
@@ -184,12 +168,13 @@ export interface UnderwritingContext extends Underwriting {
  * A milestone that is not funded, not advance-eligible or past `funded` comes back with an ineligible offer.
  */
 export async function loadUnderwriting(db: Db, milestoneId: string, now: Date = new Date(), params: PricingParams = DEFAULT_PRICING): Promise<UnderwritingContext | null> {
-  const m = await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, milestoneId) });
-  if (!m) return null;
-  const c = await db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, m.contractId) });
-  if (!c) return null;
-  const crit = await db.query.criteria.findMany({ columns: { kind: true }, where: (t, { eq }) => eq(t.milestoneId, m.id) });
-  const records = await loadRecords(db, c.freelancerId, c.clientId);
+  const loaded = await loadMilestone(db, milestoneId);
+  if (!loaded) return null;
+  const { milestone: m, contract: c } = loaded;
+  const [crit, records] = await Promise.all([
+    db.query.criteria.findMany({ columns: { kind: true }, where: (t, { eq }) => eq(t.milestoneId, m.id) }),
+    loadRecords(db, c.freelancerId, c.clientId),
+  ]);
   const pricing: MilestoneForPricing = {
     amountMinor: m.amountMinor,
     funded: (ADVANCE_MILESTONE_STATUSES as readonly string[]).includes(m.status),
@@ -211,12 +196,30 @@ export async function loadUnderwriting(db: Db, milestoneId: string, now: Date = 
  * release:<thatMilestoneId>:partner:<advanceId>. Reversals mirror them under reversal:...
  */
 export const advanceRefs = {
-  funding: (advanceId: string) => `advance:${advanceId}`,
-  repayment: (releaseMilestoneId: string, a: { id: string; milestoneId: string }) =>
-    a.milestoneId === releaseMilestoneId ? `release:${releaseMilestoneId}:partner` : `release:${releaseMilestoneId}:partner:${a.id}`,
-  reversal: (releaseMilestoneId: string, a: { id: string; milestoneId: string }) =>
-    a.milestoneId === releaseMilestoneId ? `reversal:${releaseMilestoneId}:partner` : `reversal:${releaseMilestoneId}:partner:${a.id}`,
+  funding: ledgerRefs.advanceFunding,
+  repayment: ledgerRefs.advanceRepayment,
+  reversal: ledgerRefs.advanceReversal,
 } as const;
+
+/** The advance-relevant columns of an advances row. */
+export interface AdvanceForRepayment {
+  principalMinor: number;
+  feeBpsPerDay: number;
+  offer: Record<string, unknown>;
+  fundedAt: Date | null;
+}
+
+/**
+ * What the partner is owed out of the release. The fee is the offer's quoted expectedFeeMinor; if the offer has none,
+ * it is accrued from fundedAt to the decision time (at least one day). Both inputs are fixed once the decision is
+ * made, so the release job (payout amount) and the settle job (ledger entries) always compute the same number.
+ */
+export function advanceRepayment(a: AdvanceForRepayment, decidedAt: Date | null): { principalMinor: number; feeMinor: number; repaymentMinor: number } {
+  const quoted = asInt(a.offer.expectedFeeMinor, 0);
+  const days = a.fundedAt && decidedAt ? Math.max(1, Math.ceil((decidedAt.getTime() - a.fundedAt.getTime()) / DAY_MS)) : 1;
+  const feeMinor = quoted ?? Math.floor((a.principalMinor * a.feeBpsPerDay * days) / 10_000);
+  return { principalMinor: a.principalMinor, feeMinor, repaymentMinor: a.principalMinor + feeMinor };
+}
 
 export interface AdvanceKey {
   id: string;
@@ -247,8 +250,8 @@ export interface AdvanceBalance {
 
 /** True when this ledger ref belongs to the advance (its funding, its own repayment or reversal, or a carried one). */
 export function isAdvanceRef(ref: string, a: { id: string; milestoneId: string }): boolean {
-  if (ref === advanceRefs.funding(a.id)) return true;
-  if (ref === `release:${a.milestoneId}:partner` || ref === `reversal:${a.milestoneId}:partner`) return true;
+  if (ref === ledgerRefs.advanceFunding(a.id)) return true;
+  if (ref === ledgerRefs.advanceRepayment(a.milestoneId, a) || ref === ledgerRefs.advanceReversal(a.milestoneId, a)) return true;
   return (ref.startsWith("release:") || ref.startsWith("reversal:")) && ref.endsWith(`:partner:${a.id}`);
 }
 
@@ -256,13 +259,13 @@ export function isAdvanceRef(ref: string, a: { id: string; milestoneId: string }
 export function advanceBalances(advs: readonly AdvanceKey[], rows: readonly AdvanceLedgerRow[], since?: Date): Map<string, AdvanceBalance> {
   const out = new Map<string, AdvanceBalance>();
   for (const a of advs) {
-    const receivable = `partner:${a.partnerId}:receivable`;
-    const fees = `partner:${a.partnerId}:fees`;
+    const receivable = accounts.partnerReceivable(a.partnerId);
+    const fees = accounts.partnerFeeIncome(a.partnerId);
     const b: AdvanceBalance = { fundedMinor: 0, principalRepaidMinor: 0, feeRepaidMinor: 0, outstandingMinor: 0, repaidSinceMinor: 0 };
     for (const r of rows) {
       if ((r.account !== receivable && r.account !== fees) || !isAdvanceRef(r.ref, a)) continue;
       const credit = r.direction === "credit" ? r.amountMinor : -r.amountMinor;
-      if (r.ref === advanceRefs.funding(a.id)) {
+      if (r.ref === ledgerRefs.advanceFunding(a.id)) {
         if (r.account === receivable) b.fundedMinor -= credit;
         continue;
       }
@@ -284,9 +287,9 @@ export function remainingOwed(b: Pick<AdvanceBalance, "outstandingMinor" | "feeR
 const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** Reads the ledger rows of these advances (inside a transaction when `db` is one) and returns their balances. Never writes. */
-export async function loadAdvanceBalances(db: Db, advs: readonly AdvanceKey[], since?: Date): Promise<Map<string, AdvanceBalance>> {
+export async function loadAdvanceBalances(db: Executor, advs: readonly AdvanceKey[], since?: Date): Promise<Map<string, AdvanceBalance>> {
   if (advs.length === 0) return new Map();
-  const exact = advs.flatMap((a) => [advanceRefs.funding(a.id), `release:${a.milestoneId}:partner`, `reversal:${a.milestoneId}:partner`]);
+  const exact = advs.flatMap((a) => [ledgerRefs.advanceFunding(a.id), ledgerRefs.advanceRepayment(a.milestoneId, a), ledgerRefs.advanceReversal(a.milestoneId, a)]);
   const rows = await db.query.ledgerEntries.findMany({
     columns: { ref: true, account: true, amountMinor: true, direction: true, createdAt: true },
     where: (t, { inArray, like, or }) => or(inArray(t.ref, exact), ...advs.map((a) => like(t.ref, `%:partner:${likeEscape(a.id)}`))),

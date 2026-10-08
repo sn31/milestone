@@ -1,9 +1,9 @@
-import { and, eq, isNull } from "drizzle-orm";
-import { isSimulatedWebhook, paypalMode, recordDisputeEvent, verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
-import { audit, enqueue, storeWebhookOnce, webhookEvents, PAYPAL_EVENTS, type Db } from "@milestone/core";
+import { and, eq } from "drizzle-orm";
+import { isSimulatedWebhook, recordDisputeEvent, verifyWebhookSignature, type WebhookEvent } from "@milestone/money";
+import { AUDIT_EVENTS, OP_KINDS, PAYPAL_EVENTS, asRecord, asString, audit, enqueue, markWebhookProcessed, paypalMode, storeWebhookOnce, webhookEvents, type Db } from "@milestone/core";
 import { paypal } from "@/lib/paypal";
 import { getDb } from "@/lib/db";
-import { captureAndFund, fundFromCapture, isCaptureInfo, milestoneForCapture, type FundResult } from "../../milestones/_shared";
+import { captureAndFund, captureOrderId, fundFromCapture, isCaptureInfo, milestoneForCapture, type FundResult } from "../../milestones/_shared";
 
 /**
  * Every PayPal event: verify the signature, store once, then route.
@@ -46,12 +46,7 @@ export async function POST(req: Request) {
   }
 }
 
-async function markProcessed(db: Db, eventId: string): Promise<void> {
-  await db
-    .update(webhookEvents)
-    .set({ processedAt: new Date() })
-    .where(and(eq(webhookEvents.source, "paypal"), eq(webhookEvents.eventId, eventId), isNull(webhookEvents.processedAt)));
-}
+const markProcessed = (db: Db, eventId: string) => markWebhookProcessed(db, { source: "paypal", eventId });
 
 /** Throws for outcomes PayPal should redeliver; anything final (funded, already, mismatch, rejected) is processed. */
 function settled(r: FundResult): string {
@@ -61,14 +56,15 @@ function settled(r: FundResult): string {
 
 /** The routing switch. Every branch is idempotent: it may run again for a redelivered, unprocessed event. */
 async function route(db: Db, event: WebhookEvent): Promise<string> {
-  const resource = (event.resource ?? {}) as Record<string, unknown>;
+  const resource = asRecord(event.resource);
   switch (event.event_type) {
     case PAYPAL_EVENTS.orderApproved: {
       // Backup for the SDK's onApprove route; reference_id is our milestone id. captureAndFund is idempotent by milestone.
-      const unit = (resource.purchase_units as Array<{ reference_id?: string }> | undefined)?.[0];
+      const units = resource.purchase_units;
+      const milestoneId = asString(Array.isArray(units) ? asRecord(units[0]).reference_id : undefined);
       let outcome = "ignored";
-      if (unit?.reference_id && typeof resource.id === "string") {
-        outcome = settled(await captureAndFund(db, unit.reference_id, resource.id, "paypal"));
+      if (milestoneId && typeof resource.id === "string") {
+        outcome = settled(await captureAndFund(db, milestoneId, resource.id, "paypal"));
       }
       await markProcessed(db, event.id);
       return outcome;
@@ -78,10 +74,9 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
       const milestoneId = await milestoneForCapture(db, resource);
       let outcome = "ignored";
       if (milestoneId && isCaptureInfo(resource)) {
-        const orderId = (resource.supplementary_data as { related_ids?: { order_id?: unknown } } | undefined)?.related_ids?.order_id;
-        outcome = settled(await fundFromCapture(db, milestoneId, resource, "paypal", typeof orderId === "string" ? orderId : null));
+        outcome = settled(await fundFromCapture(db, milestoneId, resource, "paypal", captureOrderId(resource)));
       } else {
-        await audit(db, { actor: "paypal", event: "paypal.capture_unmatched", detail: { eventId: event.id, captureId: typeof resource.id === "string" ? resource.id : null } });
+        await audit(db, { actor: "paypal", event: AUDIT_EVENTS.paypalCaptureUnmatched, detail: { eventId: event.id, captureId: typeof resource.id === "string" ? resource.id : null } });
       }
       await markProcessed(db, event.id);
       return outcome;
@@ -92,7 +87,7 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
       const captureId = up?.match(/\/captures\/([^/?#]+)/)?.[1];
       const milestoneId = captureId ? await milestoneForCapture(db, { id: captureId }) : await milestoneForCapture(db, resource);
       if (!milestoneId) {
-        await audit(db, { actor: "paypal", event: "paypal.refund_unmatched", detail: { eventId: event.id, refundId: typeof resource.id === "string" ? resource.id : null, captureId: captureId ?? null } });
+        await audit(db, { actor: "paypal", event: AUDIT_EVENTS.paypalRefundUnmatched, detail: { eventId: event.id, refundId: typeof resource.id === "string" ? resource.id : null, captureId: captureId ?? null } });
         await markProcessed(db, event.id);
         return "ignored";
       }
@@ -128,11 +123,11 @@ async function route(db: Db, event: WebhookEvent): Promise<string> {
       const op =
         batchId || senderBatchId
           ? await db.query.paypalOps.findFirst({
-              where: (o, { and, eq, or }) => and(eq(o.kind, "payout"), or(...(batchId ? [eq(o.paypalId, batchId)] : []), ...(senderBatchId ? [eq(o.requestId, senderBatchId)] : []))),
+              where: (o, { and, eq, or }) => and(eq(o.kind, OP_KINDS.payout), or(...(batchId ? [eq(o.paypalId, batchId)] : []), ...(senderBatchId ? [eq(o.requestId, senderBatchId)] : []))),
             })
           : undefined;
       if (!op) {
-        await audit(db, { actor: "paypal", event: "paypal.payout_batch_unmatched", detail: { eventId: event.id, payoutBatchId: batchId, senderBatchId } });
+        await audit(db, { actor: "paypal", event: AUDIT_EVENTS.paypalPayoutBatchUnmatched, detail: { eventId: event.id, payoutBatchId: batchId, senderBatchId } });
         await markProcessed(db, event.id);
         return "ignored";
       }

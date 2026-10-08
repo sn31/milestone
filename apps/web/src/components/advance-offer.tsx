@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Money, type ToneKey } from "@/components/ui";
+import { postJson, thrownText } from "@/lib/api-client";
 
 interface Terms {
   principalMinor: number;
@@ -113,13 +114,12 @@ export function AdvanceOffer({ milestoneId, showIneligible = false }: { mileston
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/advances/accept", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ milestoneId }) });
-      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      const res = await postJson("/api/advances/accept", { milestoneId });
       await load();
-      if (!res.ok) setError(body?.error ?? `request failed (${res.status})`);
+      if (!res.ok) setError(res.error);
       router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "request failed");
+      setError(thrownText(e));
     } finally {
       setBusy(false);
     }

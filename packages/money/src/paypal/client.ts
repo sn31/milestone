@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 export interface PayPalConfig {
   clientId: string;
   clientSecret: string;
@@ -66,21 +68,27 @@ export class PayPalClient {
   }
 
   async request<T>(method: "GET" | "POST" | "PATCH", path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
+    return this.send<T>(method, path, body === undefined ? null : JSON.stringify(body), "application/json", opts);
+  }
+
+  /** A multipart/form-data POST (e.g. dispute evidence) with the same token, PayPal-Request-Id and error handling. */
+  async requestMultipart<T>(path: string, parts: MultipartPart[], opts: RequestOptions = {}): Promise<T> {
+    const { body, contentType } = multipartBody(parts);
+    return this.send<T>("POST", path, body, contentType, opts);
+  }
+
+  private async send<T>(method: "GET" | "POST" | "PATCH", path: string, body: string | Uint8Array<ArrayBuffer> | null, contentType: string, opts: RequestOptions): Promise<T> {
     if (method === "POST" && !opts.requestId && isMoneyPath(path)) {
       throw new Error(`PayPal-Request-Id is required for ${path}`);
     }
     const headers: Record<string, string> = {
       Authorization: `Bearer ${await this.accessToken()}`,
-      "Content-Type": "application/json",
+      "Content-Type": contentType,
       ...opts.headers,
     };
     if (opts.requestId) headers["PayPal-Request-Id"] = opts.requestId;
 
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? null : JSON.stringify(body),
-    });
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, { method, headers, body });
     const text = await res.text();
     const json: unknown = text ? JSON.parse(text) : null;
     if (!res.ok) throw new PayPalError(res.status, json, res.headers.get("paypal-debug-id") ?? undefined);
@@ -88,7 +96,36 @@ export class PayPalClient {
   }
 }
 
-const MONEY_PATHS = [/\/capture$/, /\/payouts$/, /\/refund$/, /\/authorize$/];
+/** One part of a multipart/form-data body. */
+export interface MultipartPart {
+  name: string;
+  filename?: string;
+  contentType: string;
+  data: Uint8Array | string;
+}
+
+/** Builds a multipart/form-data body by hand so each part's headers are exactly what PayPal documents. */
+export function multipartBody(parts: MultipartPart[], boundary = `----milestone${randomBytes(12).toString("hex")}`): { body: Uint8Array<ArrayBuffer>; contentType: string } {
+  const enc = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  const quote = (s: string) => s.replace(/["\r\n\\]/g, "_");
+  for (const p of parts) {
+    const disposition = `form-data; name="${quote(p.name)}"${p.filename !== undefined ? `; filename="${quote(p.filename)}"` : ""}`;
+    chunks.push(enc.encode(`--${boundary}\r\nContent-Disposition: ${disposition}\r\nContent-Type: ${p.contentType}\r\n\r\n`));
+    chunks.push(typeof p.data === "string" ? enc.encode(p.data) : p.data);
+    chunks.push(enc.encode("\r\n"));
+  }
+  chunks.push(enc.encode(`--${boundary}--\r\n`));
+  const body = new Uint8Array(chunks.reduce((s, c) => s + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    body.set(c, at);
+    at += c.length;
+  }
+  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+const MONEY_PATHS = [/\/capture$/, /\/payouts$/, /\/refund$/, /\/authorize$/, /\/accept-claim$/];
 export function isMoneyPath(path: string): boolean {
   return MONEY_PATHS.some((re) => re.test(path));
 }

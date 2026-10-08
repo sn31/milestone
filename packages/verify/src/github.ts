@@ -1,11 +1,40 @@
 /**
- * PR comments with the verdict. Plain fetch against the GitHub REST API; no-op without GITHUB_TOKEN.
- * Idempotent: the body carries a hidden marker and an existing comment with the same marker is left alone.
+ * GitHub REST calls, plain fetch, no-op without GITHUB_TOKEN:
+ * - PR comments with the verdict. Idempotent: the body carries a hidden marker and an existing comment with the same
+ *   marker is left alone.
+ * - The default branch head, recorded at funding as the tamper check's baseline.
  */
 import type { PolicyDecision, VerdictOutput, VerdictResult } from "@milestone/core";
 
 const API = "https://api.github.com";
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+function githubHeaders(token: string, userAgent: string): Record<string, string> {
+  return { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": userAgent };
+}
+
+/**
+ * The head commit of the repository's default branch, recorded on the milestone at funding as the verifier's
+ * tamper-check baseline. Null without a token, without a repository, or on any GitHub failure: funding never waits on
+ * GitHub, and the verifier then falls back to the pull request's base commit.
+ */
+export async function defaultBranchHead(repoFullName: string | null, token: string | undefined = process.env.GITHUB_TOKEN, f: typeof fetch = fetch): Promise<string | null> {
+  if (!token || !repoFullName || !REPO.test(repoFullName)) return null;
+  const headers = githubHeaders(token, "milestone-escrow");
+  try {
+    const signal = AbortSignal.timeout(5_000);
+    const repo = await f(`${API}/repos/${repoFullName}`, { headers, signal });
+    if (!repo.ok) return null;
+    const branch = ((await repo.json()) as { default_branch?: unknown }).default_branch;
+    if (typeof branch !== "string" || !branch) return null;
+    const commit = await f(`${API}/repos/${repoFullName}/commits/${encodeURIComponent(branch)}`, { headers, signal });
+    if (!commit.ok) return null;
+    const sha = ((await commit.json()) as { sha?: unknown }).sha;
+    return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface PostCommentInput {
   repoFullName: string;
@@ -29,12 +58,7 @@ export async function postVerdictComment(input: PostCommentInput): Promise<PostC
   if (!Number.isInteger(input.prNumber) || input.prNumber <= 0) throw new Error(`bad pull request number: ${input.prNumber}`);
   const f = input.fetch ?? fetch;
   const url = `${API}/repos/${input.repoFullName}/issues/${input.prNumber}/comments`;
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${token}`,
-    "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "milestone-verifier",
-  };
+  const headers = githubHeaders(token, "milestone-verifier");
 
   const marker = /<!-- milestone-verdict:[^>]*-->/.exec(input.body)?.[0];
   if (marker) {

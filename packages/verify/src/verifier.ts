@@ -58,6 +58,8 @@ export interface JudgeInput {
   /** Texts from the delivery to scan for injection: PR title/body, commit messages. */
   deliveryTexts: Array<{ source: string; text: string }>;
   reader: EvidenceReader;
+  /** Worker directories (the checkout, UPLOAD_DIR) stripped from tool results and tool errors before the model reads them. */
+  roots?: string[];
 }
 
 /** One tool call the model made in this run; ok is false when the tool threw or the input was refused. */
@@ -131,7 +133,7 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     `Delivery texts:\n${input.deliveryTexts.map((t) => wrapUntrusted(t.text, t.source.replace(/\W/g, "_"))).join("\n")}`,
   ].join("\n\n");
 
-  const res = await generateJson({ system: SYSTEM, user, schema: VerdictOutput, schemaName: "verdict", tools: tracked });
+  const res = await generateJson({ system: SYSTEM, user, schema: VerdictOutput, schemaName: "verdict", tools: tracked, ...(input.roots ? { roots: input.roots } : {}) });
   const raw: VerdictT = res.ok
     ? res.value
     : { delivery_id: input.deliveryId, suspected_injection: injection.suspected, criteria: input.criteria.map((c) => ({ criterion_id: c.id, status: "unclear", confidence: 0, evidence_ids: [], rationale: `model output invalid: ${res.error}` })) };

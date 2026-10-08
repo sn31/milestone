@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -64,7 +63,5 @@ export async function resolveRef(repoUrl: string, ref: string): Promise<{ ok: tr
   return { ok: true, sha };
 }
 
-/** Same id scheme as the GitHub webhook: same milestone + same commit = same delivery. */
-export function commitDeliveryId(milestoneId: string, sha: string): string {
-  return `dlv_${createHash("sha256").update(`${milestoneId}:${sha}`).digest("hex").slice(0, 24)}`;
-}
+/** Same id scheme as the GitHub webhook (same milestone + same commit = same delivery); lives in @milestone/core. */
+export { commitDeliveryId } from "@milestone/core";

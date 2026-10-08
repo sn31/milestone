@@ -1,10 +1,9 @@
-import { NextResponse } from "next/server";
-import { requestIdFor } from "@milestone/core";
 import { acceptDisputeClaim, disputeAcceptPlan } from "@milestone/money";
 import { getDb } from "@/lib/db";
-import { paypal } from "@/lib/paypal";
+import { json, jsonError } from "@/lib/http";
 import { getActor } from "@/lib/session";
-import { disputeForFreelancer, jsonError, noStore } from "../../_shared";
+import { moneyContext } from "@/app/api/milestones/_shared";
+import { disputeForFreelancer } from "../../_shared";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +26,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const note = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 2000) : "The seller accepts the claim.";
   const planned = await disputeAcceptPlan(db, { disputeId: id, actor: actor.userId, note });
   if (!planned.ok) return jsonError(planned.error, planned.status, { reason: planned.reason });
-  const r = await acceptDisputeClaim({ db, client: paypal(), requestIdFor: (kind, key) => requestIdFor(db, kind, key) }, planned.plan);
+  const r = await acceptDisputeClaim({ db, ...moneyContext(db) }, planned.plan);
   if (!r.ok) return jsonError(r.error ?? "PayPal refused to accept the claim", r.status ?? 502, r.reason ? { reason: r.reason } : undefined);
-  return NextResponse.json({ ok: true, requestId: r.requestId }, { headers: noStore });
+  return json({ ok: true, requestId: r.requestId });
 }

@@ -51,6 +51,17 @@ export function toneVar(tone: ToneKey): string {
   return tone === "neutral" ? "var(--fg-muted)" : `var(--state-${tone})`;
 }
 
+/**
+ * Tone of a verdict or evidence status (pass / fail / unclear, as the verifier and its tools report it): pass reads as
+ * released, fail as danger, unclear as needs; anything else (an observation with no status) is neutral.
+ */
+export function verdictTone(status: string | null | undefined): ToneKey {
+  return status === "pass" ? "released" : status === "fail" ? "danger" : status === "unclear" ? "needs" : "neutral";
+}
+
+/** Glyph of a verdict or evidence status. */
+export const VERDICT_GLYPH = { pass: "check", fail: "cross", unclear: "query" } as const satisfies Record<string, GlyphKey>;
+
 export type Phase = "done" | "current" | "upcoming";
 
 export interface LifecycleStation {

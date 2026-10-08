@@ -1,27 +1,45 @@
-import { randomUUID } from "node:crypto";
 import type { Job } from "pg-boss";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import {
+  AUDIT_EVENTS,
+  OP_KINDS,
   PolicyDecision,
-  TRANSITIONS,
+  RELEASABLE_STATUSES,
   advances as advancesTable,
+  asRecord,
   audit,
-  auditLog,
+  claimOp,
   contracts as contractsTable,
-  criteria as criteriaTable,
-  deliveries,
+  decisionDeliveryId,
   ledgerEntries,
+  ledgerRefs,
   milestones,
   paypalOps,
-  requestIdFor,
+  payoutReceiver,
+  requiredNotPassed,
   transition,
   type Db,
   type MilestoneStatus,
+  type OpRow,
+  type Tx,
 } from "@milestone/core";
-import { PayPalError, applyReviewWindow, executeRelease, loadAdvanceBalances, openDisputesFor, paypalMode, remainingOwed, type MoneyContext, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
+import { PayPalError, advanceRepayment, applyReviewWindow, executeRelease, loadAdvanceBalances, moneyContextFor, openDisputesFor, remainingOwed, type ReleasePlan, type ReviewWindowState } from "@milestone/money";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { paypal } from "../lib/paypal.ts";
+import {
+  allocateRepayment,
+  flagNeedsOperator,
+  isFlaggedForOperator,
+  parseClaim,
+  payoutShares,
+  releaseOps,
+  itemOutcomes,
+  type ClaimAdvance,
+  type OpView,
+  type ReleaseClaim,
+} from "./claim.ts";
+import { LEASE_MS, isLastAttempt, paypalFailure } from "./retry.ts";
 
 /*
  * ONE payout attempt per milestone. Once a payout or refund op for a milestone has been claimed (status "sent"), no job
@@ -38,29 +56,8 @@ import { paypal } from "../lib/paypal.ts";
 
 // ---------- Pure helpers (unit-tested in apps/worker/test) ----------
 
-/** The payout receiver. Simulated PayPal mode (local demo, no sandbox accounts) falls back to the account email. */
-function payeeEmail(u: { paypalEmail: string | null; email: string } | undefined): string | null {
-  if (!u) return null;
-  return u.paypalEmail ?? (paypalMode() === "simulated" ? u.email : null);
-}
-
-/** The only states a new release may start from. */
-export const RELEASABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review", "needs_client"]);
-
 /** States in which the claiming job may still finish its own PayPal calls (a retry after a crash or a failed refund call). */
 export const RESUMABLE_STATUSES: ReadonlySet<MilestoneStatus> = new Set(["review", "needs_client", "released", "partial_released"]);
-
-export const NEEDS_OPERATOR_EVENT = "milestone.needs_operator";
-export const REFUSED_NEEDS_OPERATOR_EVENT = "release.refused_needs_operator";
-export const SKIPPED_IN_FLIGHT_EVENT = "release.skipped_in_flight";
-/** Written instead of a claim while a PayPal dispute on the milestone is open (dispute.opened, no later dispute.resolved). */
-export const BLOCKED_BY_DISPUTE_EVENT = "release.blocked_by_dispute";
-
-/** How long a claim belongs to the job that made it before another job may resume its unanswered PayPal calls. */
-export const LEASE_MS = 120_000;
-
-/** enqueue() in @milestone/core sends every job with retryLimit 5; used when the job carries no retryLimit metadata. */
-export const DEFAULT_RETRY_LIMIT = 5;
 
 /** Client responses that count as approval before the review window closes. */
 const EARLY_APPROVALS = new Set(["approve", "confirm_partial"]);
@@ -85,13 +82,6 @@ export function reviewWindowState(
 export function parseDecision(raw: unknown): PolicyDecision | null {
   const parsed = PolicyDecision.safeParse(raw);
   return parsed.success ? parsed.data : null;
-}
-
-/** The delivery a stored decision was made for (written by the verify job); null for a legacy decision without one. */
-export function decisionDeliveryId(raw: unknown): string | null {
-  if (!raw || typeof raw !== "object") return null;
-  const v = (raw as Record<string, unknown>).deliveryId;
-  return typeof v === "string" && v.length > 0 ? v : null;
 }
 
 /**
@@ -134,223 +124,15 @@ export function clientOutcome(
   return applyReviewWindow(reviewWindowState(stored, m, now));
 }
 
-/** Required criteria whose verdict is not a pass (a criterion missing from the verdict counts as not passed). Returns their descriptions. */
-export function requiredNotPassed(verdict: unknown, criteria: ReadonlyArray<{ id: string; required: boolean; description: string }>): string[] {
-  const rows = verdict && typeof verdict === "object" ? (verdict as { criteria?: unknown }).criteria : undefined;
-  const status = new Map<string, unknown>();
-  if (Array.isArray(rows)) {
-    for (const r of rows) {
-      if (r && typeof r === "object") status.set(String((r as Record<string, unknown>).criterion_id), (r as Record<string, unknown>).status);
-    }
-  }
-  return criteria.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
-}
-
-export interface AdvanceRow {
-  principalMinor: number;
-  feeBpsPerDay: number;
-  offer: Record<string, unknown>;
-  fundedAt: Date | null;
-}
-
-const DAY_MS = 86_400_000;
-
-/**
- * What the partner is owed out of the release. The fee is the offer's quoted expectedFeeMinor; if the offer has none,
- * it is accrued from fundedAt to the decision time. Both inputs are fixed once the decision is made, so the release
- * job (payout amount) and the settle job (ledger entries) always compute the same number.
- */
-export function advanceRepayment(a: AdvanceRow, decidedAt: Date | null): { principalMinor: number; feeMinor: number } {
-  const quoted = a.offer.expectedFeeMinor;
-  if (typeof quoted === "number" && Number.isInteger(quoted) && quoted >= 0) return { principalMinor: a.principalMinor, feeMinor: quoted };
-  const days = a.fundedAt && decidedAt ? Math.max(1, Math.ceil((decidedAt.getTime() - a.fundedAt.getTime()) / DAY_MS)) : 1;
-  return { principalMinor: a.principalMinor, feeMinor: Math.floor((a.principalMinor * a.feeBpsPerDay * days) / 10_000) };
-}
-
-/** One advance a claim repays, in payment order, with what it still owed when the claim was made. */
-export interface ClaimAdvance {
-  advanceId: string;
-  /** The advance's own milestone (the release milestone itself, or an earlier one whose repayment is carried). */
-  milestoneId: string;
-  principalMinor: number;
-  feeMinor: number;
-}
-
-/**
- * Pure. Splits a partner payment across the advances in order: each advance's principal, then its fee, then the next
- * advance. The release job and the settle job both use it, so the claim and the ledger agree.
- */
-export function allocateRepayment(amountMinor: number, dues: ReadonlyArray<Pick<ClaimAdvance, "principalMinor" | "feeMinor">>): Array<{ principalMinor: number; feeMinor: number }> {
-  let rest = Math.max(0, amountMinor);
-  return dues.map((d) => {
-    const principalMinor = Math.min(Math.max(0, d.principalMinor), rest);
-    rest -= principalMinor;
-    const feeMinor = Math.min(Math.max(0, d.feeMinor), rest);
-    rest -= feeMinor;
-    return { principalMinor, feeMinor };
-  });
-}
-
-/** Mirrors executeRelease: the partner is repaid first, capped at the released amount; the freelancer gets the rest. */
-export function payoutShares(releaseMinor: number, partnerOwedMinor: number): { partnerShareMinor: number; freelancerShareMinor: number } {
-  const partnerShareMinor = Math.max(0, Math.min(partnerOwedMinor, releaseMinor));
-  return { partnerShareMinor, freelancerShareMinor: releaseMinor - partnerShareMinor };
-}
-
-/** True when the milestone may be moved to held through the transition table (or already is). */
-export function canHold(status: MilestoneStatus): boolean {
-  return status === "held" || TRANSITIONS[status].includes("held");
-}
-
-export type PayoutParty = "partner" | "freelancer";
-export type ItemStatus = "succeeded" | "failed";
-
-/** One payout item's outcome, stored by the settle job under paypal_ops.response.items[party]. */
-export interface ItemOutcome {
-  status: ItemStatus;
-  amountMinor: number | null;
-  eventId: string;
-  payoutItemId?: string;
-  reason?: string;
-}
-
-/** A RETURNED / REVERSED / REFUNDED payout item, stored by the settle job under paypal_ops.response.reversals[party]. */
-export interface ItemReversal {
-  eventId: string;
-  eventType: string;
-  amountMinor: number | null;
-  payoutItemId?: string;
-}
-
-const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
-
-/** Reads the per-item outcomes stored on a payout op's response JSON. */
-export function itemOutcomes(response: unknown): Partial<Record<PayoutParty, ItemOutcome>> {
-  const items = obj(obj(response).items);
-  const out: Partial<Record<PayoutParty, ItemOutcome>> = {};
-  for (const party of ["partner", "freelancer"] as const) {
-    const r = obj(items[party]);
-    if (r.status !== "succeeded" && r.status !== "failed") continue;
-    out[party] = {
-      status: r.status,
-      amountMinor: typeof r.amountMinor === "number" ? r.amountMinor : null,
-      eventId: typeof r.eventId === "string" ? r.eventId : "",
-      ...(typeof r.payoutItemId === "string" ? { payoutItemId: r.payoutItemId } : {}),
-      ...(typeof r.reason === "string" ? { reason: r.reason } : {}),
-    };
-  }
-  return out;
-}
-
-/** Reads the per-item reversals stored on a payout op's response JSON. */
-export function itemReversals(response: unknown): Partial<Record<PayoutParty, ItemReversal>> {
-  const rev = obj(obj(response).reversals);
-  const out: Partial<Record<PayoutParty, ItemReversal>> = {};
-  for (const party of ["partner", "freelancer"] as const) {
-    const r = obj(rev[party]);
-    if (typeof r.eventId !== "string" || typeof r.eventType !== "string") continue;
-    out[party] = {
-      eventId: r.eventId,
-      eventType: r.eventType,
-      amountMinor: typeof r.amountMinor === "number" ? r.amountMinor : null,
-      ...(typeof r.payoutItemId === "string" ? { payoutItemId: r.payoutItemId } : {}),
-    };
-  }
-  return out;
-}
-
-/**
- * What a release job claimed, stored on its paypal_ops rows (request.claim) before any PayPal call. A retry replays the
- * claim exactly; the settle job reads the action, shares and refund from it.
- */
-export interface ReleaseClaim {
-  deliveryId: string;
-  action: "release" | "partial";
-  ruleIds: string[];
-  reason: string;
-  /** Released to the parties (partner + freelancer shares). */
-  releaseMinor: number;
-  /** Refunded to the client; 0 when there is none. */
-  refundMinor: number;
-  currency: string;
-  captureId: string;
-  freelancerEmail: string;
-  partnerEmail: string | null;
-  shares: { partnerShareMinor: number; freelancerShareMinor: number };
-  /** The advances the partner share repays, in order (missing on claims written before carry-over). */
-  advances?: ClaimAdvance[];
-  /** The pg-boss job that holds the claim (its retries keep the id). Missing on claims written before leases. */
-  jobId?: string;
-  /** When that job took the claim (ISO 8601); the lease runs LEASE_MS from here. */
-  claimedAt?: string;
-}
-
-const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
-
-function parseClaimAdvances(v: unknown): ClaimAdvance[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out: ClaimAdvance[] = [];
-  for (const raw of v) {
-    const a = obj(raw);
-    if (typeof a.advanceId !== "string" || typeof a.milestoneId !== "string" || !isInt(a.principalMinor) || !isInt(a.feeMinor)) continue;
-    out.push({ advanceId: a.advanceId, milestoneId: a.milestoneId, principalMinor: a.principalMinor, feeMinor: a.feeMinor });
-  }
-  return out;
-}
-
-/** Reads request.claim; a legacy "attempt" field on older claims is ignored. */
-export function parseClaim(request: unknown): ReleaseClaim | null {
-  const r = obj(obj(request).claim);
-  const shares = obj(r.shares);
-  if (typeof r.deliveryId !== "string" || (r.action !== "release" && r.action !== "partial")) return null;
-  if (!isInt(r.releaseMinor) || !isInt(r.refundMinor) || typeof r.currency !== "string" || typeof r.captureId !== "string" || typeof r.freelancerEmail !== "string") return null;
-  if (!isInt(shares.partnerShareMinor) || !isInt(shares.freelancerShareMinor)) return null;
-  return {
-    deliveryId: r.deliveryId,
-    action: r.action,
-    ruleIds: Array.isArray(r.ruleIds) ? r.ruleIds.filter((x): x is string => typeof x === "string") : [],
-    reason: typeof r.reason === "string" ? r.reason : "",
-    releaseMinor: r.releaseMinor,
-    refundMinor: r.refundMinor,
-    currency: r.currency,
-    captureId: r.captureId,
-    freelancerEmail: r.freelancerEmail,
-    partnerEmail: typeof r.partnerEmail === "string" ? r.partnerEmail : null,
-    shares: { partnerShareMinor: shares.partnerShareMinor, freelancerShareMinor: shares.freelancerShareMinor },
-    ...(Array.isArray(r.advances) ? { advances: parseClaimAdvances(r.advances)! } : {}),
-    ...(typeof r.jobId === "string" && r.jobId ? { jobId: r.jobId } : {}),
-    ...(typeof r.claimedAt === "string" && r.claimedAt ? { claimedAt: r.claimedAt } : {}),
-  };
-}
-
 /**
  * Who may resume a claim's unanswered PayPal calls: "own" for the claiming job, "expired" once LEASE_MS has passed
- * since claimedAt (or for a claim written before leases), "held" while another job's lease is live.
+ * since claimedAt (or when claimedAt is unreadable), "held" while another job's lease is live.
  */
 export function leaseState(claim: Pick<ReleaseClaim, "jobId" | "claimedAt">, jobId: string | null, now: Date, leaseMs = LEASE_MS): "own" | "expired" | "held" {
-  if (claim.jobId && jobId && claim.jobId === jobId) return "own";
-  if (!claim.jobId || !claim.claimedAt) return "expired";
+  if (jobId && claim.jobId === jobId) return "own";
   const at = Date.parse(claim.claimedAt);
   if (!Number.isFinite(at)) return "expired";
   return now.getTime() - at >= leaseMs ? "expired" : "held";
-}
-
-/** True on the job's last pg-boss attempt (retryCount counts retries; retryLimit falls back to enqueue's default). */
-export function isLastAttempt(job: { retryCount?: unknown; retryLimit?: unknown }, defaultLimit = DEFAULT_RETRY_LIMIT): boolean {
-  const count = typeof job.retryCount === "number" ? job.retryCount : 0;
-  const limit = typeof job.retryLimit === "number" ? job.retryLimit : defaultLimit;
-  return count >= limit;
-}
-
-/**
- * Whether a failed PayPal call is final. "rejected": PayPal answered with a 4xx other than 409 (in progress / conflict)
- * or 429 (rate limited), so the request was refused and retrying it cannot succeed. "last_attempt": any other error on
- * the job's last retry. null: throw, and pg-boss retries with the same PayPal-Request-Id.
- */
-export function paypalFailure(err: unknown, lastAttempt: boolean): "rejected" | "last_attempt" | null {
-  // 401/403 are our credentials or config, not PayPal rejecting this payout: retry, do not flag the milestone for good.
-  if (err instanceof PayPalError && err.status >= 400 && err.status < 500 && ![401, 403, 409, 429].includes(err.status)) return "rejected";
-  return lastAttempt ? "last_attempt" : null;
 }
 
 /** The payout half of a claim as an executeRelease plan (no refund: the payout result is recorded before the refund call). */
@@ -377,15 +159,6 @@ export function refundPlan(milestoneId: string, c: ReleaseClaim): ReleasePlan {
     decision: { action: "partial", amountMinor: 0, ruleIds: c.ruleIds, reason: c.reason },
     milestoneAmountMinor: c.refundMinor,
   };
-}
-
-/** The shape of a paypal_ops row the gate and the operator summary read. */
-export interface OpView {
-  kind: string;
-  status: string;
-  paypalId: string | null;
-  request: unknown;
-  response?: unknown;
 }
 
 export type ReleaseGate =
@@ -432,90 +205,161 @@ export function releaseGate(input: {
   return { kind: "refuse", reason: `a ${kinds} was already sent for this milestone (delivery ${claim?.deliveryId ?? "unknown"}); one attempt per milestone` };
 }
 
-/** What an operator needs to know: what was paid, what failed or was reversed, what is still pending, what was refunded. */
-export function operatorSummary(claim: ReleaseClaim | null, payout: OpView | undefined, refund: OpView | undefined) {
-  const items = itemOutcomes(payout?.response);
-  const reversals = itemReversals(payout?.response);
-  const share = (p: PayoutParty) => (p === "partner" ? claim?.shares.partnerShareMinor : claim?.shares.freelancerShareMinor) ?? 0;
-  const paid: Partial<Record<PayoutParty, number>> = {};
-  const failed: Partial<Record<PayoutParty, string>> = {};
-  const reversed: Partial<Record<PayoutParty, { eventType: string; amountMinor: number | null }>> = {};
-  const pending: PayoutParty[] = [];
-  for (const p of ["partner", "freelancer"] as const) {
-    const it = items[p];
-    if (it?.status === "succeeded") paid[p] = it.amountMinor ?? share(p);
-    else if (it?.status === "failed") failed[p] = it.reason ?? "failed";
-    else if (share(p) > 0) pending.push(p);
-    const rv = reversals[p];
-    if (rv) reversed[p] = { eventType: rv.eventType, amountMinor: rv.amountMinor };
+/** An advance balance a payout claim may repay: what the ledger says is still owed on it, with its partner and currency. */
+export interface OpenDue extends ClaimAdvance {
+  partnerId: string;
+  currency: string;
+}
+
+export interface BlockedDue {
+  advanceId: string;
+  partnerId: string;
+  currency: string;
+  remainingMinor: number;
+}
+
+/**
+ * Pure. Nets each open balance against what payout claims still in flight are about to repay (principal first, then
+ * fee), drops the settled ones, and picks the dues this payout repays: one payout repays one partner in one currency,
+ * so the dues are those of the first remaining balance's partner in `currency`; the rest comes back as `blocked`.
+ */
+export function netDues(open: readonly OpenDue[], inFlight: ReadonlyMap<string, number>, currency: string): { partnerId: string | null; dues: ClaimAdvance[]; blocked: BlockedDue[] } {
+  const remaining: OpenDue[] = [];
+  for (const o of open) {
+    const pending = inFlight.get(o.advanceId) ?? 0;
+    const p = Math.min(o.principalMinor, pending);
+    const due = { ...o, principalMinor: o.principalMinor - p, feeMinor: Math.max(0, o.feeMinor - (pending - p)) };
+    if (due.principalMinor + due.feeMinor > 0) remaining.push(due);
   }
-  const settled = obj(obj(refund?.response).webhook);
+  const partnerId = remaining[0]?.partnerId ?? null;
+  const mine = remaining.filter((r) => r.partnerId === partnerId && r.currency === currency);
+  const blocked = remaining
+    .filter((r) => !mine.includes(r))
+    .map((r) => ({ advanceId: r.advanceId, partnerId: r.partnerId, currency: r.currency, remainingMinor: r.principalMinor + r.feeMinor }));
   return {
-    deliveryId: claim?.deliveryId ?? null,
-    action: claim?.action ?? null,
-    currency: claim?.currency ?? null,
-    payoutBatchId: payout?.paypalId ?? null,
-    payoutOpStatus: payout?.status ?? null,
-    paid,
-    failed,
-    reversed,
-    pending,
-    refunded: refund
-      ? { claimedMinor: claim?.refundMinor ?? null, opStatus: refund.status, refundId: refund.paypalId, settledMinor: typeof settled.amountMinor === "number" ? settled.amountMinor : null }
-      : null,
+    partnerId: mine.length > 0 ? partnerId : null,
+    dues: mine.map((r) => ({ advanceId: r.advanceId, milestoneId: r.milestoneId, principalMinor: r.principalMinor, feeMinor: r.feeMinor })),
+    blocked,
   };
 }
 
 // ---------- DB helpers ----------
 
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-type Q = Db | Tx;
-export type OpRow = typeof paypalOps.$inferSelect;
+type MilestoneRow = typeof milestones.$inferSelect;
+type AdvanceDbRow = typeof advancesTable.$inferSelect;
+type OpenAdvance = { a: AdvanceDbRow; decidedAt: Date | null; currency: string };
 
-/** This milestone's payout op and refund op (one of each at most: both are keyed by the milestone id). */
-export async function releaseOps(q: Q, milestoneId: string): Promise<{ payout: OpRow | undefined; refund: OpRow | undefined }> {
-  const rows = await q.select().from(paypalOps).where(and(eq(paypalOps.key, milestoneId), inArray(paypalOps.kind, ["payout", "refund"])));
-  return { payout: rows.find((r) => r.kind === "payout"), refund: rows.find((r) => r.kind === "refund") };
-}
+type Owed =
+  | { kind: "ok"; partnerId: string | null; dues: ClaimAdvance[]; blocked: BlockedDue[] }
+  | { kind: "operator"; reason: string; detail: Record<string, unknown> };
 
-/** Whether the milestone was ever flagged for an operator. Once flagged, the release job never runs for it again. */
-export async function isFlaggedForOperator(q: Q, milestoneId: string): Promise<boolean> {
-  const [row] = await q.select({ id: auditLog.id }).from(auditLog).where(and(eq(auditLog.milestoneId, milestoneId), eq(auditLog.event, NEEDS_OPERATOR_EVENT))).limit(1);
-  return row !== undefined;
+/** An accepted own advance whose payout was claimed but never confirmed: PayPal may have paid it, a person decides. */
+async function unconfirmedOwnAdvance(tx: Tx, own: readonly AdvanceDbRow[]): Promise<Extract<Owed, { kind: "operator" }> | null> {
+  for (const a of own.filter((x) => x.status === "offered")) {
+    const [op] = await tx
+      .select({ status: paypalOps.status, response: paypalOps.response })
+      .from(paypalOps)
+      .where(and(eq(paypalOps.kind, OP_KINDS.advancePayout), eq(paypalOps.key, a.id)));
+    const rejected = op?.status === "failed" && asRecord(asRecord(op.response).error).final === "rejected";
+    if (op && !rejected) return { kind: "operator", reason: "an advance payout for this milestone was sent but never confirmed; PayPal may have paid it", detail: { advanceId: a.id, advanceOpStatus: op.status } };
+  }
+  return null;
 }
 
 /**
- * Moves the milestone to held (when the transition table allows it) and writes milestone.needs_operator with the
- * current picture of the attempt. Call under the milestone row lock.
+ * The freelancer's advances on OTHER milestones whose balance this release collects, row-locked so two claims
+ * serialize on them, oldest funding first: shortfall, or funded where that milestone is released / partial_released,
+ * or held after a full refund (nothing was ever repaid out of it).
  */
-export async function flagNeedsOperator(
-  q: Db,
-  m: { id: string; contractId: string; status: MilestoneStatus },
-  input: { actor: string; reason: string; detail?: Record<string, unknown> },
-): Promise<void> {
-  if (m.status !== "held" && canHold(m.status)) {
-    await transition(q, m.id, "held", { actor: input.actor, event: "milestone.held", detail: { reason: input.reason } });
-  }
-  const ops = await releaseOps(q, m.id);
-  const claim = parseClaim(ops.payout?.request) ?? parseClaim(ops.refund?.request);
-  await audit(q, {
-    actor: input.actor,
-    event: NEEDS_OPERATOR_EVENT,
-    milestoneId: m.id,
-    contractId: m.contractId,
-    detail: { reason: input.reason, status: m.status, ...input.detail, ...operatorSummary(claim, ops.payout, ops.refund) },
-  });
+async function carriedAdvances(tx: Tx, m: MilestoneRow, freelancerId: string): Promise<OpenAdvance[]> {
+  const candidates = await tx
+    .select({ id: advancesTable.id, milestoneStatus: milestones.status, milestoneAmountMinor: milestones.amountMinor, decidedAt: milestones.decidedAt, currency: contractsTable.currency })
+    .from(advancesTable)
+    .innerJoin(milestones, eq(milestones.id, advancesTable.milestoneId))
+    .innerJoin(contractsTable, eq(contractsTable.id, milestones.contractId))
+    .where(and(eq(contractsTable.freelancerId, freelancerId), ne(advancesTable.milestoneId, m.id), inArray(advancesTable.status, ["funded", "shortfall"])));
+  if (candidates.length === 0) return [];
+  const info = new Map(candidates.map((c) => [c.id, c]));
+  const locked = await tx.select().from(advancesTable).where(inArray(advancesTable.id, [...info.keys()])).orderBy(advancesTable.id).for("update");
+  const heldRefs = locked.filter((a) => info.get(a.id)?.milestoneStatus === "held").map((a) => ledgerRefs.refund(a.milestoneId));
+  const refunds = heldRefs.length > 0 ? await tx.select({ ref: ledgerEntries.ref, amountMinor: ledgerEntries.amountMinor }).from(ledgerEntries).where(and(inArray(ledgerEntries.ref, heldRefs), eq(ledgerEntries.direction, "debit"))) : [];
+  const refunded = (milestoneId: string) => refunds.filter((r) => r.ref === ledgerRefs.refund(milestoneId)).reduce((sum, r) => sum + r.amountMinor, 0);
+  return locked
+    .filter((a) => {
+      const c = info.get(a.id);
+      if (!c) return false;
+      if (a.status === "shortfall") return true;
+      if (a.status !== "funded") return false;
+      if (c.milestoneStatus === "released" || c.milestoneStatus === "partial_released") return true;
+      return c.milestoneStatus === "held" && refunded(a.milestoneId) >= c.milestoneAmountMinor;
+    })
+    .sort((x, y) => (x.fundedAt?.getTime() ?? 0) - (y.fundedAt?.getTime() ?? 0) || x.id.localeCompare(y.id))
+    .map((a) => ({ a, decidedAt: info.get(a.id)!.decidedAt, currency: info.get(a.id)!.currency }));
 }
 
-/** Claims a paypal_ops row for this release: creates it as "sent", or moves a never-sent "pending" row to "sent". */
-async function claimOp(tx: Tx, kind: "payout" | "refund", key: string, claim: ReleaseClaim): Promise<void> {
-  const now = new Date();
-  await tx
-    .insert(paypalOps)
-    .values({ id: randomUUID(), kind, key, requestId: randomUUID(), status: "sent", request: { claim }, updatedAt: now })
-    .onConflictDoUpdate({ target: [paypalOps.kind, paypalOps.key], set: { status: "sent", request: { claim }, updatedAt: now }, setWhere: eq(paypalOps.status, "pending") });
-  const [row] = await tx.select().from(paypalOps).where(and(eq(paypalOps.kind, kind), eq(paypalOps.key, key)));
-  if (row?.status !== "sent" || parseClaim(row.request)?.deliveryId !== claim.deliveryId) throw new Error(`could not claim ${kind} op ${key}`);
+/**
+ * What other payout claims already sent (but whose partner item has not settled, so not in the ledger yet) are about
+ * to repay on these advances, per advance id. Only ops whose claim names one of the advances are read.
+ */
+async function inFlightRepayments(tx: Tx, milestoneId: string, advanceIds: readonly string[]): Promise<Map<string, number>> {
+  const ids = JSON.stringify({ ids: advanceIds });
+  const sent = await tx
+    .select({ request: paypalOps.request, response: paypalOps.response })
+    .from(paypalOps)
+    .where(
+      and(
+        eq(paypalOps.kind, OP_KINDS.payout),
+        eq(paypalOps.status, "sent"),
+        ne(paypalOps.key, milestoneId),
+        sql`jsonb_path_exists(${paypalOps.request}, ${"$.claim.advances[*] ? (@.advanceId == $ids[*])"}::jsonpath, ${ids}::jsonb)`,
+      ),
+    );
+  const inFlight = new Map<string, number>();
+  for (const op of sent) {
+    if (itemOutcomes(op.response).partner) continue;
+    const c = parseClaim(op.request);
+    if (!c) continue;
+    allocateRepayment(c.shares.partnerShareMinor, c.advances).forEach((x, i) => {
+      const id = c.advances[i]!.advanceId;
+      inFlight.set(id, (inFlight.get(id) ?? 0) + x.principalMinor + x.feeMinor);
+    });
+  }
+  return inFlight;
+}
+
+/**
+ * Everything the freelancer still owes capital partners, as of this claim: this milestone's own advance (funded or
+ * shortfall; serialized by the milestone lock, which the advance job and settle take too, so not locked again here)
+ * and the carried ones (carriedAdvances). Each balance comes from the ledger (advance:<id> debit minus the repayment
+ * credits booked for it) plus the unpaid part of its fee, netted against in-flight claims (netDues). "operator" when
+ * the state cannot be trusted.
+ */
+async function owedAdvances(tx: Tx, m: MilestoneRow, freelancerId: string, currency: string): Promise<Owed> {
+  const own = await tx.select().from(advancesTable).where(eq(advancesTable.milestoneId, m.id)).orderBy(advancesTable.id);
+  const unconfirmed = await unconfirmedOwnAdvance(tx, own);
+  if (unconfirmed) return unconfirmed;
+
+  const open: OpenAdvance[] = [
+    ...own.filter((a) => a.status === "funded" || a.status === "shortfall").map((a) => ({ a, decidedAt: m.decidedAt, currency })),
+    ...(await carriedAdvances(tx, m, freelancerId)),
+  ];
+  if (open.length === 0) return { kind: "ok", partnerId: null, dues: [], blocked: [] };
+
+  const inFlight = await inFlightRepayments(tx, m.id, open.map(({ a }) => a.id));
+  const balances = await loadAdvanceBalances(tx, open.map(({ a }) => ({ id: a.id, milestoneId: a.milestoneId, partnerId: a.partnerId })));
+  const dues: OpenDue[] = [];
+  for (const { a, decidedAt, currency: cur } of open) {
+    const bal = balances.get(a.id);
+    if (!bal || bal.fundedMinor <= 0) return { kind: "operator", reason: `advance ${a.id} is ${a.status} but its funding is not in the ledger`, detail: { advanceId: a.id } };
+    dues.push({ advanceId: a.id, milestoneId: a.milestoneId, partnerId: a.partnerId, currency: cur, ...remainingOwed(bal, advanceRepayment(a, decidedAt).feeMinor) });
+  }
+  return { kind: "ok", ...netDues(dues, inFlight, currency) };
+}
+
+/** Claims a paypal_ops row for this release ("sent" with the claim) and checks it is this claim's. */
+async function claimReleaseOp(tx: Tx, kind: typeof OP_KINDS.payout | typeof OP_KINDS.refund, key: string, claim: ReleaseClaim): Promise<void> {
+  const row = await claimOp(tx, kind, key, { claim });
+  if (row.status !== "sent" || parseClaim(row.request)?.deliveryId !== claim.deliveryId) throw new Error(`could not claim ${kind} op ${key}`);
 }
 
 /**
@@ -526,8 +370,8 @@ async function recordResponse(db: Db, kind: string, key: string, set: { paypalId
   await db.transaction(async (tx) => {
     const [row] = await tx.select().from(paypalOps).where(and(eq(paypalOps.kind, kind), eq(paypalOps.key, key))).for("update");
     if (!row) return;
-    const prev = obj(row.response);
-    const response = { ...obj(set.response), ...(prev.items ? { items: prev.items } : {}), ...(prev.reversals ? { reversals: prev.reversals } : {}), ...(prev.webhook ? { webhook: prev.webhook } : {}) };
+    const prev = asRecord(row.response);
+    const response = { ...asRecord(set.response), ...(prev.items ? { items: prev.items } : {}), ...(prev.reversals ? { reversals: prev.reversals } : {}), ...(prev.webhook ? { webhook: prev.webhook } : {}) };
     const status = set.status && (row.status === "sent" || row.status === "pending") ? set.status : row.status;
     await tx
       .update(paypalOps)
@@ -541,107 +385,60 @@ async function flagFromJob(db: Db, milestoneId: string, reason: string, detail: 
   await db.transaction(async (tx) => {
     const [m] = await tx.select().from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!m) throw new Error(`milestone ${milestoneId} not found`);
-    await flagNeedsOperator(tx as unknown as Db, m, { actor: "paypal", reason, detail });
+    await flagNeedsOperator(tx, m, { actor: "paypal", reason, detail });
   });
 }
 
 // ---------- Job ----------
 
-/** paypal_ops kind of an advance's funding payout (ADVANCE_OP_KIND in ./advance.ts, which imports this module). */
-const ADVANCE_PAYOUT_KIND = "advance-payout";
-type MilestoneRow = typeof milestones.$inferSelect;
-type AdvanceDbRow = typeof advancesTable.$inferSelect;
-
-type Owed =
-  | { kind: "ok"; partnerId: string | null; dues: ClaimAdvance[]; blocked: Array<{ advanceId: string; partnerId: string; currency: string; remainingMinor: number }> }
-  | { kind: "operator"; reason: string; detail: Record<string, unknown> };
-
-/**
- * Everything the freelancer still owes capital partners, as of this claim (carried advances are row-locked, so two
- * claims serialize on them):
- *  - this milestone's own advance (funded or shortfall);
- *  - the freelancer's advances on OTHER milestones in a final state: shortfall, or funded where that milestone is
- *    released / partial_released, or held after a full refund (nothing was ever repaid out of it).
- * Each balance comes from the ledger (advance:<id> debit minus the repayment credits booked for it) plus the unpaid part
- * of its fee, minus what another payout claim still in flight is about to repay. One payout can repay one partner in
- * one currency: the dues are the ones of the own advance's partner (else the oldest carried one's); anything owed to
- * another partner or in another currency comes back as `blocked`. "operator" when the state cannot be trusted.
- */
-async function owedAdvances(tx: Tx, m: MilestoneRow, freelancerId: string, currency: string): Promise<Owed> {
-  const t = tx as unknown as Db;
-  // The own advance is serialized by the milestone lock (the advance job and settle take it too); not locked again here,
-  // since the advance job locks the advance before the milestone.
-  const own = await tx.select().from(advancesTable).where(eq(advancesTable.milestoneId, m.id)).orderBy(advancesTable.id);
-  for (const a of own.filter((x) => x.status === "offered")) {
-    // An accepted advance whose payout was claimed but never confirmed: PayPal may have paid it, a person decides.
-    const [op] = await tx.select().from(paypalOps).where(and(eq(paypalOps.kind, ADVANCE_PAYOUT_KIND), eq(paypalOps.key, a.id)));
-    const rejected = op?.status === "failed" && obj(obj(op.response).error).final === "rejected";
-    if (op && !rejected) return { kind: "operator", reason: "an advance payout for this milestone was sent but never confirmed; PayPal may have paid it", detail: { advanceId: a.id, advanceOpStatus: op.status } };
-  }
-
-  const candidates = await tx
-    .select({ id: advancesTable.id, milestoneStatus: milestones.status, milestoneAmountMinor: milestones.amountMinor, decidedAt: milestones.decidedAt, currency: contractsTable.currency })
-    .from(advancesTable)
-    .innerJoin(milestones, eq(milestones.id, advancesTable.milestoneId))
-    .innerJoin(contractsTable, eq(contractsTable.id, milestones.contractId))
-    .where(and(eq(contractsTable.freelancerId, freelancerId), ne(advancesTable.milestoneId, m.id), inArray(advancesTable.status, ["funded", "shortfall"])));
-  const info = new Map(candidates.map((c) => [c.id, c]));
-  const locked = candidates.length > 0 ? await tx.select().from(advancesTable).where(inArray(advancesTable.id, [...info.keys()])).orderBy(advancesTable.id).for("update") : [];
-  const heldIds = candidates.filter((c) => c.milestoneStatus === "held").map((c) => `refund:${locked.find((a) => a.id === c.id)?.milestoneId ?? ""}`);
-  const refunds = heldIds.length > 0 ? await tx.select({ ref: ledgerEntries.ref, amountMinor: ledgerEntries.amountMinor }).from(ledgerEntries).where(and(inArray(ledgerEntries.ref, heldIds), eq(ledgerEntries.direction, "debit"))) : [];
-  const refunded = (milestoneId: string) => refunds.filter((r) => r.ref === `refund:${milestoneId}`).reduce((sum, r) => sum + r.amountMinor, 0);
-  const carried = locked
-    .filter((a) => {
-      const c = info.get(a.id);
-      if (!c) return false;
-      if (a.status === "shortfall") return true;
-      if (a.status !== "funded") return false;
-      if (c.milestoneStatus === "released" || c.milestoneStatus === "partial_released") return true;
-      return c.milestoneStatus === "held" && refunded(a.milestoneId) >= c.milestoneAmountMinor;
-    })
-    .sort((x, y) => (x.fundedAt?.getTime() ?? 0) - (y.fundedAt?.getTime() ?? 0) || x.id.localeCompare(y.id));
-
-  const open: Array<{ a: AdvanceDbRow; decidedAt: Date | null; currency: string }> = [
-    ...own.filter((a) => a.status === "funded" || a.status === "shortfall").map((a) => ({ a, decidedAt: m.decidedAt, currency })),
-    ...carried.map((a) => ({ a, decidedAt: info.get(a.id)!.decidedAt, currency: info.get(a.id)!.currency })),
-  ];
-  if (open.length === 0) return { kind: "ok", partnerId: null, dues: [], blocked: [] };
-
-  // Repayments another payout claim has sent but whose partner item has not settled yet (not in the ledger yet).
-  const inFlight = new Map<string, number>();
-  const sentOps = await tx.select().from(paypalOps).where(and(eq(paypalOps.kind, "payout"), eq(paypalOps.status, "sent"), ne(paypalOps.key, m.id)));
-  for (const op of sentOps) {
-    if (itemOutcomes(op.response).partner) continue;
-    const c = parseClaim(op.request);
-    if (!c?.advances?.length) continue;
-    allocateRepayment(c.shares.partnerShareMinor, c.advances).forEach((x, i) => {
-      const id = c.advances![i]!.advanceId;
-      inFlight.set(id, (inFlight.get(id) ?? 0) + x.principalMinor + x.feeMinor);
-    });
-  }
-
-  const balances = await loadAdvanceBalances(t, open.map(({ a }) => ({ id: a.id, milestoneId: a.milestoneId, partnerId: a.partnerId })));
-  const remaining: Array<{ due: ClaimAdvance; partnerId: string; currency: string }> = [];
-  for (const { a, decidedAt, currency: cur } of open) {
-    const bal = balances.get(a.id);
-    if (!bal || bal.fundedMinor <= 0) return { kind: "operator", reason: `advance ${a.id} is ${a.status} but its funding is not in the ledger`, detail: { advanceId: a.id } };
-    const r = remainingOwed(bal, advanceRepayment(a, decidedAt).feeMinor);
-    const pending = inFlight.get(a.id) ?? 0;
-    const p = Math.min(r.principalMinor, pending);
-    const due = { principalMinor: r.principalMinor - p, feeMinor: Math.max(0, r.feeMinor - (pending - p)) };
-    if (due.principalMinor + due.feeMinor > 0) remaining.push({ due: { advanceId: a.id, milestoneId: a.milestoneId, ...due }, partnerId: a.partnerId, currency: cur });
-  }
-  const partnerId = remaining[0]?.partnerId ?? null;
-  const mine = remaining.filter((r) => r.partnerId === partnerId && r.currency === currency);
-  const blocked = remaining
-    .filter((r) => !mine.includes(r))
-    .map((r) => ({ advanceId: r.due.advanceId, partnerId: r.partnerId, currency: r.currency, remainingMinor: r.due.principalMinor + r.due.feeMinor }));
-  return { kind: "ok", partnerId: mine.length > 0 ? partnerId : null, dues: mine.map((r) => r.due), blocked };
-}
-
 interface Claimed {
   claim: ReleaseClaim;
   contractId: string;
+}
+
+/** The claiming job's lease expired: this job takes the claim over (same ops, same PayPal-Request-Ids). */
+async function takeOverLease(tx: Tx, previous: ReleaseClaim, ops: readonly OpRow[], jobId: string, now: Date): Promise<ReleaseClaim> {
+  const claim: ReleaseClaim = { ...previous, jobId, claimedAt: now.toISOString() };
+  for (const op of ops) {
+    if (op.status === "sent" && !op.paypalId && parseClaim(op.request)?.deliveryId === claim.deliveryId) {
+      await tx.update(paypalOps).set({ request: { ...asRecord(op.request), claim }, updatedAt: now }).where(and(eq(paypalOps.id, op.id), eq(paypalOps.status, "sent")));
+    }
+  }
+  return claim;
+}
+
+/** Pure. The claim for a new release: the shares, the advances the partner share actually repays, and the refund. */
+function buildClaim(input: {
+  deliveryId: string;
+  outcome: PolicyDecision;
+  milestoneAmountMinor: number;
+  currency: string;
+  captureId: string;
+  freelancerEmail: string;
+  partnerEmail: string | null;
+  shares: ReleaseClaim["shares"];
+  dues: readonly ClaimAdvance[];
+  jobId: string;
+  now: Date;
+}): ReleaseClaim {
+  const { shares, dues, outcome } = input;
+  const allocation = allocateRepayment(shares.partnerShareMinor, dues);
+  return {
+    deliveryId: input.deliveryId,
+    action: outcome.action === "partial" ? "partial" : "release",
+    ruleIds: outcome.ruleIds,
+    reason: outcome.reason,
+    releaseMinor: shares.partnerShareMinor + shares.freelancerShareMinor,
+    refundMinor: Math.max(0, input.milestoneAmountMinor - outcome.amountMinor),
+    currency: input.currency,
+    captureId: input.captureId,
+    freelancerEmail: input.freelancerEmail,
+    partnerEmail: input.partnerEmail,
+    shares,
+    advances: dues.filter((_, i) => allocation[i]!.principalMinor + allocation[i]!.feeMinor > 0),
+    jobId: input.jobId,
+    claimedAt: input.now.toISOString(),
+  };
 }
 
 /**
@@ -649,121 +446,103 @@ interface Claimed {
  * and claims the paypal_ops rows (status "sent") in the same transaction. The review route takes the same lock and
  * refuses veto / hold once a claimed op exists, so a veto either lands before the claim (and this job skips) or is refused.
  */
-async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string | null, jobId: string | null, now: Date): Promise<Claimed | null> {
+async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string | null, jobId: string, now: Date): Promise<Claimed | null> {
   return db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
     const [m] = await tx.select().from(milestones).where(eq(milestones.id, milestoneId)).for("update");
     if (!m) throw new Error(`milestone ${milestoneId} not found`);
     const note = async (event: string, reason: string, extra: Record<string, unknown> = {}) => {
-      await audit(t, { actor: "system", event, milestoneId, contractId: m.contractId, detail: { reason, jobDeliveryId, status: m.status, ...extra } });
+      await audit(tx, { actor: "system", event, milestoneId, contractId: m.contractId, detail: { reason, jobDeliveryId, status: m.status, ...extra } });
       return null;
     };
-    const skip = (reason: string, extra: Record<string, unknown> = {}) => note("release.skipped", reason, extra);
+    const skip = (reason: string, extra: Record<string, unknown> = {}) => note(AUDIT_EVENTS.releaseSkipped, reason, extra);
+    const flag = async (reason: string, detail: Record<string, unknown>) => {
+      await flagNeedsOperator(tx, m, { actor: "system", reason, detail: { ...detail, deliveryId: jobDeliveryId } });
+      return null;
+    };
     const decId = decisionDeliveryId(m.decision);
     const ops = await releaseOps(tx, milestoneId);
     const opList = [ops.payout, ops.refund].filter((o): o is OpRow => o !== undefined);
 
     const gate = releaseGate({ jobDeliveryId, decisionDeliveryId: decId, status: m.status, needsOperator: await isFlaggedForOperator(tx, milestoneId), ops: opList, jobId, now });
-    if (gate.kind === "refuse") return note(REFUSED_NEEDS_OPERATOR_EVENT, gate.reason, { ops: opList.map((o) => ({ kind: o.kind, status: o.status, paypalId: o.paypalId })) });
+    if (gate.kind === "refuse") return note(AUDIT_EVENTS.releaseRefusedNeedsOperator, gate.reason, { ops: opList.map((o) => ({ kind: o.kind, status: o.status, paypalId: o.paypalId })) });
     if (gate.kind === "skip") return skip(gate.reason);
-    if (gate.kind === "in_flight") return note(SKIPPED_IN_FLIGHT_EVENT, gate.reason, { jobId, claimJobId: gate.claim.jobId ?? null, claimedAt: gate.claim.claimedAt ?? null });
+    if (gate.kind === "in_flight") return note(AUDIT_EVENTS.releaseSkippedInFlight, gate.reason, { jobId, claimJobId: gate.claim.jobId, claimedAt: gate.claim.claimedAt });
     if (gate.kind === "resume") {
       if (!gate.takeover) return { claim: gate.claim, contractId: m.contractId };
-      // The claiming job's lease expired: this job takes the claim over (same ops, same PayPal-Request-Ids).
-      const claim: ReleaseClaim = { ...gate.claim, ...(jobId ? { jobId } : {}), claimedAt: now.toISOString() };
-      for (const op of opList) {
-        if (op.status === "sent" && !op.paypalId && parseClaim(op.request)?.deliveryId === claim.deliveryId) {
-          await tx.update(paypalOps).set({ request: { ...obj(op.request), claim }, updatedAt: now }).where(and(eq(paypalOps.id, op.id), eq(paypalOps.status, "sent")));
-        }
-      }
-      await note("release.lease_taken_over", "the claiming job's lease expired", { jobId, previousJobId: gate.claim.jobId ?? null, previousClaimedAt: gate.claim.claimedAt ?? null });
+      const claim = await takeOverLease(tx, gate.claim, opList, jobId, now);
+      await note(AUDIT_EVENTS.releaseLeaseTakenOver, "the claiming job's lease expired", { jobId, previousJobId: gate.claim.jobId, previousClaimedAt: gate.claim.claimedAt });
       return { claim, contractId: m.contractId };
     }
 
     // Dispute guard: while the buyer's PayPal dispute is open, nothing is claimed. Paying out now could pay the money
     // twice (PayPal refunds the buyer if the claim is accepted or lost). A milestone in review is held; it waits for an
     // operator, as any held milestone does.
-    const disputes = await openDisputesFor(t, milestoneId);
+    const disputes = await openDisputesFor(tx, milestoneId);
     if (disputes.length > 0) {
-      if (m.status === "review") await transition(t, milestoneId, "held", { actor: "system", event: "milestone.held", detail: { reason: "a PayPal dispute on this milestone is open", disputeIds: disputes } });
-      return note(BLOCKED_BY_DISPUTE_EVENT, "a PayPal dispute on this milestone is open", { disputeIds: disputes });
+      if (m.status === "review") await transition(tx, milestoneId, "held", { actor: "system", event: AUDIT_EVENTS.milestoneHeld, detail: { reason: "a PayPal dispute on this milestone is open", disputeIds: disputes } });
+      return note(AUDIT_EVENTS.releaseBlockedByDispute, "a PayPal dispute on this milestone is open", { disputeIds: disputes });
     }
 
     const stored = parseDecision(m.decision);
     if (!stored) return skip("milestone has no policy decision");
     const outcome = clientOutcome(stored, m, now);
     if (outcome.action === "hold") {
-      await transition(t, milestoneId, "held", { actor: "policy", event: "milestone.held", detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
+      await transition(tx, milestoneId, "held", { actor: "policy", event: AUDIT_EVENTS.milestoneHeld, detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
       return null;
     }
     if (outcome.action === "ask_client") {
-      await audit(t, { actor: "policy", event: "release.waiting", milestoneId, contractId: m.contractId, detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
+      await audit(tx, { actor: "policy", event: AUDIT_EVENTS.releaseWaiting, milestoneId, contractId: m.contractId, detail: { reason: outcome.reason, ruleIds: outcome.ruleIds, deliveryId: jobDeliveryId } });
       return null;
     }
     if (m.status === "needs_client" && decId) {
       // F9: the client cannot approve past a required criterion that did not pass.
-      const delivery = await tx.query.deliveries.findFirst({ where: eq(deliveries.id, decId) });
-      const rows = await tx.query.criteria.findMany({ where: eq(criteriaTable.milestoneId, milestoneId) });
+      const delivery = await tx.query.deliveries.findFirst({ columns: { verdict: true }, where: (d, { eq }) => eq(d.id, decId) });
+      const rows = await tx.query.criteria.findMany({ where: (c, { eq }) => eq(c.milestoneId, milestoneId) });
       const blocked = requiredNotPassed(delivery?.verdict, rows);
       if (blocked.length > 0) return skip("required criteria did not pass", { criteria: blocked });
     }
 
     const contract = await tx.query.contracts.findFirst({ where: (c, { eq }) => eq(c.id, m.contractId) });
     if (!contract) throw new Error(`contract ${m.contractId} not found`);
-    const freelancer = await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, contract.freelancerId) });
-    const freelancerEmail = payeeEmail(freelancer);
+    const freelancerEmail = payoutReceiver(await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, contract.freelancerId) }));
     if (!freelancerEmail) throw new Error(`freelancer ${contract.freelancerId} has no PayPal email`);
     if (!m.paypalCaptureId) throw new Error(`milestone ${milestoneId} has no PayPal capture id`);
 
     // The partner is repaid first: this milestone's advance and any balance carried from the freelancer's earlier ones.
     const owed = await owedAdvances(tx, m, contract.freelancerId, contract.currency);
-    if (owed.kind === "operator") {
-      await flagNeedsOperator(t, m, { actor: "system", reason: owed.reason, detail: { ...owed.detail, deliveryId: jobDeliveryId } });
-      return null;
-    }
+    if (owed.kind === "operator") return flag(owed.reason, owed.detail);
     const owedMinor = owed.dues.reduce((sum, d) => sum + d.principalMinor + d.feeMinor, 0);
     let partnerEmail: string | null = null;
     if (owedMinor > 0 && owed.partnerId) {
-      const p = await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, owed.partnerId!) });
-      partnerEmail = payeeEmail(p);
-      if (!partnerEmail) {
-        await flagNeedsOperator(t, m, { actor: "system", reason: `capital partner ${owed.partnerId} has no PayPal email; the advance cannot be repaid`, detail: { partnerId: owed.partnerId, owedMinor, deliveryId: jobDeliveryId } });
-        return null;
-      }
+      const partnerId = owed.partnerId;
+      partnerEmail = payoutReceiver(await tx.query.users.findFirst({ where: (u, { eq }) => eq(u.id, partnerId) }));
+      if (!partnerEmail) return flag(`capital partner ${partnerId} has no PayPal email; the advance cannot be repaid`, { partnerId, owedMinor });
     }
 
     const shares = payoutShares(outcome.amountMinor, owedMinor);
     if (owed.blocked.length > 0 && shares.freelancerShareMinor > 0) {
       // The freelancer is never paid while any balance is unpaid, and one payout can repay only one partner.
-      await flagNeedsOperator(t, m, { actor: "system", reason: "the freelancer still owes advance balances that this payout cannot repay (another capital partner or currency)", detail: { blocked: owed.blocked, deliveryId: jobDeliveryId } });
-      return null;
+      return flag("the freelancer still owes advance balances that this payout cannot repay (another capital partner or currency)", { blocked: owed.blocked });
     }
-    const allocation = allocateRepayment(shares.partnerShareMinor, owed.dues);
-    const repaid = owed.dues.filter((_, i) => allocation[i]!.principalMinor + allocation[i]!.feeMinor > 0);
-    const releaseMinor = shares.partnerShareMinor + shares.freelancerShareMinor;
-    const refundMinor = Math.max(0, m.amountMinor - outcome.amountMinor);
-    if (releaseMinor === 0 && refundMinor === 0) return skip("nothing to pay or refund");
-
-    const claim: ReleaseClaim = {
+    const claim = buildClaim({
       deliveryId: jobDeliveryId!,
-      action: outcome.action === "partial" ? "partial" : "release",
-      ruleIds: outcome.ruleIds,
-      reason: outcome.reason,
-      releaseMinor,
-      refundMinor,
+      outcome,
+      milestoneAmountMinor: m.amountMinor,
       currency: contract.currency,
       captureId: m.paypalCaptureId,
       freelancerEmail,
       partnerEmail,
       shares,
-      advances: repaid,
-      ...(jobId ? { jobId } : {}),
-      claimedAt: now.toISOString(),
-    };
+      dues: owed.dues,
+      jobId,
+      now,
+    });
+    if (claim.releaseMinor === 0 && claim.refundMinor === 0) return skip("nothing to pay or refund");
+
     // Both ops are claimed before any PayPal call, so a retry of this job can finish either and nothing else can start one.
-    if (releaseMinor > 0) await claimOp(tx, "payout", milestoneId, claim);
-    if (refundMinor > 0) await claimOp(tx, "refund", milestoneId, claim);
-    await audit(t, { actor: "policy", event: "release.claimed", milestoneId, contractId: m.contractId, detail: { ...claim } });
+    if (claim.releaseMinor > 0) await claimReleaseOp(tx, OP_KINDS.payout, milestoneId, claim);
+    if (claim.refundMinor > 0) await claimReleaseOp(tx, OP_KINDS.refund, milestoneId, claim);
+    await audit(tx, { actor: "policy", event: AUDIT_EVENTS.releaseClaimed, milestoneId, contractId: m.contractId, detail: { ...claim } });
     return { claim, contractId: m.contractId };
   });
 }
@@ -786,19 +565,18 @@ export async function release(job: Job<JobData>, clock: () => Date = () => new D
   const db = getDb();
   const milestoneId = job.data.milestoneId;
   const jobDeliveryId = typeof job.data.deliveryId === "string" && job.data.deliveryId ? job.data.deliveryId : null;
-  const jobId = typeof job.id === "string" && job.id ? job.id : null;
 
-  const claimed = await claimRelease(db, milestoneId, jobDeliveryId, jobId, clock());
+  const claimed = await claimRelease(db, milestoneId, jobDeliveryId, job.id, clock());
   if (!claimed) return;
   const { claim, contractId } = claimed;
-  const ctx: MoneyContext = { client: paypal(), requestIdFor: (kind, key) => requestIdFor(db, kind, key) };
-  const lastAttempt = isLastAttempt(job as { retryCount?: unknown; retryLimit?: unknown });
+  const ctx = moneyContextFor(db, paypal());
+  const lastAttempt = isLastAttempt(job);
   /** Retries (throws) a transient failure; records a final one as failed and flags an operator. Returns only when final. */
-  const fail = async (kind: "payout" | "refund", err: unknown): Promise<void> => {
+  const fail = async (kind: typeof OP_KINDS.payout | typeof OP_KINDS.refund, err: unknown): Promise<void> => {
     const error = err instanceof Error ? err.message : String(err);
     const httpStatus = err instanceof PayPalError ? err.status : null;
     const final = paypalFailure(err, lastAttempt);
-    await audit(db, { actor: "paypal", event: `paypal.${kind}_error`, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, error, httpStatus, final, retryCount: job.retryCount ?? null } });
+    await audit(db, { actor: "paypal", event: kind === OP_KINDS.payout ? AUDIT_EVENTS.paypalPayoutError : AUDIT_EVENTS.paypalRefundError, milestoneId, contractId, detail: { deliveryId: claim.deliveryId, error, httpStatus, final, retryCount: job.retryCount ?? null } });
     if (!final) throw err; // pg-boss retries with the same PayPal-Request-Id
     await recordResponse(db, kind, milestoneId, { status: "failed", response: { error: { message: error, httpStatus, body: err instanceof PayPalError ? err.body : null, final } } });
     const why = final === "rejected" ? `PayPal rejected the ${kind} (HTTP ${httpStatus})` : `The ${kind} call still failed on the last retry; PayPal may or may not have received it`;
@@ -812,19 +590,19 @@ export async function release(job: Job<JobData>, clock: () => Date = () => new D
       results = (await executeRelease(ctx, payoutPlan(milestoneId, claim))) as typeof results;
     } catch (err) {
       // A final payout failure stops here: the refund half is not sent, the operator decides.
-      return fail("payout", err);
+      return fail(OP_KINDS.payout, err);
     }
     const batch = results.payout?.batch_header;
     const denied = batch?.batch_status === "DENIED";
     // Recorded before the refund call, so a failing refund never loses the payout result.
-    await recordResponse(db, "payout", milestoneId, {
+    await recordResponse(db, OP_KINDS.payout, milestoneId, {
       ...(batch?.payout_batch_id ? { paypalId: batch.payout_batch_id } : {}),
       ...(denied ? { status: "failed" as const } : {}),
       response: results.payout ?? {},
     });
     await audit(db, {
       actor: "paypal",
-      event: "paypal.payout",
+      event: AUDIT_EVENTS.paypalPayout,
       milestoneId,
       contractId,
       detail: {
@@ -846,14 +624,14 @@ export async function release(job: Job<JobData>, clock: () => Date = () => new D
     try {
       results = (await executeRelease(ctx, refundPlan(milestoneId, claim))) as typeof results;
     } catch (err) {
-      return fail("refund", err);
+      return fail(OP_KINDS.refund, err);
     }
     const r = results.refund;
     const status = r?.status === "COMPLETED" ? "succeeded" : r?.status === "FAILED" || r?.status === "CANCELLED" ? "failed" : undefined;
-    await recordResponse(db, "refund", milestoneId, { ...(r?.id ? { paypalId: r.id } : {}), ...(status ? { status } : {}), response: r ?? {} });
+    await recordResponse(db, OP_KINDS.refund, milestoneId, { ...(r?.id ? { paypalId: r.id } : {}), ...(status ? { status } : {}), response: r ?? {} });
     await audit(db, {
       actor: "paypal",
-      event: "paypal.refund",
+      event: AUDIT_EVENTS.paypalRefund,
       milestoneId,
       contractId,
       detail: { refundId: r?.id ?? null, refundStatus: r?.status ?? null, refundMinor: claim.refundMinor, currency: claim.currency, deliveryId: claim.deliveryId },

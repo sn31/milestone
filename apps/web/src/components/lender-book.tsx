@@ -3,9 +3,9 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, IRowNode, ValueFormatterParams } from "ag-grid-community";
+import type { ColDef, ICellRendererParams, ValueFormatterParams } from "ag-grid-community";
 import { gridThemeInset } from "./ag-grid-theme";
-import { useNarrow } from "./evidence-panel";
+import { useNarrow } from "@/components/ui/detail-grid";
 import { formatMoney, formatNumber } from "@/lib/format";
 import { EmptyState, Money, Panel, SectionTitle, Stat, StateGlyph, StatePill, cx, inputClass, stateMeta, type ToneKey } from "@/components/ui";
 
@@ -41,12 +41,34 @@ export interface LenderRow {
   repaidAt: string | null;
 }
 
+/** Outstanding principal owed through one client. */
+export interface ClientExposure {
+  id: string;
+  name: string;
+  minor: number;
+}
+
+/** Outstanding principal waiting on milestones in one state. */
+export interface StateExposure {
+  state: string;
+  minor: number;
+  count: number;
+}
+
 export interface BookSummary {
   currency: string;
+  /** The main currency's advances with principal still outstanding. */
+  open: LenderRow[];
+  /** Their outstanding principal per client, largest first. */
+  clients: ClientExposure[];
+  /** And by the state of the milestone that repays it. */
+  states: StateExposure[];
   outstandingMinor: number;
   pendingPayoutMinor: number;
   openCount: number;
   expectedLossMinor: number;
+  /** expectedLossMinor as a share of outstandingMinor (0 with nothing outstanding). */
+  lossShare: number;
   topClient: { name: string; shareOfOutstanding: number } | null;
   clientCount: number;
   repaidThisWeekMinor: number;
@@ -62,17 +84,22 @@ export function summarize(rows: LenderRow[]): BookSummary {
   const mine = rows.filter((r) => r.currency === currency);
   const open = mine.filter((r) => r.outstandingMinor > 0);
   const outstandingMinor = open.reduce((s, r) => s + r.outstandingMinor, 0);
-  const byClient = clientExposure(open);
-  const top = byClient[0];
+  const expectedLossMinor = open.reduce((s, r) => s + (r.expectedLossMinor ?? 0), 0);
+  const clients = clientExposure(open);
+  const top = clients[0];
   const repaid = mine.filter((r) => r.repaidThisWeekMinor > 0);
   return {
     currency,
+    open,
+    clients,
+    states: exposureByState(open),
     outstandingMinor,
     pendingPayoutMinor: mine.filter((r) => r.status === "offered").reduce((s, r) => s + r.principalMinor, 0),
     openCount: open.length,
-    expectedLossMinor: open.reduce((s, r) => s + (r.expectedLossMinor ?? 0), 0),
+    expectedLossMinor,
+    lossShare: outstandingMinor > 0 ? expectedLossMinor / outstandingMinor : 0,
     topClient: top && outstandingMinor > 0 ? { name: top.name, shareOfOutstanding: top.minor / outstandingMinor } : null,
-    clientCount: byClient.length,
+    clientCount: clients.length,
     repaidThisWeekMinor: repaid.reduce((s, r) => s + r.repaidThisWeekMinor, 0),
     repaidThisWeekCount: repaid.length,
     otherCurrencies: [...byCurrency.keys()].filter((c) => c !== currency),
@@ -80,14 +107,10 @@ export function summarize(rows: LenderRow[]): BookSummary {
 }
 
 /** Pure. Outstanding principal per client, largest first. */
-function clientExposure(open: LenderRow[]): { id: string; name: string; minor: number }[] {
-  const byClient = new Map<string, { id: string; name: string; minor: number }>();
+function clientExposure(open: LenderRow[]): ClientExposure[] {
+  const byClient = new Map<string, ClientExposure>();
   for (const r of open) {
-    const c = byClient.get(r.clientId) ?? {
-      id: r.clientId,
-      name: r.client,
-      minor: 0,
-    };
+    const c = byClient.get(r.clientId) ?? { id: r.clientId, name: r.client, minor: 0 };
     c.minor += r.outstandingMinor;
     byClient.set(r.clientId, c);
   }
@@ -95,15 +118,11 @@ function clientExposure(open: LenderRow[]): { id: string; name: string; minor: n
 }
 
 /** Outstanding principal by the state of the milestone that repays it: where the lender's money waits. */
-function exposureByState(open: LenderRow[]): { state: string; minor: number; count: number }[] {
+function exposureByState(open: LenderRow[]): StateExposure[] {
   const order = ["funded", "verifying", "review", "needs_client", "held", "draft", "released", "partial_released"];
-  const m = new Map<string, { state: string; minor: number; count: number }>();
+  const m = new Map<string, StateExposure>();
   for (const r of open) {
-    const e = m.get(r.milestoneStatus) ?? {
-      state: r.milestoneStatus,
-      minor: 0,
-      count: 0,
-    };
+    const e = m.get(r.milestoneStatus) ?? { state: r.milestoneStatus, minor: 0, count: 0 };
     e.minor += r.outstandingMinor;
     e.count += 1;
     m.set(r.milestoneStatus, e);
@@ -147,7 +166,20 @@ interface BookTotals {
   otherCurrencies: boolean;
 }
 
-type GridRow = LenderRow & { totals?: BookTotals };
+/** The pinned book total: the money columns summed over the main currency's advances. */
+interface TotalRow {
+  kind: "total";
+  id: "book-total";
+  currency: string;
+  principalMinor: number;
+  feeMinor: number;
+  outstandingMinor: number;
+  repaidMinor: number;
+  expectedLossMinor: number;
+  totals: BookTotals;
+}
+
+type GridRow = (LenderRow & { kind: "advance" }) | TotalRow;
 
 interface Ctx {
   share: Map<string, number>;
@@ -173,19 +205,16 @@ function partnerShares(rows: LenderRow[]): Map<string, number> {
   return out;
 }
 
-const isTotal = (p: { node: IRowNode<GridRow> }) => p.node.rowPinned === "top";
-
 function MoneyCell(p: ICellRendererParams<GridRow, number | null>) {
   if (p.value === null || p.value === undefined || !p.data) return <span className="text-fg-faint">none</span>;
   return <Money minor={p.value} currency={p.data.currency} className={p.value === 0 ? "opacity-50" : undefined} />;
 }
 
 /** An amount with a smaller second figure under it (principal + fee). */
-function stackedMoney(second: keyof LenderRow, caption: string) {
+function stackedMoney(second: "feeMinor", caption: string) {
   return function StackedMoneyCell(p: ICellRendererParams<GridRow, number | null>) {
     if (!p.data) return null;
-    const v = p.data[second];
-    const n = typeof v === "number" ? v : 0;
+    const n = p.data[second];
     return (
       <div className="flex h-full flex-col items-end justify-center gap-1 leading-tight">
         <MoneyCell {...p} />
@@ -199,7 +228,7 @@ function stackedMoney(second: keyof LenderRow, caption: string) {
 
 function AdvanceCell(p: ICellRendererParams<GridRow, string>) {
   if (!p.data) return null;
-  if (isTotal(p) && p.data.totals) {
+  if (p.data.kind === "total") {
     const t = p.data.totals;
     return (
       <div className="flex h-full min-w-0 flex-col justify-center leading-tight">
@@ -230,7 +259,7 @@ function AdvanceCell(p: ICellRendererParams<GridRow, string>) {
 /** The client, and its share of this partner's outstanding principal as a bar: amber once it passes 60%. */
 function ExposureCell(p: ICellRendererParams<GridRow, string, Ctx>) {
   if (!p.data) return null;
-  if (isTotal(p) && p.data.totals) {
+  if (p.data.kind === "total") {
     const n = p.data.totals.clients;
     return (
       <span className="text-[12px] text-fg-faint">
@@ -250,9 +279,7 @@ function ExposureCell(p: ICellRendererParams<GridRow, string, Ctx>) {
         <span className="truncate text-fg-muted">{p.value}</span>
         <span className={cx(numCell, "text-[11.5px]", heavy ? "text-tone" : "text-fg-faint")}>{pct(sh)}</span>
       </div>
-      <span aria-hidden className="relative h-[3px] w-full overflow-hidden rounded-full bg-hairline">
-        <span className={cx("absolute inset-y-0 left-0 rounded-full", heavy ? "bg-tone" : "bg-fg/45")} style={{ width: `${Math.round(sh * 1000) / 10}%` }} />
-      </span>
+      <Meter share={sh} fill={heavy ? "bg-tone" : "bg-fg/45"} />
     </div>
   );
 }
@@ -263,7 +290,7 @@ function RepaymentCell(p: ICellRendererParams<GridRow, number>) {
   const r = p.data;
   const due = r.principalMinor + r.feeMinor;
   const share = due > 0 ? Math.min(1, r.repaidMinor / due) : 0;
-  const shortfall = r.status === "shortfall";
+  const shortfall = r.kind === "advance" && r.status === "shortfall";
   const done = share >= 1;
   return (
     <div
@@ -276,9 +303,7 @@ function RepaymentCell(p: ICellRendererParams<GridRow, number>) {
         <span className={cx(numCell, "text-[11.5px]", shortfall || done ? "text-tone" : r.repaidMinor > 0 ? "text-fg-muted" : "text-fg-faint")}>{pct(share)}</span>
       </div>
       {/* A shortfall keeps its unpaid remainder visible in the danger tone. */}
-      <span aria-hidden className={cx("relative h-[3px] w-full overflow-hidden rounded-full", shortfall ? "bg-tone-soft" : "bg-hairline")}>
-        <span data-tone="released" className="absolute inset-y-0 left-0 rounded-full bg-tone" style={{ width: `${Math.round(share * 1000) / 10}%` }} />
-      </span>
+      <Meter share={share} tone="released" track={shortfall ? "bg-tone-soft" : undefined} />
     </div>
   );
 }
@@ -286,7 +311,7 @@ function RepaymentCell(p: ICellRendererParams<GridRow, number>) {
 /** Expected loss with the pFail it comes from; on the total, its share of outstanding. */
 function LossCell(p: ICellRendererParams<GridRow, number | null>) {
   if (!p.data) return null;
-  const caption = isTotal(p) && p.data.totals ? `${pct(p.data.totals.lossShare)} of out` : typeof p.data.pFail === "number" ? `pFail ${(p.data.pFail * 100).toFixed(1)}%` : "no pFail";
+  const caption = p.data.kind === "total" ? `${pct(p.data.totals.lossShare)} of out` : typeof p.data.pFail === "number" ? `pFail ${(p.data.pFail * 100).toFixed(1)}%` : "no pFail";
   return (
     <div className="flex h-full flex-col items-end justify-center gap-1 leading-tight">
       <MoneyCell {...p} />
@@ -296,7 +321,7 @@ function LossCell(p: ICellRendererParams<GridRow, number | null>) {
 }
 
 function StatusCell(p: ICellRendererParams<GridRow, LenderRow["status"]>) {
-  if (isTotal(p) || !p.value) return null;
+  if (p.data?.kind !== "advance" || !p.value) return null;
   const pill = ADVANCE_PILL[p.value];
   return (
     <div className="flex h-full items-center">
@@ -306,7 +331,7 @@ function StatusCell(p: ICellRendererParams<GridRow, LenderRow["status"]>) {
 }
 
 function MilestoneStateCell(p: ICellRendererParams<GridRow, string>) {
-  if (!p.data || isTotal(p)) return null;
+  if (p.data?.kind !== "advance") return null;
   const atRisk = p.data.milestoneStatus === "held";
   return (
     <div className="flex h-full min-w-0 flex-col justify-center gap-1 leading-tight">
@@ -319,56 +344,38 @@ function MilestoneStateCell(p: ICellRendererParams<GridRow, string>) {
 }
 
 /** The lender's book as an instrument panel, then one AG Grid row per advance under a pinned book total. */
-export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; kept for callers, the book reads only the ledger figures. */ now?: string }) {
+export function LenderBook({ rows }: { rows: LenderRow[] }) {
   const [quick, setQuick] = useState("");
   const narrow = useNarrow();
   const s = useMemo(() => summarize(rows), [rows]);
-  const open = useMemo(() => rows.filter((r) => r.currency === s.currency && r.outstandingMinor > 0), [rows, s.currency]);
-  const clients = useMemo(() => clientExposure(open), [open]);
-  const states = useMemo(() => exposureByState(open), [open]);
+  const { clients, states, lossShare } = s;
   const share = useMemo(() => partnerShares(rows), [rows]);
+  const advances = useMemo<GridRow[]>(() => rows.map((r) => ({ ...r, kind: "advance" as const })), [rows]);
   // Same rule as the grid's exposure bars: a client past CONCENTRATION_LIMIT of the outstanding principal reads amber.
   const concentrated = !!s.topClient && s.topClient.shareOfOutstanding > CONCENTRATION_LIMIT;
-  const lossShare = s.outstandingMinor > 0 ? s.expectedLossMinor / s.outstandingMinor : 0;
 
   // Totals for the book's main currency; other currencies are listed but not added in (as in the stats above).
-  const pinned = useMemo<GridRow[]>(() => {
+  const pinned = useMemo<TotalRow[]>(() => {
     const mine = rows.filter((r) => r.currency === s.currency);
     if (mine.length === 0) return [];
     const sum = (f: (r: LenderRow) => number) => mine.reduce((t, r) => t + f(r), 0);
     return [
       {
+        kind: "total",
         id: "book-total",
-        contractId: "",
-        freelancer: "",
-        partnerId: "",
-        clientId: "",
-        client: "",
-        milestone: "Book total",
-        milestoneStatus: "",
         currency: s.currency,
-        amountMinor: sum((r) => r.amountMinor),
         principalMinor: sum((r) => r.principalMinor),
         feeMinor: sum((r) => r.feeMinor),
-        feeBpsPerDay: 0,
-        status: "funded",
-        daysOutstanding: null,
         outstandingMinor: s.outstandingMinor,
         repaidMinor: sum((r) => r.repaidMinor),
-        repaidThisWeekMinor: s.repaidThisWeekMinor,
-        pFail: null,
         expectedLossMinor: s.expectedLossMinor,
-        repaymentStatus: "",
-        createdAt: "",
-        fundedAt: null,
-        repaidAt: null,
         totals: { count: mine.length, clients: s.clientCount, lossShare, otherCurrencies: s.otherCurrencies.length > 0 },
       },
     ];
   }, [rows, s, lossShare]);
 
   const cols = useMemo<ColDef<GridRow>[]>(() => {
-    const money = (field: keyof LenderRow, headerName: string, width: number): ColDef<GridRow> => ({
+    const money = (field: "principalMinor" | "outstandingMinor" | "expectedLossMinor" | "repaidMinor" | "feeMinor", headerName: string, width: number): ColDef<GridRow> => ({
       field,
       headerName,
       width,
@@ -388,7 +395,7 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
         // Phones scroll the grid sideways; the advance stays in view.
         pinned: narrow ? "left" : undefined,
         cellRenderer: AdvanceCell,
-        getQuickFilterText: (p) => `${p.value} ${p.data?.freelancer ?? ""}`,
+        getQuickFilterText: (p) => `${p.value} ${p.data?.kind === "advance" ? p.data.freelancer : ""}`,
       },
       {
         field: "client",
@@ -426,7 +433,7 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
         headerName: "Repays from",
         width: 146,
         cellRenderer: MilestoneStateCell,
-        getQuickFilterText: (p) => `${stateMeta(String(p.value)).label} ${p.data?.repaymentStatus ?? ""}`,
+        getQuickFilterText: (p) => `${stateMeta(String(p.value)).label} ${p.data?.kind === "advance" ? p.data.repaymentStatus : ""}`,
       },
       // Sortable and filterable from the column menu, folded into the cells above on screen.
       {
@@ -616,7 +623,7 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
               // Remount across the breakpoint: the first column pins on phones only.
               key={narrow ? "narrow" : "wide"}
               theme={bookTheme}
-              rowData={rows}
+              rowData={advances}
               columnDefs={cols}
               context={{ share } satisfies Ctx}
               pinnedTopRowData={pinned}
@@ -642,12 +649,15 @@ export function LenderBook({ rows }: { rows: LenderRow[]; /** Render time, ISO; 
   );
 }
 
-/** A 3px gauge: share of a whole, filled in a state's colour. */
-function Meter({ share, tone, className }: { share: number; tone: ToneKey; className?: string }) {
+/**
+ * A 3px gauge: share of a whole. The fill is in `tone` (else the surrounding tone), or in `fill` classes; the track is
+ * a hairline unless `track` says otherwise.
+ */
+function Meter({ share, tone, fill = "bg-tone", track = "bg-hairline", className }: { share: number; tone?: ToneKey; fill?: string; track?: string; className?: string }) {
   const w = Math.max(0, Math.min(1, share));
   return (
-    <span aria-hidden data-tone={tone} className={cx("relative block h-[3px] w-full overflow-hidden rounded-full bg-hairline", className)}>
-      <span className="absolute inset-y-0 left-0 rounded-full bg-tone" style={{ width: `${Math.round(w * 1000) / 10}%` }} />
+    <span aria-hidden className={cx("relative block h-[3px] w-full overflow-hidden rounded-full", track, className)}>
+      <span data-tone={tone} className={cx("absolute inset-y-0 left-0 rounded-full", fill)} style={{ width: `${Math.round(w * 1000) / 10}%` }} />
     </span>
   );
 }

@@ -24,7 +24,7 @@ try { process.loadEnvFile(new URL("../../../../.env", import.meta.url).pathname)
 
 describe("review window", () => {
   it("is clamped to at least 30 seconds, so 0 cannot skip review", async () => {
-    const { reviewWindowSeconds } = await import("../jobs/verify.ts");
+    const { reviewWindowSeconds } = await import("@milestone/core");
     expect(reviewWindowSeconds(172_800, "0")).toBe(30);
     expect(reviewWindowSeconds(172_800, "-5")).toBe(30);
     expect(reviewWindowSeconds(172_800, "90")).toBe(90);
@@ -250,7 +250,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
   });
 
   it("re-entering verifying clears the previous delivery's response, window and decision", { timeout: 120_000 }, async () => {
-    const stale = { action: "release", amountMinor: 10000, ruleIds: ["P1"], reason: "stale", deliveryId: "dlv_previous" };
+    const stale = { action: "release" as const, amountMinor: 10000, ruleIds: ["P1"], reason: "stale", deliveryId: "dlv_previous" };
     const future = new Date(Date.now() + 3_600_000);
     const t = await setup(5, [{ kind: "test", spec: { command: "npm test" }, required: true }, { kind: "judgment", spec: {}, required: false }], {
       milestone: { status: "held", clientResponse: "veto", reviewEndsAt: new Date(Date.now() - 1000), decision: stale, decidedAt: future },
@@ -267,7 +267,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
 
   it("R6: a milestone flagged for an operator never leaves held through a new delivery", { timeout: 120_000 }, async () => {
     const { audit } = await import("@milestone/core");
-    const stale = { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "earlier attempt", deliveryId: "dlv_previous" };
+    const stale = { action: "release" as const, amountMinor: 10000, ruleIds: ["P6"], reason: "earlier attempt", deliveryId: "dlv_previous" };
     const t = await setup(10, [{ kind: "test", spec: { command: "npm test" }, required: true }], { milestone: { status: "held", decision: stale } });
     await audit(getDb(), { actor: "paypal", event: "milestone.needs_operator", milestoneId: t.milestoneId, contractId, detail: { reason: "e2e: payout item failed" } });
     await verify(t.job);
