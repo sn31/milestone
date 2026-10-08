@@ -1,10 +1,18 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getDb } from "@/lib/db";
 import { AuditGrid, type AuditRow } from "@/components/audit-grid";
+import { PageHeader, Stat } from "@/components/ui";
 import { ACTOR_NAMES } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata({ params }: PageProps<"/contracts/[id]/activity">): Promise<Metadata> {
+  const { id } = await params;
+  const contract = await getDb().query.contracts.findFirst({ columns: { title: true }, where: (t, { eq }) => eq(t.id, id) });
+  return { title: contract ? `Audit log · ${contract.title}` : "Contract not found" };
+}
 
 export default async function ActivityPage({ params }: PageProps<"/contracts/[id]/activity">) {
   const { id } = await params;
@@ -22,14 +30,37 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
     event: r.event,
     detail: r.detail ?? null,
   }));
+  const paypal = log.filter((r) => r.event.startsWith("paypal.")).length;
+  const decisions = log.filter((r) => r.event === "policy.decided" || r.event.startsWith("client.")).length;
+
   return (
-    <main className="space-y-4">
-      <header>
-        <Link href={`/contracts/${id}`} className="text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white">&larr; {contract.title}</Link>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Audit log</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Every approval, verdict, decision and PayPal call on this contract. Both parties can read it.</p>
-      </header>
-      <AuditGrid rows={rows} />
+    <main>
+      <PageHeader
+        eyebrow={
+          <Link href={`/contracts/${id}`} className="group inline-flex min-w-0 items-center gap-2 hover:text-fg">
+            <svg aria-hidden viewBox="0 0 20 8" className="h-2 w-5 shrink-0 transition-transform duration-200 ease-glide group-hover:-translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.2">
+              <path d="M20 4 H2 M5 1 L2 4 L5 7" />
+            </svg>
+            <span className="truncate">{contract.title}</span>
+          </Link>
+        }
+        title={
+          <>
+            Audit log
+          </>
+        }
+        description="Every approval, verdict, policy decision and PayPal call on this contract, in the order it happened. Both parties read the same log; nothing in it can be edited."
+        aside={
+          <>
+            <Stat label="Events" value={log.length} />
+            <Stat label="PayPal calls" value={paypal} tone="funded" />
+            <Stat label="Decisions" value={decisions} tone="review" />
+          </>
+        }
+      />
+      <section className="mt-12" aria-label="Events">
+        <AuditGrid rows={rows} />
+      </section>
     </main>
   );
 }

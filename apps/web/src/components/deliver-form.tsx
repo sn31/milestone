@@ -1,20 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button, Field, inputClass, cx } from "@/components/ui";
 
 const MAX_FILES = 10;
 const MAX_MB = 20;
-
-const input = "w-full rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900";
-const primary = "rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200";
 
 /**
  * The freelancer's delivery: upload files (design files, PDFs, images, documents) and/or point at a commit in a
  * repository. Both start verification; the page refreshes to show the verifying state.
  */
-export function DeliverForm(props: { milestoneId: string; files: boolean; repo: boolean; defaultRepoUrl?: string | null; accept?: string | null }) {
+export function DeliverForm(props: { milestoneId: string; files: boolean; repo: boolean; defaultRepoUrl?: string | null; accept?: string | null; resubmit?: boolean }) {
   const router = useRouter();
+  const uid = useId();
   const [busy, setBusy] = useState<"files" | "repo" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -67,49 +66,101 @@ export function DeliverForm(props: { milestoneId: string; files: boolean; repo: 
   }
 
   return (
-    <div className="mt-3 space-y-4 rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-sm dark:border-emerald-900 dark:bg-emerald-950/40">
-      <p className="font-medium">Deliver this milestone</p>
-      {props.files ? (
-        <form onSubmit={uploadFiles} className="space-y-2">
-          <label className="block text-zinc-600 dark:text-zinc-400">
-            Files (up to {MAX_FILES}, {MAX_MB} MB each){props.accept ? `: ${props.accept}` : ""}
-            <input
-              type="file"
-              multiple
-              className="mt-1 block w-full text-sm"
-              onChange={(e) => setPicked(Array.from(e.target.files ?? []))}
-              disabled={busy !== null}
-            />
-          </label>
-          {picked.length > 0 ? (
-            <ul className="text-xs text-zinc-500">
-              {picked.map((f) => (
-                <li key={`${f.name}-${f.size}`}>{f.name} ({Math.ceil(f.size / 1024)} KB)</li>
-              ))}
-            </ul>
-          ) : null}
-          <button type="submit" className={primary} disabled={busy !== null}>
-            {busy === "files" ? "Uploading..." : "Upload and verify"}
-          </button>
-        </form>
-      ) : null}
-      {props.repo ? (
-        <form onSubmit={deliverRepo} className="space-y-2">
-          <label className="block text-zinc-600 dark:text-zinc-400">
-            Repository (https URL or local path)
-            <input className={`${input} mt-1`} value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/you/repo.git" required disabled={busy !== null} />
-          </label>
-          <label className="block text-zinc-600 dark:text-zinc-400">
-            Branch, tag or commit
-            <input className={`${input} mt-1 font-mono`} value={ref} onChange={(e) => setRef(e.target.value)} placeholder="main" disabled={busy !== null} />
-          </label>
-          <button type="submit" className={primary} disabled={busy !== null}>
-            {busy === "repo" ? "Resolving..." : "Deliver commit"}
-          </button>
-        </form>
-      ) : null}
-      {done ? <p className="text-emerald-700 dark:text-emerald-400">{done}</p> : null}
-      {error ? <p role="alert" className="text-rose-700 dark:text-rose-400">{error}</p> : null}
-    </div>
+    <section data-tone="verifying" aria-label="Deliver this milestone" className="overflow-hidden rounded-panel border border-dashed border-hairline-strong">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-dashed border-hairline-strong px-4 py-3 sm:px-5">
+        <p className="type-label text-fg">{props.resubmit ? "Resubmit for verification" : "Deliver"}</p>
+        <p className="text-[13px] text-fg-muted">The agent checks every condition above; the money stays in escrow meanwhile.</p>
+      </div>
+      <div className="grid gap-5 px-4 py-4 sm:px-5 sm:py-5">
+        {props.files ? (
+          <form onSubmit={uploadFiles} className="grid gap-3">
+            <Field
+              label="Files"
+              htmlFor={`${uid}-files`}
+              hint={`Up to ${MAX_FILES} files, ${MAX_MB} MB each${props.accept ? ` · ${props.accept}` : ""}`}
+            >
+              <input
+                id={`${uid}-files`}
+                type="file"
+                multiple
+                onChange={(e) => setPicked(Array.from(e.target.files ?? []))}
+                disabled={busy !== null}
+                className={cx(
+                  inputClass,
+                  "cursor-pointer border-dashed py-2.5 text-[13px] text-fg-muted",
+                  "file:mr-3 file:cursor-pointer file:rounded-chip file:border file:border-hairline-strong file:bg-surface-raised file:px-2.5 file:py-1 file:font-mono file:text-[11px] file:tracking-[0.08em] file:text-fg file:uppercase",
+                )}
+              />
+            </Field>
+            {picked.length > 0 ? (
+              <ul className="grid gap-1 font-mono text-[11.5px] text-fg-muted tabular">
+                {picked.map((f) => (
+                  <li key={`${f.name}-${f.size}`} className="flex items-baseline gap-2">
+                    <span className="min-w-0 truncate">{f.name}</span>
+                    <span aria-hidden className="leader" />
+                    <span className="shrink-0 text-fg-faint">{Math.ceil(f.size / 1024)} KB</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <div>
+              <Button type="submit" variant="primary" disabled={busy !== null} aria-busy={busy === "files"}>
+                {busy === "files" ? "Uploading..." : "Upload and verify"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+        {props.files && props.repo ? (
+          <p aria-hidden className="flex items-center gap-3 font-mono text-[10.5px] tracking-[0.12em] text-fg-faint uppercase">
+            <span className="h-px flex-1 bg-hairline" />
+            or a commit
+            <span className="h-px flex-1 bg-hairline" />
+          </p>
+        ) : null}
+        {props.repo ? (
+          <form onSubmit={deliverRepo} className="grid gap-3">
+            <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1fr)_200px]">
+              <Field label="Repository" htmlFor={`${uid}-repo`} hint="https URL or a local path">
+                <input
+                  id={`${uid}-repo`}
+                  className={cx(inputClass, "font-mono text-[13px]")}
+                  value={repoUrl}
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                  placeholder="https://github.com/you/repo.git"
+                  required
+                  disabled={busy !== null}
+                />
+              </Field>
+              <Field label="Branch, tag or commit" htmlFor={`${uid}-ref`}>
+                <input
+                  id={`${uid}-ref`}
+                  className={cx(inputClass, "font-mono text-[13px]")}
+                  value={ref}
+                  onChange={(e) => setRef(e.target.value)}
+                  placeholder="main"
+                  disabled={busy !== null}
+                />
+              </Field>
+            </div>
+            <div>
+              <Button type="submit" variant={props.files ? "secondary" : "primary"} disabled={busy !== null} aria-busy={busy === "repo"}>
+                {busy === "repo" ? "Resolving..." : "Deliver commit"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+        {done ? (
+          <p role="status" data-tone="verifying" className="flex items-center gap-2 text-[13px] text-tone">
+            <span aria-hidden className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
+            {done}
+          </p>
+        ) : null}
+        {error ? (
+          <p role="alert" className="text-[13px] text-state-danger">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </section>
   );
 }

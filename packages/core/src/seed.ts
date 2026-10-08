@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
-import { auditLog, contracts, criteria, milestones, users } from "./schema.ts";
+import { auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paypalOps, users } from "./schema.ts";
 
 try {
   process.loadEnvFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env"));
@@ -115,7 +115,230 @@ for (let i = 1; i <= 5; i++) {
   }).onConflictDoNothing();
 }
 
+// `pnpm db:seed -- --showcase` (combinable with --reset) puts the demo milestones into every state once, so each screen
+// has something to show without running the worker: funded, review (window open), released, needs_client (partial) and
+// held. Rows have fixed ids, so a rerun refreshes them in place. No PayPal simulator state is written: the showcase ids
+// are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator.
+let showcase = 0;
+if (process.argv.includes("--showcase")) {
+  const { createHash } = await import("node:crypto");
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  /** A stable UUID-shaped PayPal-Request-Id per (kind, key), so reruns keep the same id. */
+  const uuidFrom = (s: string) => {
+    const h = sha(s);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+  };
+  const min = (n: number) => new Date(now.getTime() + n * 60_000);
+  const model = process.env.MILESTONE_MODEL ?? "showcase-model";
+
+  type Ms = { id: string; contractId: string; amountMinor: number; seq: number };
+  const all: Ms[] = [
+    { id: "mst_1", contractId: "ctr_demo", amountMinor: 10000, seq: 1 },
+    { id: "mst_2", contractId: "ctr_demo", amountMinor: 10000, seq: 2 },
+    { id: "mst_3", contractId: "ctr_demo", amountMinor: 10000, seq: 3 },
+    { id: "mst_brand_1", contractId: "ctr_brand", amountMinor: 9000, seq: 1 },
+    { id: "mst_brand_2", contractId: "ctr_brand", amountMinor: 6000, seq: 2 },
+  ];
+  const ids = all.map((m) => `'${m.id}'`).join(",");
+  // Clear what a previous showcase (or a real run) left on these milestones, then rebuild it.
+  await db.execute(sql.raw(`delete from audit_log where milestone_id in (${ids}) or id like 'aud_show_%'`));
+  await db.execute(sql.raw(`delete from ledger_entries where id like 'led_show_%' or ref in (select paypal_capture_id from milestones where id in (${ids}) and paypal_capture_id is not null) or ref in (${all.flatMap((m) => [`'release:${m.id}'`, `'release:${m.id}:partner'`, `'refund:${m.id}'`]).join(",")})`));
+  await db.execute(sql.raw(`delete from paypal_ops where key in (${ids})`));
+  await db.execute(sql.raw(`delete from advances where milestone_id in (${ids})`));
+  await db.execute(sql.raw(`delete from deliveries where milestone_id in (${ids})`));
+
+  let auditSeq = 0;
+  const auditRow = async (m: Ms, actor: string, event: string, at: Date, detail: Record<string, unknown>) => {
+    auditSeq += 1;
+    await db.insert(auditLog).values({ id: `aud_show_${String(auditSeq).padStart(3, "0")}`, contractId: m.contractId, milestoneId: m.id, actor, event, detail, createdAt: at });
+  };
+  let ledgerSeq = 0;
+  const post = async (txnId: string, ref: string, at: Date, entries: { account: string; amountMinor: number; direction: "debit" | "credit" }[]) => {
+    for (const e of entries) {
+      ledgerSeq += 1;
+      await db.insert(ledgerEntries).values({ id: `led_show_${String(ledgerSeq).padStart(3, "0")}`, txnId, account: e.account, amountMinor: e.amountMinor, currency: "USD", direction: e.direction, ref, createdAt: at });
+    }
+  };
+  const op = async (kind: string, key: string, paypalId: string, at: Date, response: Record<string, unknown>) => {
+    await db.insert(paypalOps).values({ id: `op_show_${kind}_${key}`, kind, key, requestId: uuidFrom(`showcase:${kind}:${key}`), paypalId, status: "succeeded", response, createdAt: at, updatedAt: at });
+  };
+
+  /** Order + capture + ledger (client -> held) + funded audit, `ago` minutes in the past. */
+  const fund = async (m: Ms, ago: number, n: number) => {
+    const at = min(-ago);
+    const orderId = `SIM-ORD-SHOW${n}${m.seq}0A7Q`;
+    const captureId = `SIM-CAP-SHOW${n}${m.seq}0K2F`;
+    const baselineSha = m.contractId === "ctr_demo" ? sha(`baseline-${m.id}`).slice(0, 40) : null;
+    await db.update(milestones).set({ status: "funded", paypalOrderId: orderId, paypalCaptureId: captureId, baselineSha, decision: null, decidedAt: null, reviewEndsAt: null, clientResponse: null }).where(sql`id = ${m.id}`);
+    await op("order", m.id, orderId, min(-ago - 1), { id: orderId, status: "APPROVED" });
+    await op("capture", m.id, captureId, at, { id: captureId, status: "COMPLETED", amount: { currency_code: "USD", value: (m.amountMinor / 100).toFixed(2) } });
+    await post(`txn_show_fund_${m.id}`, captureId, at, [
+      { account: "client:usr_client", amountMinor: m.amountMinor, direction: "debit" },
+      { account: `held:${m.id}`, amountMinor: m.amountMinor, direction: "credit" },
+    ]);
+    await auditRow(m, "usr_client", "milestone.order_created", min(-ago - 1), { orderId, amountMinor: m.amountMinor, currency: "USD" });
+    await auditRow(m, "paypal", "milestone.funded", at, { from: "draft", to: "funded", orderId, captureId, amountMinor: m.amountMinor, currency: "USD", baselineSha });
+  };
+
+  type Crit = { criterion_id: string; status: "pass" | "fail" | "unclear"; confidence: number; evidence_ids: string[]; rationale: string };
+  /** A verified delivery: delivery row with verdict + evidence, verifying -> decided, with audit rows. */
+  const deliver = async (m: Ms, opts: { deliveryId: string; ago: number; source: "github_pr" | "upload"; ref: string; payload: Record<string, unknown>; evidence: unknown[]; criteria: Crit[]; result: "pass" | "partial" | "fail"; decision: { action: string; amountMinor: number; ruleIds: string[]; reason: string } }) => {
+    const received = min(-opts.ago);
+    const verified = min(-opts.ago + 2);
+    const promptHash = sha(`prompt-${opts.deliveryId}`);
+    await db.insert(deliveries).values({
+      id: opts.deliveryId,
+      milestoneId: m.id,
+      source: opts.source,
+      ref: opts.ref,
+      payload: opts.payload,
+      evidence: opts.evidence,
+      verdict: { delivery_id: opts.deliveryId, criteria: opts.criteria, suspected_injection: false },
+      result: opts.result,
+      suspectedInjection: false,
+      model,
+      promptHash,
+      receivedAt: received,
+      verifiedAt: verified,
+    });
+    const stored = { ...opts.decision, deliveryId: opts.deliveryId };
+    await db.update(milestones).set({ status: "verifying", decision: stored, decidedAt: verified }).where(sql`id = ${m.id}`);
+    const deliveryEvent = opts.source === "upload" ? "delivery.upload" : "delivery.manual";
+    const deliveryDetail = opts.source === "upload" ? { deliveryId: opts.deliveryId, files: (opts.payload.files as { name: string; size: number; sha256: string }[]).map((f) => ({ name: f.name, size: f.size, sha256: f.sha256 })) } : { deliveryId: opts.deliveryId, ref: opts.ref, sha: opts.payload.sha };
+    await auditRow(m, "usr_freelancer", deliveryEvent, received, deliveryDetail);
+    await auditRow(m, "verifier", "milestone.verifying", min(-opts.ago + 0.1), { from: "funded", to: "verifying", deliveryId: opts.deliveryId });
+    await auditRow(m, "verifier", "verdict.stored", verified, { deliveryId: opts.deliveryId, result: opts.result, model, promptHash, suspectedInjection: false, injectionHits: [] });
+    await auditRow(m, "policy", "policy.decided", verified, stored);
+    return { verified, stored };
+  };
+  const setStatus = (id: string, status: "review" | "released" | "held" | "needs_client", extra: Record<string, unknown> = {}) => db.update(milestones).set({ status, ...extra }).where(sql`id = ${id}`);
+
+  const [m1, m2, m3, b1, b2] = all as [Ms, Ms, Ms, Ms, Ms];
+  const repo = "https://github.com/milestone-demo/landing.git";
+
+  // mst_1: funded, waiting for a delivery.
+  await fund(m1, 50, 1);
+
+  // mst_2: delivered as PR #7, verified pass, in review with the window closing in 20 minutes.
+  await fund(m2, 48, 2);
+  const sha2 = sha("pr-7-head").slice(0, 40);
+  const d2 = await deliver(m2, {
+    deliveryId: "dlv_show_2",
+    ago: 9,
+    source: "github_pr",
+    ref: "milestone-demo/landing#7",
+    payload: { sha: sha2, title: "Account creation API and confirmation page", body: "Adds POST /api/accounts, the confirmation page and tests.", branch: "feat/accounts", clone_url: repo, base_sha: sha("baseline-mst_2").slice(0, 40), pr: 7 },
+    evidence: [
+      { id: "ev_2_tests", criterion_id: "crt_2_tests", kind: "log", status: "pass", summary: "npm test: 14 passed, 0 failed in 2.8 s", text: "> landing@1.2.0 test\n> node --test\n\n# tests 14\n# suites 4\n# pass 14\n# fail 0\n# duration_ms 2811" },
+      { id: "ev_2_tamper", criterion_id: "crt_2_tests", kind: "diff", status: "pass", summary: "No changes to existing tests, package.json scripts, lockfile or CI config since the baseline" },
+      { id: "ev_2_file", criterion_id: "crt_2_file", kind: "file", status: "pass", summary: "public/pricing.html exists (3.1 KB)", uri: "public/pricing.html", sha256: sha("pricing.html") },
+      { id: "ev_2_diff", criterion_id: "crt_2_judge", kind: "diff", summary: "+212 -18 across 6 files: src/accounts.js, src/routes.js, public/confirm.html, public/pricing.html, test/accounts.test.js, README.md" },
+      { id: "ev_2_shot", criterion_id: "crt_2_judge", kind: "screenshot", summary: "Confirmation page at 1280 px: heading, account email echoed, link back to the dashboard" },
+    ],
+    criteria: [
+      { criterion_id: "crt_2_tests", status: "pass", confidence: 0.98, evidence_ids: ["ev_2_tests", "ev_2_tamper"], rationale: "All 14 tests pass, including the 5 new account tests; no existing test or script was modified." },
+      { criterion_id: "crt_2_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_2_file"], rationale: "The expected file is present and non-empty." },
+      { criterion_id: "crt_2_judge", status: "pass", confidence: 0.91, evidence_ids: ["ev_2_diff", "ev_2_shot"], rationale: "The PR adds the account endpoint and a confirmation page that matches the milestone description." },
+    ],
+    result: "pass",
+    decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
+  });
+  const ends2 = min(20);
+  await setStatus(m2.id, "review", { reviewEndsAt: ends2 });
+  await auditRow(m2, "policy", "milestone.review", d2.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_2", action: "release", ruleIds: ["P6"], reviewEndsAt: ends2.toISOString() });
+
+  // mst_3: released, payout confirmed by webhook, ledger held -> freelancer.
+  await fund(m3, 46, 3);
+  const d3 = await deliver(m3, {
+    deliveryId: "dlv_show_3",
+    ago: 40,
+    source: "github_pr",
+    ref: "milestone-demo/landing#9",
+    payload: { sha: sha("pr-9-head").slice(0, 40), title: "Polish, accessibility and docs", body: "Labels, focus order, contrast fixes and a README.", branch: "chore/a11y-docs", clone_url: repo, base_sha: sha("baseline-mst_3").slice(0, 40), pr: 9 },
+    evidence: [
+      { id: "ev_3_tests", criterion_id: "crt_3_tests", kind: "log", status: "pass", summary: "npm test: 17 passed, 0 failed in 3.1 s", text: "# tests 17\n# pass 17\n# fail 0" },
+      { id: "ev_3_file", criterion_id: "crt_3_file", kind: "file", status: "pass", summary: "README.md exists (4.6 KB) with Setup and Accessibility sections", uri: "README.md", sha256: sha("README.md") },
+      { id: "ev_3_note", criterion_id: "crt_3_judge", kind: "note", summary: "Every form control has a label; tab order follows the visual order" },
+    ],
+    criteria: [
+      { criterion_id: "crt_3_tests", status: "pass", confidence: 0.97, evidence_ids: ["ev_3_tests"], rationale: "The suite passes and no existing test changed." },
+      { criterion_id: "crt_3_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_3_file"], rationale: "README.md is present with setup steps." },
+      { criterion_id: "crt_3_judge", status: "pass", confidence: 0.88, evidence_ids: ["ev_3_note"], rationale: "The accessibility fixes and docs match the milestone description." },
+    ],
+    result: "pass",
+    decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
+  });
+  const ends3 = min(-12);
+  await setStatus(m3.id, "review", { reviewEndsAt: ends3 });
+  await auditRow(m3, "policy", "milestone.review", d3.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_3", action: "release", ruleIds: ["P6"], reviewEndsAt: ends3.toISOString() });
+  const batchId = "SIM-BATCH-SHOW3X9QZ";
+  const itemId = "SIM-ITEM-SHOW3L4MW";
+  await op("payout", m3.id, batchId, min(-11), { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" }, items: { freelancer: { status: "succeeded", amountMinor: 10000, payoutItemId: itemId } } });
+  await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: 10000, partnerShareMinor: 0, refundMinor: 0 });
+  await auditRow(m3, "paypal", "paypal.payout", min(-11), { deliveryId: "dlv_show_3", payoutBatchId: batchId, amountMinor: 10000, currency: "USD" });
+  await post("txn_show_release_mst_3", "release:mst_3", min(-10), [
+    { account: "held:mst_3", amountMinor: 10000, direction: "debit" },
+    { account: "freelancer:usr_freelancer", amountMinor: 10000, direction: "credit" },
+  ]);
+  await setStatus(m3.id, "released");
+  await auditRow(m3, "paypal", "milestone.released", min(-10), { from: "review", to: "released", eventType: "PAYMENT.PAYOUTS-ITEM.SUCCEEDED", payoutBatchId: batchId, payoutItemId: itemId, amountMinor: 10000, refundMinor: 0, currency: "USD", freelancerId: "usr_freelancer", verifiedPass: true });
+
+  // mst_brand_1: logo and guide pass, the optional judgment fails: partial (P5), waiting for the client.
+  await fund(b1, 120, 4);
+  const files1 = [
+    { name: "corner-bakery-logo.svg", size: 18_432, sha256: sha("logo.svg"), path: "dlv_show_b1/corner-bakery-logo.svg", mime: "image/svg+xml" },
+    { name: "style-guide.pdf", size: 1_204_224, sha256: sha("style-guide.pdf"), path: "dlv_show_b1/style-guide.pdf", mime: "application/pdf" },
+  ];
+  const db1 = await deliver(b1, {
+    deliveryId: "dlv_show_b1",
+    ago: 30,
+    source: "upload",
+    ref: "upload:2 files",
+    payload: { files: files1 },
+    evidence: [
+      { id: "ev_b1_logo", criterion_id: "crt_brand_1_logo", kind: "file", status: "pass", summary: "corner-bakery-logo.svg: valid SVG, viewBox 0 0 1200 1200 (scales to any width)", uri: "corner-bakery-logo.svg", sha256: files1[0]!.sha256 },
+      { id: "ev_b1_pages", criterion_id: "crt_brand_1_guide", kind: "file", status: "pass", summary: "style-guide.pdf: 9 pages (max 12), contains \"Typography\" on page 4", uri: "style-guide.pdf", sha256: files1[1]!.sha256 },
+      { id: "ev_b1_small", criterion_id: "crt_brand_1_judge", kind: "screenshot", summary: "Logo rendered at 32 px: the wheat mark merges into a blob and the wordmark is unreadable" },
+      { id: "ev_b1_palette", criterion_id: "crt_brand_1_judge", kind: "note", summary: "Palette: flour white, crust brown, rye green; warm and specific to a bakery" },
+    ],
+    criteria: [
+      { criterion_id: "crt_brand_1_logo", status: "pass", confidence: 0.99, evidence_ids: ["ev_b1_logo"], rationale: "An SVG logo was delivered; vector, so it meets the 1024 px minimum." },
+      { criterion_id: "crt_brand_1_guide", status: "pass", confidence: 0.97, evidence_ids: ["ev_b1_pages"], rationale: "The style guide is 9 pages and has a Typography section." },
+      { criterion_id: "crt_brand_1_judge", status: "fail", confidence: 0.84, evidence_ids: ["ev_b1_small", "ev_b1_palette"], rationale: "The colour system suits the bakery, but at favicon size the mark loses its shape and the name cannot be read." },
+    ],
+    result: "partial",
+    decision: { action: "partial", amountMinor: 6000, ruleIds: ["P5"], reason: "2 of 3 criteria passed; optional criteria failed: The logo reads clearly at small sizes and the colour system suits a neighbourhood bakery" },
+  });
+  await setStatus(b1.id, "needs_client");
+  await auditRow(b1, "policy", "milestone.needs_client", db1.verified, { from: "verifying", to: "needs_client", deliveryId: "dlv_show_b1", action: "partial", ruleIds: ["P5"] });
+
+  // mst_brand_2: the copy is too short, a required criterion fails: held (P2).
+  await fund(b2, 118, 5);
+  const files2 = [{ name: "website-copy.md", size: 2_611, sha256: sha("website-copy.md"), path: "dlv_show_b2/website-copy.md", mime: "text/markdown" }];
+  const db2 = await deliver(b2, {
+    deliveryId: "dlv_show_b2",
+    ago: 22,
+    source: "upload",
+    ref: "upload:1 file",
+    payload: { files: files2 },
+    evidence: [
+      { id: "ev_b2_words", criterion_id: "crt_brand_2_copy", kind: "file", status: "fail", summary: "website-copy.md: 412 words (minimum 600); \"About us\" section present", uri: "website-copy.md", sha256: files2[0]!.sha256 },
+      { id: "ev_b2_tone", criterion_id: "crt_brand_2_judge", kind: "note", summary: "Warm and specific (names the sourdough starter, opening hours), little filler" },
+    ],
+    criteria: [
+      { criterion_id: "crt_brand_2_copy", status: "fail", confidence: 0.99, evidence_ids: ["ev_b2_words"], rationale: "The copy has 412 words against a minimum of 600." },
+      { criterion_id: "crt_brand_2_judge", status: "pass", confidence: 0.86, evidence_ids: ["ev_b2_tone"], rationale: "What is there is warm and specific to the bakery." },
+    ],
+    result: "fail",
+    decision: { action: "hold", amountMinor: 0, ruleIds: ["P2"], reason: "Required criteria failed: Website copy as .md or .docx, at least 600 words, with an About us section" },
+  });
+  await setStatus(b2.id, "held");
+  await auditRow(b2, "policy", "milestone.held", db2.verified, { from: "verifying", to: "held", deliveryId: "dlv_show_b2", action: "hold", ruleIds: ["P2"] });
+
+  showcase = all.length;
+}
+
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
-console.log(`seed ok: ${userRows.length} users, 2 contracts, ${3 + brandMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events`);
+console.log(`seed ok: ${userRows.length} users, 2 contracts, ${3 + brandMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held)` : ""}`);
 process.exit(0);

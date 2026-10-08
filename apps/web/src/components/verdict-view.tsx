@@ -1,8 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { motion } from "motion/react";
+import { useState, type MouseEvent } from "react";
 import type { deliveries, milestones } from "@milestone/core";
-import { EvidencePanel, toEvidenceItems } from "@/components/evidence-panel";
+import { EvidencePanel, evidenceTone, toEvidenceItems, type EvidenceItem } from "@/components/evidence-panel";
+import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, type CriterionStatus } from "@/components/ui";
+import { formatDateTime, formatMoney } from "@/lib/format";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
 type Decision = NonNullable<(typeof milestones.$inferSelect)["decision"]>;
@@ -15,48 +18,39 @@ interface CriterionRow {
   rationale: string;
 }
 
-const STATUS_STYLE: Record<string, string> = {
-  pass: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  fail: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
-  unclear: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-};
-
-const RESULT_STYLE: Record<string, string> = {
-  pass: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  partial: "bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300",
-  fail: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
-};
-const NEUTRAL = "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
-
 function rowsOf(verdict: DeliveryRow["verdict"]): CriterionRow[] {
   const list = verdict && (verdict as { criteria?: unknown }).criteria;
   return Array.isArray(list) ? (list as CriterionRow[]) : [];
 }
 
-/** Panels taller than this many rows start collapsed behind the "Evidence (n)" toggle. */
-const OPEN_UP_TO = 3;
+const asStatus = (s: string): CriterionStatus => (s === "pass" || s === "fail" ? s : "unclear");
 
-/**
- * The delivery's evidence (deliveries.evidence) in the AG Grid panel, behind an "Evidence (n)" toggle. Client-side
- * because toEvidenceItems lives in the client module evidence-panel.tsx; the grid is mounted only while open.
- */
-function EvidenceSection({ evidence }: { evidence: unknown[] | null }) {
-  const items = toEvidenceItems(evidence);
-  const [open, setOpen] = useState(items.length <= OPEN_UP_TO);
-  if (items.length === 0) return null;
+/** The verifier's overall result as a pill: pass reads as released green, partial as partial, fail as danger. */
+const RESULT_PILL: Record<string, { state: string; label: string }> = {
+  pass: { state: "released", label: "Pass" },
+  partial: { state: "partial_released", label: "Partial" },
+  fail: { state: "failed", label: "Fail" },
+  verifying: { state: "verifying", label: "Verifying" },
+};
+
+
+/** Confidence as a short bar in the criterion's tone, filled once on mount, with the percentage in mono. */
+function Confidence({ value }: { value: number }) {
+  const pct = Math.max(0, Math.min(1, value));
   return (
-    <div className="space-y-2">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="text-sm font-medium text-zinc-700 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
-      >
-        <span aria-hidden className="mr-1 inline-block w-3">{open ? "\u25BE" : "\u25B8"}</span>
-        Evidence ({items.length})
-      </button>
-      {open ? <EvidencePanel items={items} /> : null}
-    </div>
+    <span className="flex items-center gap-2" title="Verifier confidence">
+      <span aria-hidden className="relative h-[3px] w-14 overflow-hidden rounded-full bg-hairline-strong">
+        <motion.span
+          className="absolute inset-y-0 left-0 rounded-full bg-tone"
+          initial={{ width: 0 }}
+          animate={{ width: `${pct * 100}%` }}
+          transition={{ duration: DUR.count, ease: EASE.glide, delay: 0.15 }}
+        />
+      </span>
+      <span className="w-[4ch] font-mono text-[11px] text-fg-muted tabular">
+        {Math.round(pct * 100)}%<span className="sr-only"> confidence</span>
+      </span>
+    </span>
   );
 }
 
@@ -65,52 +59,157 @@ export function VerdictView({
   decision,
   descriptions = {},
   showEvidence = false,
+  currency,
+  required,
 }: {
   delivery: DeliveryRow | null;
   decision: Decision | null;
+  /** Criterion descriptions by criterion id. */
   descriptions?: Record<string, string>;
-  /** Show the delivery's evidence panel below the verdict and decision. */
+  /** Show the delivery's evidence grid under the receipt; the receipt's evidence chips then open its rows. */
   showEvidence?: boolean;
+  /** The contract currency, to print the decided amount on the stamp. */
+  currency?: string;
+  /** Whether each criterion is required, by criterion id; optional ones are marked on the receipt. */
+  required?: Record<string, boolean>;
 }) {
-  if (!delivery) return <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No delivery yet.</p>;
+  const items = toEvidenceItems(delivery?.evidence ?? null);
+  const byId = new Map<string, EvidenceItem>(items.map((it) => [it.id, it]));
+  // Collapsed: the receipt chips and the Evidence toggle open it.
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [openRows, setOpenRows] = useState<Set<string>>(new Set());
+  const [focus, setFocus] = useState<{ id: string | null; n: number }>({ id: null, n: 0 });
+
+  if (!delivery) return <p className="mt-4 font-mono text-[12px] text-fg-faint">No delivery yet.</p>;
+
   const rows = rowsOf(delivery.verdict);
-  const result = delivery.result ?? (delivery.verifiedAt ? "no result" : "verifying");
+  const result = delivery.result ?? (delivery.verifiedAt ? "none" : "verifying");
+  const pill = RESULT_PILL[result] ?? { state: result, label: result };
+  const passed = rows.filter((r) => r.status === "pass").length;
+  const evidenceShown = showEvidence && items.length > 0;
+
+  const toggleRow = (id: string) =>
+    setOpenRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /** A receipt chip was clicked: open the grid, expand that row's log and scroll to it. */
+  const reveal = (e: MouseEvent, id: string) => {
+    if (!evidenceShown || !byId.has(id)) return;
+    e.preventDefault();
+    setPanelOpen(true);
+    setOpenRows((prev) => new Set(prev).add(id));
+    setFocus((f) => ({ id, n: f.n + 1 }));
+  };
+
+  const meta = (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      {delivery.model ? <span>{delivery.model}</span> : null}
+      {delivery.verifiedAt ? <span>{formatDateTime(delivery.verifiedAt)}</span> : <span>received {formatDateTime(delivery.receivedAt)}</span>}
+    </span>
+  );
+
+  const footer = decision ? (
+    <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+      <div className="min-w-0 max-w-[52ch]">
+        <p className="type-label text-fg-faint">Policy decision</p>
+        <p className="mt-2 text-[13px] leading-relaxed text-fg-muted">{decision.reason}</p>
+        <p className="mt-2 font-mono text-[11px] text-fg-faint">Decided by the policy rules, not the model.</p>
+      </div>
+      <Stamp
+        action={decision.action}
+        ruleIds={decision.ruleIds}
+        note={currency && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, currency) : undefined}
+        className="self-start sm:mr-2 sm:self-end"
+      />
+    </div>
+  ) : null;
+
   return (
-    <div className="mt-3 space-y-3 text-sm">
-      <p className="flex flex-wrap items-center gap-2">
-        <span className="text-zinc-500 dark:text-zinc-400">Verifier result</span>
-        <span className={`rounded px-2 py-0.5 text-xs font-medium uppercase tracking-wide ${RESULT_STYLE[result] ?? NEUTRAL}`}>{result}</span>
-        <span className="font-mono text-xs text-zinc-400">{delivery.ref}</span>
-        {delivery.suspectedInjection ? (
-          <span className="rounded bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-800 dark:bg-rose-950 dark:text-rose-300">suspected prompt injection</span>
-        ) : null}
-      </p>
-      {rows.length > 0 ? (
-        <ul className="divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
-          {rows.map((r) => (
-            <li key={r.criterion_id} className="space-y-1 p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded px-2 py-0.5 text-xs font-medium ${STATUS_STYLE[r.status] ?? NEUTRAL}`}>{r.status}</span>
-                <span>{descriptions[r.criterion_id] ?? r.criterion_id}</span>
-                <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">confidence {Math.round(r.confidence * 100)}%</span>
-              </div>
-              <p className="text-zinc-600 dark:text-zinc-400">{r.rationale}</p>
-              {r.evidence_ids?.length ? <p className="font-mono text-xs text-zinc-500">evidence: {r.evidence_ids.join(", ")}</p> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {decision ? (
-        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
-          <p>
-            <span className="text-zinc-500 dark:text-zinc-400">Policy decision</span>{" "}
-            <span className="font-medium">{decision.action.replaceAll("_", " ")}</span>
+    <div className="mt-4 space-y-4">
+      <Receipt title="Verdict" meta={meta} footer={footer}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-dashed border-hairline py-4">
+          <StatePill state={pill.state} label={pill.label} size="md" />
+          {rows.length > 0 ? (
+            <span className="font-mono text-[12px] text-fg-muted tabular">
+              {passed} of {rows.length} criteria passed
+            </span>
+          ) : null}
+          {delivery.suspectedInjection ? <StatePill state="failed" label="Suspected prompt injection" size="md" /> : null}
+          <span className="ml-auto">
+            <Hash value={delivery.ref} label={delivery.source === "upload" ? "upload" : "ref"} head={14} tail={6} />
+          </span>
+        </div>
+        {rows.length === 0 ? (
+          <p className="py-4 text-[13px] text-fg-muted">
+            {result === "verifying" ? "The agent is checking the delivery. Criteria appear here as they are judged." : "The verifier returned no criteria."}
           </p>
-          <p className="text-zinc-600 dark:text-zinc-400">{decision.reason}</p>
-          {decision.ruleIds.length ? <p className="font-mono text-xs text-zinc-500">rules: {decision.ruleIds.join(", ")}</p> : null}
+        ) : null}
+        {rows.map((r) => {
+          const status = asStatus(r.status);
+          return (
+            <ReceiptRow
+              key={r.criterion_id}
+              label={descriptions[r.criterion_id] ?? r.criterion_id}
+              status={status}
+              required={required?.[r.criterion_id]}
+              meter={<Confidence value={r.confidence} />}
+              detail={r.rationale}
+            >
+              {r.evidence_ids?.length
+                ? r.evidence_ids.map((id) => {
+                    const ev = byId.get(id);
+                    const evStatus = ev?.status === "pass" || ev?.status === "fail" || ev?.status === "unclear" ? ev.status : undefined;
+                    return (
+                      <span key={id} onClickCapture={(e) => reveal(e, id)} className="inline-flex">
+                        <EvidenceChip
+                          kind={ev?.kind ?? "ref"}
+                          id={id}
+                          status={evStatus}
+                          title={ev ? `${ev.summary}${evidenceShown ? " (open in the evidence log)" : ""}` : undefined}
+                          href={evidenceShown && ev ? `#evidence-${id}` : undefined}
+                        />
+                      </span>
+                    );
+                  })
+                : null}
+            </ReceiptRow>
+          );
+        })}
+      </Receipt>
+
+      {evidenceShown ? (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Button variant="ghost" size="sm" onClick={() => setPanelOpen((o) => !o)} aria-expanded={panelOpen} className="-ml-3">
+              <svg aria-hidden viewBox="0 0 10 10" className={cx("size-2.5 transition-transform duration-200 ease-glide", panelOpen && "rotate-90")} fill="none" stroke="currentColor" strokeWidth={1.5}>
+                <path d="M3.5 1.8 L6.8 5 L3.5 8.2" />
+              </svg>
+              <span className="type-label">Evidence</span>
+              <span className="font-mono text-[12px] text-fg-faint tabular">{items.length}</span>
+            </Button>
+            <span className="hidden items-center gap-3 font-mono text-[11px] text-fg-faint sm:flex">
+              {(["pass", "fail", "unclear"] as const).map((s) => {
+                const n = items.filter((it) => it.status === s).length;
+                return n ? (
+                  <span key={s} data-tone={evidenceTone(s)} className="text-tone tabular">
+                    {n} {s}
+                  </span>
+                ) : null;
+              })}
+              <span className="tabular">{items.filter((it) => !it.status).length} observed</span>
+            </span>
+          </div>
+          {panelOpen ? (
+            <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: DUR.reveal, ease: EASE.glide }}>
+              <EvidencePanel items={items} open={openRows} onToggle={toggleRow} focusId={focus.id} focusKey={focus.n} criterionLabels={descriptions} />
+            </motion.div>
+          ) : null}
         </div>
       ) : null}
-      {showEvidence ? <EvidenceSection evidence={delivery.evidence ?? null} /> : null}
     </div>
   );
 }

@@ -1,21 +1,51 @@
+import type { ReactNode } from "react";
 import { UploadPayload, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { paypalMode } from "@milestone/money";
 import type { Actor } from "@/lib/session";
-import { formatMoney } from "@/lib/format";
+import { formatMoney, humanize, truncateMiddle } from "@/lib/format";
+import { getDb } from "@/lib/db";
 import { AdvanceOffer } from "@/components/advance-offer";
 import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
 import { VerdictView } from "@/components/verdict-view";
-import { getDb } from "@/lib/db";
+import { Hash, LogStream, MoneyTransit, StateGlyph, stateMeta, type LogLine, type ToneKey } from "@/components/ui";
+import { CriteriaList } from "@/app/contracts/_components/criteria-list";
+import { LifecycleTrack } from "@/app/contracts/_components/lifecycle-track";
+import { LiveRefresh } from "@/app/contracts/_components/live-refresh";
 
 type MilestoneRow = typeof milestones.$inferSelect;
 type ContractRow = typeof contracts.$inferSelect;
 type CriterionRow = typeof criteriaTable.$inferSelect;
 type DeliveryRow = typeof deliveries.$inferSelect;
 
-function Note({ children }: { children: React.ReactNode }) {
-  return <p className="mt-3 text-sm text-zinc-500">{children}</p>;
+/** An audit row about this milestone, oldest first (used for the verifying log). */
+export interface MilestoneEvent {
+  at: Date;
+  event: string;
+}
+
+export interface MilestoneActionsProps {
+  milestone: MilestoneRow;
+  contract: ContractRow;
+  actor: Actor;
+  /** This milestone's criteria. */
+  crit: CriterionRow[];
+  /** The latest delivery, if any. */
+  delivery: DeliveryRow | null;
+  /** Audit rows for this milestone, oldest first. Only read while verifying. */
+  events?: MilestoneEvent[];
+  names: { client: string; freelancer: string };
+}
+
+/** A one-line status note with the state's dot. */
+function Note({ tone, children }: { tone?: ToneKey; children: ReactNode }) {
+  return (
+    <p data-tone={tone ?? "neutral"} className="flex items-baseline gap-2.5 text-[13.5px] leading-relaxed text-fg-muted">
+      <span aria-hidden className="size-1.5 shrink-0 translate-y-[-1px] rounded-full bg-tone" />
+      <span className="min-w-0">{children}</span>
+    </p>
+  );
 }
 
 /** The freelancer's delivery form on a funded or held milestone: files when it has upload criteria, a commit otherwise. */
@@ -34,6 +64,7 @@ function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor
       milestoneId={milestone.id}
       files={files}
       repo={repo}
+      resubmit={milestone.status === "held"}
       defaultRepoUrl={contract.repoFullName ? `https://github.com/${contract.repoFullName}.git` : null}
       accept={patterns.length ? [...new Set(patterns)].join(", ") : null}
     />
@@ -54,122 +85,217 @@ function requiredNotPassed(delivery: DeliveryRow | null | undefined, crit: Crite
   return crit.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
 }
 
-/** Links to an upload delivery's files (served only to the contract's parties). */
+/** An upload delivery's files (served only to the contract's parties), as a manifest: name, size, sha256. */
 function DeliveredFiles({ delivery }: { delivery: DeliveryRow | null }) {
   if (!delivery || delivery.source !== "upload") return null;
   const parsed = UploadPayload.safeParse(delivery.payload);
-  if (!parsed.success) return null;
+  if (!parsed.success || parsed.data.files.length === 0) return null;
   return (
-    <ul className="mt-3 space-y-1 text-sm">
-      {parsed.data.files.map((f) => (
-        <li key={f.path} className="flex gap-2">
-          <a className="underline" href={`/api/files/${encodeURIComponent(delivery.id)}/${encodeURIComponent(f.name)}`} target="_blank" rel="noreferrer noopener">
-            {f.name}
-          </a>
-          <span className="text-zinc-500">{Math.ceil(f.size / 1024)} KB</span>
-          <span className="font-mono text-xs text-zinc-500">sha256 {f.sha256.slice(0, 12)}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="overflow-hidden rounded-panel border border-hairline bg-surface-sunken">
+      <p className="type-label border-b border-dashed border-hairline-strong px-4 py-2.5 text-fg-faint">Delivered files</p>
+      <ul className="divide-y divide-hairline">
+        {parsed.data.files.map((f) => (
+          <li key={f.path} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5">
+            <a
+              className="min-w-0 truncate text-[13.5px] text-fg underline decoration-hairline-strong underline-offset-4 hover:decoration-fg"
+              href={`/api/files/${encodeURIComponent(delivery.id)}/${encodeURIComponent(f.name)}`}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {f.name}
+            </a>
+            <span className="font-mono text-[11px] text-fg-faint tabular">{Math.ceil(f.size / 1024)} KB</span>
+            <Hash value={f.sha256} label="sha256" head={8} tail={4} className="sm:ml-auto" />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
-export async function MilestoneActions({ milestone, contract, actor }: { milestone: MilestoneRow; contract: ContractRow; actor: Actor }) {
-  if (milestone.status === "draft") {
-    if (contract.status !== "active") return <Note>Funding opens once both parties approve the contract.</Note>;
-    if (actor.role === "client" && actor.userId === contract.clientId) {
-      return (
-        <FundButton
-          milestoneId={milestone.id}
-          currency={contract.currency}
-          amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
-          paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
-          mode={paypalMode()}
-        />
-      );
-    }
-    return <Note>Waiting for the client to fund this milestone.</Note>;
+/** Settled milestones keep their receipt one click away instead of at full length. */
+function Folded({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <details className="group/fold">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-control py-1 font-mono text-[11px] tracking-[0.1em] text-fg-muted uppercase transition-colors duration-200 hover:text-fg [&::-webkit-details-marker]:hidden">
+        <svg aria-hidden viewBox="0 0 10 10" className="size-2.5 transition-transform duration-200 ease-glide group-open/fold:rotate-90" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M3.5 2 L7 5 L3.5 8" />
+        </svg>
+        {label}
+      </summary>
+      <div className="mt-3 grid gap-4">{children}</div>
+    </details>
+  );
+}
+
+const hhmmss = (d: Date) => d.toISOString().slice(11, 19);
+
+/** What the verifier has been given and what it is working through, as log lines. Only real events carry a time. */
+function verifyLines(delivery: DeliveryRow | null, crit: CriterionRow[], events: MilestoneEvent[]): LogLine[] {
+  const lines: LogLine[] = [];
+  const since = delivery?.receivedAt.getTime() ?? 0;
+  if (delivery) {
+    const what = delivery.source === "upload" ? "files" : delivery.source === "github_pr" ? "pull request" : delivery.source;
+    lines.push({ at: hhmmss(delivery.receivedAt), text: `delivery ${delivery.id} received · ${what} ${truncateMiddle(delivery.ref, 14, 6)}` });
   }
-  if (milestone.status === "funded") {
-    const isFreelancer = actor.role === "freelancer" && actor.userId === contract.freelancerId;
-    const fundedCrit = isFreelancer ? await getDb().query.criteria.findMany({ where: (t, { eq }) => eq(t.milestoneId, milestone.id) }) : [];
-    return (
-      <>
-        <Note>
-          Funds held{milestone.paypalCaptureId ? <> (PayPal capture <span className="font-mono text-xs">{milestone.paypalCaptureId}</span>)</> : null}.
-        </Note>
-        {isFreelancer && milestone.advanceEligible ? <AdvanceOffer milestoneId={milestone.id} /> : null}
-        {deliverFor(milestone, contract, actor, fundedCrit)}
-      </>
-    );
+  for (const e of events) {
+    if (e.at.getTime() < since) continue;
+    lines.push({ at: hhmmss(e.at), text: humanize(e.event), tone: /fail|refused|error/.test(e.event) ? "err" : undefined });
   }
+  crit.forEach((c, i) => lines.push({ text: `check ${String(i + 1).padStart(2, "0")}  ${c.kind.padEnd(8, " ")} ${c.description}` }));
+  lines.push({ text: "agent weighing the evidence against each check", tone: "verifying" });
+  return lines;
+}
+
+/**
+ * Everything inside one milestone's station on the contract rail: where it sits in its lifecycle, its release conditions
+ * or its verdict, and the actions the acting role can take here (fund, deliver, advance, review).
+ */
+export async function MilestoneActions({ milestone, contract, actor, crit, delivery, events = [], names }: MilestoneActionsProps) {
+  const status = milestone.status;
   const isClient = actor.role === "client" && actor.userId === contract.clientId;
-  const db = getDb();
-  const [delivery] = await db.query.deliveries.findMany({
-    where: (t, { eq }) => eq(t.milestoneId, milestone.id),
-    orderBy: (t, { desc }) => desc(t.receivedAt),
-    limit: 1,
-  });
-  const crit = await db.query.criteria.findMany({ where: (t, { eq }) => eq(t.milestoneId, milestone.id) });
-  const descriptions = Object.fromEntries(crit.map((c) => [c.id, c.description]));
+  const isFreelancer = actor.role === "freelancer" && actor.userId === contract.freelancerId;
   const decision = milestone.decision ?? null;
+  // The decision belongs to the delivery it was made for: once a new delivery is in, its receipt carries no stamp yet.
+  const decisionDeliveryId = (decision as { deliveryId?: unknown } | null)?.deliveryId;
+  const receiptDecision = decision && (typeof decisionDeliveryId !== "string" || decisionDeliveryId === delivery?.id) ? decision : null;
+  const descriptions = Object.fromEntries(crit.map((c) => [c.id, c.description]));
+  const items = crit.map((c) => ({ id: c.id, kind: c.kind, description: c.description, required: c.required }));
+  const required = Object.fromEntries(crit.map((c) => [c.id, c.required]));
   const verdict = (
     <>
-      <DeliveredFiles delivery={delivery ?? null} />
-      <VerdictView delivery={delivery ?? null} decision={decision} descriptions={descriptions} showEvidence />
+      <DeliveredFiles delivery={delivery} />
+      <VerdictView delivery={delivery} decision={receiptDecision} descriptions={descriptions} currency={contract.currency} required={required} showEvidence />
     </>
   );
 
-  switch (milestone.status) {
-    case "verifying":
-      return (
+  let body: ReactNode;
+  switch (status) {
+    case "draft": {
+      let action: ReactNode;
+      if (contract.status !== "active") action = <Note>Funding opens once both parties sign the contract.</Note>;
+      else if (isClient)
+        action = (
+          <FundButton
+            milestoneId={milestone.id}
+            currency={contract.currency}
+            amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
+            paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
+            mode={paypalMode()}
+          />
+        );
+      else action = <Note>Waiting for {names.client} to fund this milestone.</Note>;
+      body = (
         <>
-          <Note>Verifying the delivery.</Note>
-          {delivery ? verdict : null}
+          <CriteriaList items={items} />
+          {action}
         </>
       );
+      break;
+    }
+    case "funded":
+      body = (
+        <>
+          <div data-tone="funded" className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Note tone="funded">
+              {isFreelancer ? "Deliver below to start verification." : `Waiting for ${names.freelancer} to deliver.`}
+            </Note>
+            {milestone.paypalCaptureId ? <Hash value={milestone.paypalCaptureId} label="capture" /> : null}
+          </div>
+          <CriteriaList items={items} />
+          {isFreelancer && milestone.advanceEligible ? <AdvanceOffer milestoneId={milestone.id} /> : null}
+          {deliverFor(milestone, contract, actor, crit)}
+        </>
+      );
+      break;
+    case "verifying":
+      body = (
+        <>
+          <LiveRefresh />
+          <LogStream live title={`verifier · ${delivery ? delivery.id : "waiting for delivery"}`} lines={verifyLines(delivery, crit, events)} maxHeight={240} />
+          <CriteriaList items={items} checking />
+          {delivery?.verdict ? verdict : null}
+        </>
+      );
+      break;
     case "review":
     case "needs_client": {
       // The route checks the delivery the decision was made for (decision.deliveryId), falling back to the latest.
       const decidedId = (decision as { deliveryId?: unknown } | null)?.deliveryId;
       const decided =
         typeof decidedId === "string" && decidedId !== delivery?.id
-          ? await db.query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decidedId) })
+          ? await getDb().query.deliveries.findFirst({ where: (t, { eq }) => eq(t.id, decidedId) })
           : delivery;
-      return (
-        <>
-          {verdict}
-          <ReviewCard
-            milestoneId={milestone.id}
-            status={milestone.status}
-            isClient={isClient}
-            reviewEndsAt={milestone.reviewEndsAt ? milestone.reviewEndsAt.toISOString() : null}
-            decisionAction={decision?.action ?? null}
-            amountLabel={decision && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, contract.currency) : null}
-            reason={decision?.reason ?? null}
-            requiredNotPassed={requiredNotPassed(decided, crit)}
-          />
-        </>
+      const card = (
+        <ReviewCard
+          milestoneId={milestone.id}
+          status={status}
+          isClient={isClient}
+          reviewEndsAt={milestone.reviewEndsAt ? milestone.reviewEndsAt.toISOString() : null}
+          decisionAction={decision?.action ?? null}
+          amountLabel={decision && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, contract.currency) : null}
+          reason={decision?.reason ?? null}
+          requiredNotPassed={requiredNotPassed(decided, crit)}
+        />
       );
+      body =
+        status === "review" ? (
+          <>
+            {/* ReviewCard draws the countdown ring and the approve / veto controls for the review window. */}
+            {card}
+            {verdict}
+          </>
+        ) : (
+          <>
+            <Note tone="needs">The agent could not release this on its own. {names.client} decides.</Note>
+            {card}
+            {verdict}
+          </>
+        );
+      break;
     }
     case "held":
-      return (
+      body = (
         <>
-          <Note>On hold{milestone.clientResponse ? ` (client chose ${milestone.clientResponse.replace("_", " ")})` : ""}. The deliverable can be resubmitted for verification.</Note>
+          <Note tone="held">
+            Held in escrow{milestone.clientResponse ? ` (${names.client} chose ${humanize(milestone.clientResponse)})` : ""}. Nothing moves until a new delivery
+            passes or an operator resolves it.
+          </Note>
           {delivery ? verdict : null}
           {deliverFor(milestone, contract, actor, crit)}
         </>
       );
+      break;
     case "released":
-    case "partial_released":
-      return (
+    case "partial_released": {
+      const paid = status === "partial_released" ? (decision?.amountMinor ?? 0) : milestone.amountMinor;
+      const refunded = Math.max(0, milestone.amountMinor - paid);
+      body = (
         <>
-          <Note>
-            {milestone.status === "released" ? "Released in full." : `Partially released${decision ? ` (${formatMoney(decision.amountMinor, contract.currency)})` : ""}.`}
-          </Note>
-          {delivery ? verdict : null}
+          <div className="rounded-panel border border-hairline bg-surface-sunken px-4 py-4 sm:px-5">
+            <MoneyTransit minor={paid} currency={contract.currency} from="Escrow" to={names.freelancer} tone={status === "released" ? "released" : "partial"} />
+            <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-fg-faint tabular">
+              <span data-tone="released" className="inline-flex items-center gap-1.5 text-tone">
+                <StateGlyph glyph="check" className="size-[9px]" />
+                payout confirmed by PayPal
+              </span>
+              {refunded > 0 ? <span>{formatMoney(refunded, contract.currency)} refunded to {names.client}</span> : null}
+            </p>
+          </div>
+          {delivery ? <Folded label="Verdict receipt">{verdict}</Folded> : null}
         </>
       );
+      break;
+    }
+    default:
+      body = <Note>{stateMeta(String(status)).label}</Note>;
   }
-  return <Note>Status: {String(milestone.status).replace("_", " ")}</Note>;
+
+  return (
+    <div className="grid gap-4">
+      {/* Which step only matters while the money is in escrow: a draft has everything ahead, a payout everything behind. */}
+      {status !== "draft" && status !== "released" && status !== "partial_released" ? <LifecycleTrack status={status} className="mb-1" /> : null}
+      {body}
+    </div>
+  );
 }

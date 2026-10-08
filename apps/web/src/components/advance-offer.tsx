@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { formatMoney } from "@/lib/format";
+import { Button, Money, type ToneKey } from "@/components/ui";
 
 interface Terms {
   principalMinor: number;
@@ -48,12 +48,14 @@ async function fetchOffer(milestoneId: string): Promise<{ data: OfferResponse | 
   }
 }
 
-function Row({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+/** One term of the offer: label, dotted leader, the figure in mono. */
+function Row({ label, children, strong = false }: { label: string; children: React.ReactNode; strong?: boolean }) {
   return (
-    <>
-      <dt className="text-zinc-500 dark:text-zinc-400">{label}</dt>
-      <dd className={`text-right tabular-nums ${strong ? "font-semibold" : ""}`}>{value}</dd>
-    </>
+    <div className="flex items-baseline gap-3 py-1.5">
+      <dt className={`min-w-0 text-[13px] ${strong ? "text-fg" : "text-fg-muted"}`}>{label}</dt>
+      <span aria-hidden className="leader" />
+      <dd className="shrink-0 text-right">{children}</dd>
+    </div>
   );
 }
 
@@ -123,70 +125,94 @@ export function AdvanceOffer({ milestoneId, showIneligible = false }: { mileston
     }
   }
 
-  if (loading) return <div className="mt-3 h-24 animate-pulse rounded-lg bg-zinc-100 dark:bg-zinc-900" aria-label="Loading advance offer" />;
-  if (!data) return error ? <p role="alert" className="mt-3 text-sm text-rose-700 dark:text-rose-400">{error}</p> : null;
+  if (loading)
+    return (
+      <div aria-label="Loading advance offer" className="flex h-24 items-center rounded-panel border border-dashed border-hairline-strong px-4 sm:px-5">
+        <p className="type-label text-fg-faint">Milestone Advance · loading offer</p>
+      </div>
+    );
+  if (!data) return error ? <p role="alert" className="text-[13px] text-state-danger">{error}</p> : null;
   const cur = data.currency;
-  const money = (minor: number) => formatMoney(minor, cur);
-  const card = "mt-3 space-y-3 rounded-lg border p-4 text-sm";
+  const money = (minor: number, tone?: ToneKey) => <Money minor={minor} currency={cur} tone={tone} />;
 
   if (data.advance) {
     const a = data.advance;
+    const tone: ToneKey = a.status === "shortfall" ? "danger" : a.status === "offered" ? "funded" : "released";
     const title =
-      a.status === "funded" ? "Funded" : a.status === "repaid" ? "Advance repaid" : a.status === "shortfall" ? "Advance shortfall" : "Paying you now";
+      a.status === "funded" ? "Paid to you" : a.status === "repaid" ? "Repaid" : a.status === "shortfall" ? "Shortfall" : "Paying you now";
     return (
-      <section className={`${card} border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/40`} aria-live="polite">
-        <div className="flex items-baseline justify-between gap-3">
-          <h3 className="font-semibold">Milestone Advance: {title}</h3>
-          {a.status === "offered" ? <span className="text-xs text-zinc-500 dark:text-zinc-400">sending via PayPal...</span> : null}
+      <section data-tone={tone} aria-live="polite" aria-label="Milestone Advance" className="overflow-hidden rounded-panel border border-hairline bg-surface-sunken">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-dashed border-hairline-strong px-4 py-3 sm:px-5">
+          <p className="type-label flex items-center gap-2 text-fg-faint">
+            Milestone Advance
+            <span className="flex items-center gap-1.5 text-tone">
+              <span aria-hidden className={`size-1.5 rounded-full bg-tone ${a.status === "offered" ? "animate-pulse-dot" : ""}`} />
+              {title}
+            </span>
+          </p>
+          <Money minor={a.principalMinor} currency={cur} size="m" tone={tone} animate />
         </div>
-        <dl className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-1">
-          <Row label={a.status === "offered" ? "Advance" : "Paid to you"} value={money(a.principalMinor)} strong />
-          <Row label="Fee" value={`${money(a.feeMinor)} (${pct(a.feeBpsPerDay)} per day)`} />
-          <Row label={a.status === "repaid" ? "Repaid from the release" : "Deducted from the release"} value={money(a.repaymentMinor)} />
-          <Row label="You receive on release" value={money(Math.max(0, data.amountMinor - a.repaymentMinor))} />
+        <dl className="px-4 py-2 sm:px-5">
+          <Row label="Fee">
+            <span className="inline-flex items-baseline gap-2">
+              {money(a.feeMinor)}
+              <span className="font-mono text-[11px] text-fg-faint tabular">{pct(a.feeBpsPerDay)}/day</span>
+            </span>
+          </Row>
+          <Row label={a.status === "repaid" ? "Repaid from the release" : "Deducted from the release"}>{money(a.repaymentMinor)}</Row>
+          <Row label="You receive on release" strong>
+            {money(Math.max(0, data.amountMinor - a.repaymentMinor))}
+          </Row>
         </dl>
-        {a.fundedAt ? <p className="text-xs text-zinc-500 dark:text-zinc-400">Funded {a.fundedAt.slice(0, 16).replace("T", " ")} UTC.</p> : null}
-        {error ? <p role="alert" className="text-rose-700 dark:text-rose-400">{error}</p> : null}
+        {a.fundedAt || a.status === "offered" || error ? (
+          <div className="border-t border-hairline px-4 py-2.5 sm:px-5">
+            {a.status === "offered" ? <p className="font-mono text-[11px] text-fg-faint">sending via PayPal from the capital partner...</p> : null}
+            {a.fundedAt ? <p className="font-mono text-[11px] text-fg-faint tabular">funded {a.fundedAt.slice(0, 16).replace("T", " ")} UTC</p> : null}
+            {error ? <p role="alert" className="text-[13px] text-state-danger">{error}</p> : null}
+          </div>
+        ) : null}
       </section>
     );
   }
 
   if (!data.offer.eligible || !data.terms) {
     if (!showIneligible) return null;
-    return <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No advance offered: {data.offer.reason ?? "not eligible"}.</p>;
+    return <p className="text-[13px] text-fg-muted">No advance offered: {data.offer.reason ?? "not eligible"}.</p>;
   }
 
   const t = data.terms;
   return (
-    <section className={`${card} border-sky-200 bg-sky-50/60 dark:border-sky-900 dark:bg-sky-950/40`}>
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="font-semibold">Get paid now with Milestone Advance</h3>
-        <span className="text-lg font-semibold tabular-nums">{money(t.principalMinor)}</span>
+    <section data-tone="funded" aria-label="Milestone Advance offer" className="overflow-hidden rounded-panel border border-hairline bg-surface-sunken">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-dashed border-hairline-strong px-4 py-3 sm:px-5">
+        <div>
+          <p className="type-label text-fg-faint">Milestone Advance</p>
+          <p className="mt-1 text-[14px] text-fg">Get paid now, before the release.</p>
+        </div>
+        <Money minor={t.principalMinor} currency={cur} size="m" tone="funded" animate />
       </div>
-      <dl className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-1">
-        <Row label="Fee per day" value={pct(t.feeBpsPerDay)} />
-        <Row label={`Fee at the due date (${t.days} day${t.days === 1 ? "" : "s"})`} value={money(t.expectedFeeMinor)} />
-        <Row label="Deducted from the release" value={money(t.repaymentMinor)} strong />
-        <Row label="You receive on release" value={money(Math.max(0, data.amountMinor - t.repaymentMinor))} />
+      <dl className="px-4 py-2 sm:px-5">
+        <Row label="Fee per day">
+          <span className="font-mono text-[13px] text-fg tabular">{pct(t.feeBpsPerDay)}</span>
+        </Row>
+        <Row label={`Fee at the due date (${t.days} day${t.days === 1 ? "" : "s"})`}>{money(t.expectedFeeMinor)}</Row>
+        <Row label="Deducted from the release">{money(t.repaymentMinor)}</Row>
+        <Row label="You receive on release" strong>
+          {money(Math.max(0, data.amountMinor - t.repaymentMinor))}
+        </Row>
       </dl>
       {data.explanation ? (
-        <p className="text-zinc-700 dark:text-zinc-300">
+        <p className="border-t border-hairline px-4 py-3 text-[13px] leading-relaxed text-fg-muted sm:px-5">
           {data.explanation}
-          {data.explanationSource === "model" ? <span className="ml-1 text-xs text-zinc-500">(explained by the agent; the numbers come from the pricing rules)</span> : null}
+          {data.explanationSource === "model" ? <span className="mt-1 block font-mono text-[10.5px] text-fg-faint">explained by the agent; the numbers come from the pricing rules</span> : null}
         </p>
       ) : null}
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={accept}
-          disabled={busy}
-          className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
-        >
+      <div className="flex flex-col gap-3 border-t border-hairline px-4 py-3.5 sm:flex-row sm:items-center sm:px-5">
+        <Button variant="secondary" size="sm" onClick={accept} disabled={busy} aria-busy={busy} className="self-start">
           {busy ? "Working..." : "Get paid now"}
-        </button>
-        <span className="text-xs text-zinc-500 dark:text-zinc-400">Paid by our capital partner via PayPal and repaid automatically out of the release.</span>
+        </Button>
+        <span className="text-[12.5px] text-fg-faint">Paid by our capital partner via PayPal, repaid automatically out of the release.</span>
       </div>
-      {error ? <p role="alert" className="text-rose-700 dark:text-rose-400">{error}</p> : null}
+      {error ? <p role="alert" className="px-4 pb-3 text-[13px] text-state-danger sm:px-5">{error}</p> : null}
     </section>
   );
 }

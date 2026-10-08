@@ -9,13 +9,21 @@ async function switchRole(formData: FormData) {
   (await cookies()).set(ACTOR_COOKIE, id, { path: "/", sameSite: "lax", httpOnly: true });
 }
 
-/** A segmented control: one submit button per role, the current one pressed. Works without client JS. */
+const SHORT: Record<string, string> = { client: "Client", freelancer: "Freelancer", partner: "Partner" };
+
+/**
+ * A physical segmented switch: a recessed track with one key per role; the current key is raised and its indicator lit.
+ * One submit button per role, so it works without client JS.
+ */
 export async function RoleSwitcher() {
   const actor = await getActor();
   return (
-    <form action={switchRole} className="flex items-center gap-2 text-sm" aria-label="Switch demo role">
-      <span className="hidden text-zinc-500 sm:inline dark:text-zinc-400">Acting as</span>
-      <div role="group" className="inline-flex rounded-lg bg-zinc-100 p-0.5 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800">
+    <form action={switchRole} className="flex items-center gap-3" aria-label="Switch demo role">
+      <span className="type-label hidden text-fg-faint lg:inline">Acting as</span>
+      <div
+        role="group"
+        className="inline-flex rounded-control border border-hairline bg-surface-sunken p-[3px] [box-shadow:inset_0_1px_3px_rgb(0_0_0/0.22)]"
+      >
         {Object.values(ACTORS).map((a) => {
           const current = a.userId === actor.userId;
           return (
@@ -25,13 +33,20 @@ export async function RoleSwitcher() {
               name="actor"
               value={a.userId}
               aria-pressed={current}
+              data-tone="released"
               className={
-                current
-                  ? "rounded-md bg-white px-3 py-1 font-medium text-zinc-900 shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-700 dark:text-white dark:ring-zinc-600"
-                  : "rounded-md px-3 py-1 text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                "group inline-flex h-7 items-center gap-1.5 rounded-[5px] border px-2 text-[12px] sm:gap-2 sm:px-2.5 sm:text-[13px] transition-[color,background-color,border-color,transform] duration-[120ms] ease-glide active:translate-y-px " +
+                (current
+                  ? "border-hairline-strong bg-surface-raised text-fg [box-shadow:inset_0_1px_0_0_var(--highlight),0_1px_0_0_rgb(0_0_0/0.25)]"
+                  : "border-transparent text-fg-faint hover:text-fg-muted")
               }
             >
-              {ROLE_LABELS[a.role]}
+              <span
+                aria-hidden
+                className={"size-1.5 rounded-full transition-colors duration-200 " + (current ? "bg-tone glow-tone" : "hidden bg-hairline-strong group-hover:bg-fg-faint sm:block")}
+              />
+              <span className="sm:hidden">{SHORT[a.role]}</span>
+              <span className="hidden sm:inline">{ROLE_LABELS[a.role]}</span>
             </button>
           );
         })}

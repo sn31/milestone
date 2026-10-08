@@ -1,15 +1,25 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useId, useState, type FormEvent } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import { Button, DUR, EASE, Field, StateGlyph, cx, inputClass } from "@/components/ui";
 
+/**
+ * Clears a needs_operator flag with a note (recorded as ops.resolved in the audit log). Moves no money: the operator
+ * settles anything outstanding by hand in PayPal first, then writes down what they did.
+ */
 export function ResolveForm({ milestoneId, disabled }: { milestoneId: string; disabled: boolean }) {
   const router = useRouter();
+  const id = useId();
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function submit() {
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (busy || note.trim() === "") return;
     setBusy(true);
     setErr(null);
     try {
@@ -19,31 +29,53 @@ export function ResolveForm({ milestoneId, disabled }: { milestoneId: string; di
         body: JSON.stringify({ note }),
       });
       if (!res.ok) setErr(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `failed (${res.status})`);
-      else router.refresh();
+      else {
+        setDone(true);
+        router.refresh();
+      }
+    } catch {
+      setErr("network error; nothing was recorded");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <input
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        placeholder="Resolution note"
-        aria-label="Resolution note"
-        disabled={disabled || busy}
-        className="w-72 rounded border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-transparent"
-      />
-      <button
-        type="button"
-        onClick={submit}
-        disabled={disabled || busy || note.trim() === ""}
-        className="rounded border border-zinc-300 px-3 py-1 text-sm hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+    <form onSubmit={submit} className="w-full max-w-xl">
+      <Field
+        label="Resolution note"
+        htmlFor={id}
+        error={err}
+        hint={disabled ? "Only the partner or the platform can resolve a case." : "Recorded in the audit log as ops.resolved. Nothing is paid or refunded by this."}
       >
-        Mark resolved
-      </button>
-      {err ? <span className="text-sm text-red-600">{err}</span> : null}
-    </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            id={id}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Paid the freelancer by hand, batch 7Q4…"
+            disabled={disabled || busy || done}
+            className={cx(inputClass, "h-10 font-mono text-[13px]")}
+          />
+          <Button type="submit" variant="secondary" disabled={disabled || busy || done || note.trim() === ""} className="shrink-0">
+            {busy ? "Resolving" : "Mark resolved"}
+          </Button>
+        </div>
+      </Field>
+      <AnimatePresence>
+        {done ? (
+          <motion.p
+            data-tone="released"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: DUR.reveal, ease: EASE.glide }}
+            className="mt-2 flex items-center gap-2 font-mono text-[12px] text-tone"
+          >
+            <StateGlyph glyph="check" />
+            resolved, clearing from the queue
+          </motion.p>
+        ) : null}
+      </AnimatePresence>
+    </form>
   );
 }

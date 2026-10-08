@@ -55,6 +55,68 @@ export function humanize(s: string): string {
   return s.replace(/[._]+/g, " ").trim();
 }
 
+/** Money split for typesetting: the symbol and the fraction are set muted, the integer part at full strength. */
+export interface MoneyParts {
+  sign: "" | "-";
+  /** Currency symbol or code, e.g. "$" or "CHF". */
+  symbol: string;
+  /** true when the symbol follows the number ("12.00 XYZ"). */
+  symbolAfter: boolean;
+  /** Grouped whole units, e.g. "1,234". */
+  integer: string;
+  /** Decimal separator and digits, e.g. ".56", or "" for zero-decimal currencies. */
+  fraction: string;
+}
+
+export function formatMoneyParts(minor: number, currency: string): MoneyParts {
+  const digits = minorDigits(currency);
+  const major = Math.abs(minor) / 10 ** digits;
+  const sign = minor < 0 ? "-" : "";
+  const code = currency.toUpperCase();
+  try {
+    const parts = new Intl.NumberFormat("en-US", { style: "currency", currency: code, minimumFractionDigits: digits, maximumFractionDigits: digits }).formatToParts(major);
+    const symIdx = parts.findIndex((p) => p.type === "currency");
+    const intIdx = parts.findIndex((p) => p.type === "integer");
+    const integer = parts.filter((p) => p.type === "integer" || p.type === "group").map((p) => p.value).join("");
+    const fraction = parts.filter((p) => p.type === "decimal" || p.type === "fraction").map((p) => p.value).join("");
+    return { sign, symbol: (parts[symIdx]?.value ?? code).trim(), symbolAfter: symIdx > intIdx, integer, fraction };
+  } catch {
+    const [i, f] = major.toFixed(digits).split(".");
+    return { sign, symbol: code, symbolAfter: true, integer: Number(i).toLocaleString("en-US"), fraction: f ? `.${f}` : "" };
+  }
+}
+
+/** Integer minor units -> "1,234.56" (no symbol): the number a count-up animates through. */
+export function formatAmount(minor: number, currency: string): string {
+  const digits = minorDigits(currency);
+  return new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(minor / 10 ** digits);
+}
+
+/** "1,234" or "12.5" with a fixed number of decimals. */
+export function formatNumber(n: number, decimals = 0): string {
+  return new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(n);
+}
+
+/** Seconds -> "19:42", "3:04:05", or "2d 04h" for long windows. Negative values read as zero. */
+export function formatCountdown(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const d = Math.floor(s / 86_400);
+  const h = Math.floor((s % 86_400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (d > 0) return `${d}d ${pad(h)}h`;
+  if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`;
+  return `${pad(m)}:${pad(sec)}`;
+}
+
+/** "a1b2c3d4e5f6" -> "a1b2c3…e5f6". Short values are returned unchanged. */
+export function truncateMiddle(value: string, head = 6, tail = 4): string {
+  return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}\u2026${value.slice(-tail)}`;
+}
+
+// ---------- Legacy tone API (kept for older screens; new code uses components/ui StatePill and data-tone) ----------
+
 export type Tone = "neutral" | "info" | "progress" | "attention" | "success" | "warning" | "danger" | "partial";
 
 /** Every contract and milestone status gets its own tone. Unknown statuses fall back to neutral. */
@@ -62,8 +124,8 @@ const STATUS_TONE: Record<string, Tone> = {
   // contracts
   draft: "neutral",
   approved: "info",
-  active: "success",
-  closed: "neutral",
+  active: "info",
+  closed: "success",
   // milestones
   funded: "info",
   verifying: "progress",
@@ -78,25 +140,25 @@ export function statusTone(status: string): Tone {
   return STATUS_TONE[status] ?? "neutral";
 }
 
-/** Tailwind classes per tone: full class strings so Tailwind's scanner sees them. */
+/** Token classes per legacy tone: full class strings so Tailwind's scanner sees them. */
 export const TONE_CLASSES: Record<Tone, string> = {
-  neutral: "bg-zinc-100 text-zinc-700 ring-zinc-300 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-zinc-700",
-  info: "bg-sky-50 text-sky-800 ring-sky-200 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-800",
-  progress: "bg-violet-50 text-violet-800 ring-violet-200 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-800",
-  attention: "bg-indigo-50 text-indigo-800 ring-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-800",
-  success: "bg-emerald-50 text-emerald-800 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-800",
-  warning: "bg-amber-50 text-amber-900 ring-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-800",
-  danger: "bg-rose-50 text-rose-800 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-800",
-  partial: "bg-teal-50 text-teal-800 ring-teal-200 dark:bg-teal-950 dark:text-teal-300 dark:ring-teal-800",
+  neutral: "bg-state-draft/10 text-state-draft ring-state-draft/35",
+  info: "bg-state-funded/10 text-state-funded ring-state-funded/35",
+  progress: "bg-state-verifying/10 text-state-verifying ring-state-verifying/35",
+  attention: "bg-state-review/10 text-state-review ring-state-review/35",
+  success: "bg-state-released/10 text-state-released ring-state-released/35",
+  warning: "bg-state-needs/10 text-state-needs ring-state-needs/35",
+  danger: "bg-state-held/10 text-state-held ring-state-held/35",
+  partial: "bg-state-partial/10 text-state-partial ring-state-partial/35",
 };
 
 export const TONE_DOT: Record<Tone, string> = {
-  neutral: "bg-zinc-400",
-  info: "bg-sky-500",
-  progress: "bg-violet-500",
-  attention: "bg-indigo-500",
-  success: "bg-emerald-500",
-  warning: "bg-amber-500",
-  danger: "bg-rose-500",
-  partial: "bg-teal-500",
+  neutral: "bg-state-draft",
+  info: "bg-state-funded",
+  progress: "bg-state-verifying",
+  attention: "bg-state-review",
+  success: "bg-state-released",
+  warning: "bg-state-needs",
+  danger: "bg-state-held",
+  partial: "bg-state-partial",
 };

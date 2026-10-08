@@ -5,6 +5,8 @@ import { loadAdvanceBalances } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { getActor } from "@/lib/session";
 import { LenderBook, type LenderRow } from "@/components/lender-book";
+import { Button, EmptyState, PageHeader } from "@/components/ui";
+import { ACTOR_NAMES } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -33,9 +35,22 @@ export default async function LenderPage() {
   const allowed = actor.role === "partner" || (actor.role as string) === "platform";
   if (!allowed) {
     return (
-      <main className="space-y-3">
-        <h1 className="text-2xl font-semibold">Lender book</h1>
-        <p className="text-sm text-zinc-500">Only the capital partner or the platform can see the advance book. You are acting as {actor.role}.</p>
+      <main>
+        <PageHeader
+          eyebrow="Capital / restricted"
+          title={
+            <>
+              Lender&rsquo;s book
+            </>
+          }
+          description="The advance book belongs to the capital partner who funds it, and to the platform."
+        />
+        <EmptyState
+          className="mt-12"
+          title="This book is not yours to read"
+          body={`You are acting as the ${actor.role}. Switch to the partner role in the header to see principal out, expected loss and repayments.`}
+          action={<Button href="/">Back to contracts</Button>}
+        />
       </main>
     );
   }
@@ -89,13 +104,21 @@ export default async function LenderPage() {
   });
 
   return (
-    <main className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Lender book</h1>
-        <p className="text-sm text-zinc-500">Milestone Advances paid from the capital partner&apos;s PayPal account, repaid first out of each release.</p>
-      </div>
-      {/* Wider than the 3xl content column: the grid has twelve columns. */}
-      <div className="ml-[calc(50%_-_min(36rem,50vw_-_1.5rem))] w-[min(72rem,calc(100vw_-_3rem))]">
+    <main>
+      <PageHeader
+        eyebrow={
+          <>
+            Capital <span className="text-hairline-strong">/</span> {actor.role === "partner" ? (ACTOR_NAMES[actor.userId] ?? actor.userId) : "every partner"}
+          </>
+        }
+        title={
+          <>
+            Lender&rsquo;s book
+          </>
+        }
+        description="Milestone Advances go out from the capital partner's PayPal account and come back first, out of the release of the milestone they were lent against."
+      />
+      <div className="mt-12">
         <LenderBook rows={book} now={now.toISOString()} />
       </div>
     </main>

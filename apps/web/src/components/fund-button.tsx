@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui";
 
 // Minimal local types for the PayPal JS SDK v6 surface we use. Kept local (not a global Window
 // augmentation) so other components can type window.paypal their own way.
@@ -202,6 +203,8 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
     setPhase("paying");
     try {
       const { orderId } = await createOrder();
+      // A full navigation on purpose: the approve route is an API route that answers with a 303 back to this page.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign(`/api/dev/paypal/approve?order=${encodeURIComponent(orderId)}`);
     } catch (e) {
       setError(message(e));
@@ -255,34 +258,58 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
     `Fund ${amountLabel} with PayPal`;
 
   return (
-    <div className="mt-3 space-y-2" data-paypal-mode={mode ?? "unknown"}>
-      {simulated && phase !== "pending" && (
-        <p className="text-sm text-zinc-500">Simulated PayPal: {amountLabel}. No real money moves; the approve step happens instantly.</p>
-      )}
-      {phase === "ineligible" && <p className="text-sm text-zinc-500">PayPal is not available for {currency} payments here.</p>}
-      {phase === "pending" && <p className="text-sm text-amber-700 dark:text-amber-400">PayPal is still processing this payment. The milestone will show as funded once it completes.</p>}
-      {phase !== "ineligible" && phase !== "unavailable" && phase !== "pending" && (
-        <button
-          type="button"
+    <section
+      data-tone="funded"
+      data-paypal-mode={mode ?? "unknown"}
+      aria-label="Fund this milestone"
+      className="flex flex-col gap-4 rounded-panel border border-dashed border-hairline-strong px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5"
+    >
+      <div className="min-w-0">
+        <p className="type-label flex items-center gap-2 text-fg">
+          <span aria-hidden className="size-1.5 rounded-full bg-tone" />
+          Fund this milestone
+        </p>
+        <p className="mt-1.5 max-w-[52ch] text-[13px] text-fg-muted">
+          <span className="font-mono text-fg tabular">{amountLabel}</span> goes into escrow through PayPal and stays there until the work is verified.
+        </p>
+        {simulated && phase !== "pending" ? (
+          <p className="mt-2 flex items-center gap-2 font-mono text-[10.5px] tracking-[0.1em] text-fg-faint uppercase">
+            <span className="rounded-chip border border-dashed border-hairline-strong px-1.5 py-0.5">Simulated</span>
+            no real money moves
+          </p>
+        ) : null}
+        {phase === "ineligible" ? <p className="mt-2 text-[13px] text-fg-muted">PayPal is not available for {currency} payments here.</p> : null}
+        {phase === "pending" ? (
+          <p role="status" className="mt-2 flex items-center gap-2 text-[13px] text-tone">
+            <span aria-hidden className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
+            PayPal is still processing this payment. The milestone shows as funded once it completes.
+          </p>
+        ) : null}
+        {error ? (
+          <p role="alert" className="mt-2 text-[13px] text-state-danger">
+            {phase === "unavailable" ? `PayPal could not be loaded: ${error}` : error}
+          </p>
+        ) : null}
+      </div>
+      {phase !== "ineligible" && phase !== "unavailable" && phase !== "pending" ? (
+        <Button
+          variant="primary"
           onClick={onClick}
           disabled={busy}
           aria-busy={busy}
           data-paypal-mode={mode ?? "unknown"}
           title={simulated ? `Simulated PayPal checkout for ${amountLabel}` : undefined}
-          className={
-            simulated
-              ? "rounded border-2 border-dashed border-amber-500 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-900 hover:brightness-95 disabled:cursor-wait disabled:opacity-60 dark:bg-amber-950 dark:text-amber-100"
-              : "rounded bg-[#ffc439] px-4 py-2 text-sm font-medium text-zinc-900 hover:brightness-95 disabled:cursor-wait disabled:opacity-60"
-          }
+          className="shrink-0 self-start sm:self-auto"
         >
-          {label}
-        </button>
-      )}
-      {error && (
-        <p role="alert" className="text-sm text-red-700 dark:text-red-400">
-          {phase === "unavailable" ? `PayPal could not be loaded: ${error}` : error}
-        </p>
-      )}
-    </div>
+          {busy ? (
+            label
+          ) : (
+            <>
+              {simulated ? "Fund" : "Fund with PayPal"} <span className="font-mono tabular">{amountLabel}</span>
+            </>
+          )}
+        </Button>
+      ) : null}
+    </section>
   );
 }
