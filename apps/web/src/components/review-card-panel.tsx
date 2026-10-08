@@ -41,6 +41,9 @@ export interface ReviewPanelProps {
   /** Length of the whole review window in seconds, for the countdown ring. */
   windowSeconds: number;
   decisionAction: string | null;
+  /** The decision's proposed payout in minor units (the share a partial would pay). */
+  amountMinor?: number | null;
+  /** That amount formatted, or null when there is none to show (no decision, or 0). */
   amountLabel: string | null;
   reason: string | null;
   /** Required criteria the delivery's verdict did not pass; the review route then refuses approve and confirm_partial. */
@@ -61,6 +64,15 @@ const RECOMMEND: Record<string, string> = {
   hold: "Hold the payment",
   release: "Release in full",
 };
+
+/**
+ * Whether the client is offered "Release <amount>" (confirm_partial): only on a partial decision proposing a share above
+ * zero. On ask_client the policy proposes no share (amountMinor 0), and the release job would turn a confirmed partial
+ * of 0 into a full refund to the client, so the choices there are approve in full or hold.
+ */
+export function offersPartial(decisionAction: string | null, amountMinor: number | null | undefined): boolean {
+  return decisionAction === "partial" && typeof amountMinor === "number" && Number.isFinite(amountMinor) && amountMinor > 0;
+}
 
 /** The client's choices on a milestone in review or needs_client, each with its consequence spelled out underneath. */
 export function ReviewPanel(props: ReviewPanelProps) {
@@ -126,22 +138,18 @@ export function ReviewPanel(props: ReviewPanelProps) {
       consequence: "Keeps the money in escrow and moves the milestone to Held. The freelancer can fix the work and resubmit.",
     });
   } else {
-    if (props.decisionAction === "partial") {
+    const partial = offersPartial(props.decisionAction, props.amountMinor ?? null) && amount !== null;
+    if (partial) {
       choices.push({
         action: "confirm_partial",
-        label: `Release ${amount ?? "partial"}`,
+        label: `Release ${amount}`,
         variant: "primary",
-        consequence: <>Pays {amount ?? "the proposed share"} to the freelancer and refunds the rest of the milestone to you.</>,
+        consequence: <>Pays {amount} to the freelancer and refunds the rest of the milestone to you.</>,
       });
     }
+    // The route takes full approval on needs_client only when the agent asked the client.
     if (props.decisionAction === "ask_client") {
       choices.push({ action: "approve", label: "Approve in full", variant: "primary", consequence: "Pays the whole milestone to the freelancer." });
-      choices.push({
-        action: "confirm_partial",
-        label: "Release partial",
-        variant: "secondary",
-        consequence: <>Pays {amount ?? "the proposed share"} to the freelancer and refunds the rest to you.</>,
-      });
     }
     choices.push({
       action: "hold",

@@ -2,10 +2,11 @@
  * Read-only access to a delivered commit's checkout, handed to the judgment stage.
  * Every path is resolved under the workdir (symlinks included); nothing here writes or runs delivered code.
  */
+import { realpathSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import type { EvidenceSummary, UploadedFile } from "@milestone/core";
+import type { EvidenceSummary, UploadedFile, VerdictOutput } from "@milestone/core";
 import { docxText, fileEvidenceId, pdfText, run, sniffFormat, type EvidenceReader, type ToolOutput } from "@milestone/verify";
 
 export const MAX_TEXT = 100_000;
@@ -40,6 +41,34 @@ export async function git(workdir: string, args: string[], timeoutMs = 60_000): 
   const r = await run(["git", ...args], workdir, gitEnv(workdir), timeoutMs);
   if (r.code !== 0) throw new Error(`git ${args[0]} exited ${r.code}${r.timedOut ? " (timed out)" : ""}`);
   return r.output;
+}
+
+/**
+ * Strips worker directories (the checkout, UPLOAD_DIR) from text both parties see, realpaths included
+ * (/var/folders/... is /private/var/folders/... on macOS). A path under a root becomes relative to it.
+ */
+export function stripRoots(text: string, roots: string[]): string {
+  const all = new Set<string>();
+  for (const r of roots) {
+    if (!r) continue;
+    const clean = r.replace(/\/+$/, "");
+    all.add(clean);
+    try { all.add(realpathSync(clean)); } catch { /* gone already */ }
+  }
+  let out = text;
+  for (const root of [...all].filter((r) => r.length > 1).sort((a, b) => b.length - a.length)) {
+    out = out.split(`${root}${sep}`).join("").split(root).join(".");
+  }
+  return out;
+}
+
+/** Evidence summaries and verdict rationales with worker directories stripped (F11: no temp paths in what parties see). */
+export function scrubVerdictPaths<T extends { evidence: EvidenceSummary[]; verdict: VerdictOutput }>(v: T, roots: string[]): T {
+  return {
+    ...v,
+    evidence: v.evidence.map((e) => ({ ...e, summary: stripRoots(e.summary, roots) })),
+    verdict: { ...v.verdict, criteria: v.verdict.criteria.map((c) => ({ ...c, rationale: stripRoots(c.rationale, roots) })) },
+  };
 }
 
 export interface ReaderInput {

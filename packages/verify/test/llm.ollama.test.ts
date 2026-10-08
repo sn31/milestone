@@ -52,7 +52,7 @@ describe("ollama provider through generateJson", () => {
     // tool turn: tools offered, no format, deterministic options, thinking off
     expect(first!.tools.map((t: any) => t.function.name)).toEqual(["read_file"]);
     expect(first!.format).toBeUndefined();
-    expect(first).toMatchObject({ model: "qwen3:14b", stream: false, think: false, options: { temperature: 0, num_ctx: 32768 } });
+    expect(first).toMatchObject({ model: "qwen3:14b", stream: false, think: false, options: { temperature: 0, num_ctx: 16384 } });
     expect(first!.messages[0]).toEqual({ role: "system", content: "sys" });
     // second turn replays the call and the tool reply (wrapped as untrusted, closing tag stripped)
     const msgs = second!.messages;

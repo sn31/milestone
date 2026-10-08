@@ -10,6 +10,7 @@ import { FundButton } from "@/components/fund-button";
 import { ReviewCard } from "@/components/review-card";
 import { VerdictView } from "@/components/verdict-view";
 import { VerifierLog } from "@/components/live-refresh";
+import { awaitingVerdict } from "@/components/live-rules";
 import { Hash, MoneyTransit, StateGlyph, stateMeta, type LogLine, type ToneKey } from "@/components/ui";
 import type { MilestoneSnapshot } from "@/app/api/milestones/[id]/status/snapshot";
 import { CriteriaList } from "@/app/contracts/_components/criteria-list";
@@ -48,8 +49,12 @@ function Note({ tone, children }: { tone?: ToneKey; children: ReactNode }) {
   );
 }
 
-/** The freelancer's delivery form on a funded or held milestone: files when it has upload criteria, a commit otherwise. */
-function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor, crit: CriterionRow[]) {
+/**
+ * The freelancer's delivery form on a funded or held milestone: files when it has upload criteria, a commit otherwise.
+ * While the latest delivery waits for the verifier (the worker has not moved the milestone to verifying yet) the form
+ * shows that instead of asking for another delivery.
+ */
+function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor, crit: CriterionRow[], delivery: DeliveryRow | null) {
   if (actor.role !== "freelancer" || actor.userId !== contract.freelancerId) return null;
   if (milestone.status !== "funded" && milestone.status !== "held") return null;
   const files = crit.some((c) => c.kind === "upload");
@@ -67,6 +72,7 @@ function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor
       resubmit={milestone.status === "held"}
       defaultRepoUrl={contract.repoFullName ? `https://github.com/${contract.repoFullName}.git` : null}
       accept={patterns.length ? [...new Set(patterns)].join(", ") : null}
+      pending={delivery && awaitingVerdict(delivery) ? { deliveryId: delivery.id, ref: delivery.source === "upload" ? null : delivery.ref } : null}
     />
   );
 }
@@ -217,7 +223,7 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
           </div>
           <CriteriaList items={items} />
           {isFreelancer && milestone.advanceEligible ? <AdvanceOffer milestoneId={milestone.id} /> : null}
-          {deliverFor(milestone, contract, actor, crit)}
+          {deliverFor(milestone, contract, actor, crit, delivery)}
         </>
       );
       break;
@@ -250,6 +256,7 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
           isClient={isClient}
           reviewEndsAt={milestone.reviewEndsAt ? milestone.reviewEndsAt.toISOString() : null}
           decisionAction={decision?.action ?? null}
+          amountMinor={decision?.amountMinor ?? null}
           amountLabel={decision && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, contract.currency) : null}
           reason={decision?.reason ?? null}
           requiredNotPassed={requiredNotPassed(decided, crit)}
@@ -288,7 +295,7 @@ export async function MilestoneActions({ milestone, contract, actor, crit, deliv
             passes or an operator resolves it.
           </Note>
           {delivery ? receipt : null}
-          {deliverFor(milestone, contract, actor, crit)}
+          {deliverFor(milestone, contract, actor, crit, delivery)}
         </>
       );
       break;

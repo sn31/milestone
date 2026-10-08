@@ -13,10 +13,17 @@
  *
  * Commands run with lifecycle scripts disabled (npm_config_ignore_scripts) and with every committed node_modules
  * and .bin directory removed first, so a committed node_modules/.bin/node cannot shadow the real one.
+ *
+ * Context evidence for judgment criteria (no status, never decides anything): evd_diff (the diff against the same
+ * commit the tamper check used: file list with +/- counts and the start of the patch), evd_tree (the delivered
+ * commit's file list) and evd_commit (commit message, PR title and body; untrusted text). The judge cites these.
+ *
+ * Every evidence summary, log and error message has the throwaway workdir prefix stripped: both parties see the
+ * summaries, and a worker temp path (/private/var/folders/...) means nothing to them.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CriterionSpec, EvidenceSummary } from "@milestone/core";
@@ -35,6 +42,8 @@ export interface DeterministicInput {
   baselineSha?: string | null;
   /** Where baselineSha came from, for the evidence summary, e.g. "funding" or "pull request base". */
   baselineSource?: string;
+  /** The pull request title and body, or a manual delivery's title and note (untrusted); recorded with the commit message as evd_commit. */
+  pullRequest?: { title?: string; body?: string };
 }
 
 export interface DeterministicOutput {
@@ -52,6 +61,14 @@ const CLEAN_ENV = { PATH: process.env.PATH ?? "", CI: "1", NODE_ENV: "test", HOM
 const COMMIT_ID = /^[0-9a-f]{7,64}$/i;
 
 export const TAMPER_EVIDENCE_ID = "evd_tamper_check";
+/** Context evidence the judge may cite for judgment criteria (see the header). */
+export const DIFF_EVIDENCE_ID = "evd_diff";
+export const TREE_EVIDENCE_ID = "evd_tree";
+export const COMMIT_EVIDENCE_ID = "evd_commit";
+/** evd_diff carries this much of the patch; evd_tree at most this many paths. */
+export const DIFF_EXCERPT_CHARS = 2_000;
+export const TREE_MAX_ENTRIES = 200;
+const COMMIT_TEXT_MAX = 2_000;
 
 // ---------- Tamper check (pure part, unit-tested) ----------
 
@@ -166,6 +183,8 @@ interface TamperResult {
   base: string | null;
   /** Human-readable description of what was compared, for the evidence summary. */
   against: string;
+  /** The revision the diff starts from: the base, or the empty tree for a root commit. */
+  from: string;
 }
 
 async function gitOut(args: string[], workdir: string, env: Record<string, string>): Promise<string> {
@@ -232,7 +251,7 @@ async function tamperCheck(workdir: string, sha: string, env: Record<string, str
     c.before = await show(from, c.path);
     c.after = c.status === "D" ? null : await show(sha, c.path);
   }
-  return { findings: findTampering(changes), changed: changes.length, base, against };
+  return { findings: findTampering(changes), changed: changes.length, base, against, from };
 }
 
 /** Removes every node_modules and .bin entry in the checkout (outside .git), so nothing committed lands on PATH. */
@@ -253,10 +272,89 @@ export async function removeCommittedDependencies(root: string): Promise<string[
   return removed;
 }
 
+// ---------- Context evidence for judgment criteria ----------
+
+const cap = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}\n[truncated at ${max} characters]` : s);
+
+/** Parses `git diff --numstat -z --no-renames` output ("added\tdeleted\tpath\0"; "-" counts for binary files). */
+export function parseNumstat(out: string): Array<{ path: string; added: number | null; deleted: number | null }> {
+  return out.split("\0").filter((l) => l.trim() !== "").map((line) => {
+    const [a = "", d = "", ...rest] = line.split("\t");
+    const n = (x: string) => (/^\d+$/.test(x.trim()) ? Number(x.trim()) : null);
+    return { path: rest.join("\t").replace(/^\n+/, ""), added: n(a), deleted: n(d) };
+  });
+}
+
+/** The evd_diff summary: file list with +/- counts, then the first DIFF_EXCERPT_CHARS of the patch. */
+export function diffSummary(against: string, files: ReturnType<typeof parseNumstat>, patch: string): string {
+  const plus = files.reduce((n, f) => n + (f.added ?? 0), 0);
+  const minus = files.reduce((n, f) => n + (f.deleted ?? 0), 0);
+  const shown = files.slice(0, TREE_MAX_ENTRIES).map((f) => `  ${f.added === null ? "binary" : `+${f.added} -${f.deleted}`} ${f.path}`);
+  const more = files.length > shown.length ? [`  ... and ${files.length - shown.length} more file(s)`] : [];
+  const excerpt = patch.length > DIFF_EXCERPT_CHARS ? `${patch.slice(0, DIFF_EXCERPT_CHARS)}\n[diff truncated at ${DIFF_EXCERPT_CHARS} of ${patch.length} characters; get_diff returns all of it]` : patch;
+  return [`${files.length} file(s) changed against ${against}, +${plus} -${minus}:`, ...shown, ...more, "", "diff:", excerpt].join("\n");
+}
+
+/** The evd_tree summary: the delivered commit's file list, at most TREE_MAX_ENTRIES paths. */
+export function treeSummary(paths: string[]): string {
+  const shown = paths.slice(0, TREE_MAX_ENTRIES);
+  const more = paths.length > shown.length ? [`... and ${paths.length - shown.length} more (read_file reads any of them)`] : [];
+  return [`${paths.length} file(s) in the delivered commit:`, ...shown, ...more].join("\n");
+}
+
+/** The evd_commit summary: commit message and pull request text, each capped; null when there is none. */
+export function commitSummary(message: string, pr: DeterministicInput["pullRequest"]): string | null {
+  const parts: string[] = [];
+  if (message.trim()) parts.push(`commit message:\n${cap(message.trim(), COMMIT_TEXT_MAX)}`);
+  if (pr?.title?.trim()) parts.push(`delivery title: ${cap(pr.title.trim(), 500)}`);
+  if (pr?.body?.trim()) parts.push(`delivery description:\n${cap(pr.body.trim(), COMMIT_TEXT_MAX)}`);
+  return parts.length ? parts.join("\n\n") : null;
+}
+
+/**
+ * evd_diff, evd_tree and evd_commit. Best effort: a git failure here leaves the item out (the judge then says
+ * unclear), it never fails the stage. `from` is the tamper check's starting revision; without one the commit's own
+ * diff against its parent is used, like the evidence reader's get_diff.
+ */
+async function contextEvidence(workdir: string, head: string, env: Record<string, string>, diffFrom: { from: string; against: string } | null, pr: DeterministicInput["pullRequest"]): Promise<EvidenceSummary[]> {
+  const out: EvidenceSummary[] = [];
+  try {
+    const range = diffFrom ? [diffFrom.from, head] : [`${head}^`, head];
+    const against = diffFrom ? diffFrom.against : `its parent ${(await gitOut(["rev-parse", "--short=12", `${head}^`], workdir, env)).trim()}`;
+    const files = parseNumstat(await gitOut(["diff", "--numstat", "-z", "--no-renames", ...range], workdir, env));
+    const patch = await gitOut(["diff", "--no-color", "--no-renames", ...range], workdir, env);
+    out.push({ id: DIFF_EVIDENCE_ID, kind: "diff", summary: diffSummary(against, files, patch) });
+  } catch {
+    // no diff evidence; the judge can still call get_diff
+  }
+  try {
+    const paths = (await gitOut(["ls-tree", "-r", "-z", "--name-only", head], workdir, env)).split("\0").filter(Boolean);
+    out.push({ id: TREE_EVIDENCE_ID, kind: "file", summary: treeSummary(paths) });
+  } catch {
+    // no tree evidence
+  }
+  const message = await gitOut(["log", "-1", "--format=%B", head], workdir, env).catch(() => "");
+  const commit = commitSummary(message, pr);
+  if (commit) out.push({ id: COMMIT_EVIDENCE_ID, kind: "note", summary: commit });
+  return out;
+}
+
+/** Strips the workdir prefix (and its realpath, e.g. /private/var/... for /var/...) from text both parties may see. */
+export function stripWorkdir(text: string, roots: string[]): string {
+  let out = text;
+  // Longest first: "/private/var/x" contains "/var/x".
+  for (const root of [...new Set(roots.filter(Boolean))].sort((a, b) => b.length - a.length)) {
+    out = out.split(`${root}/`).join("").split(root).join(".");
+  }
+  return out;
+}
+
 // ---------- Stage ----------
 
 export async function runDeterministicStage(input: DeterministicInput): Promise<DeterministicOutput> {
   const workdir = await mkdtemp(join(tmpdir(), "milestone-verify-"));
+  const roots = [workdir, await realpath(workdir).catch(() => workdir)];
+  const scrub = (s: string) => stripWorkdir(s, roots);
   const env = { ...CLEAN_ENV, HOME: workdir };
   const logs: Record<string, string> = {};
   const evidence: EvidenceSummary[] = [];
@@ -272,10 +370,12 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
 
     let tampering: string[];
     let baseline: string | null = null;
+    let diffFrom: { from: string; against: string } | null = null;
     try {
       const t = await tamperCheck(workdir, head, env, input);
       tampering = t.findings;
       baseline = t.base;
+      diffFrom = { from: t.from, against: t.against };
       evidence.push({
         id: TAMPER_EVIDENCE_ID,
         kind: "diff",
@@ -290,6 +390,7 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       if (e instanceof TamperCheckError) baseline = e.base;
       evidence.push({ id: TAMPER_EVIDENCE_ID, kind: "diff", status: "unclear", summary: `tamper check: ${tampering[0]}` });
     }
+    evidence.push(...(await contextEvidence(workdir, head, env, diffFrom, input.pullRequest)));
 
     // Whatever the diff says, committed dependencies never run: npm run puts node_modules/.bin first on PATH.
     const removed = await removeCommittedDependencies(workdir);
@@ -319,9 +420,16 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
         evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "file", status: exists ? "pass" : "fail", summary: `${path} ${exists ? "present" : "missing"}` });
       }
     }
-    return { evidence, logs, workdir, tampering, baseline };
+    return {
+      evidence: evidence.map((e) => ({ ...e, summary: scrub(e.summary) })),
+      logs: Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, scrub(v)])),
+      workdir,
+      tampering: tampering.map(scrub),
+      baseline,
+    };
   } catch (e) {
     await rm(workdir, { recursive: true, force: true });
+    if (e instanceof Error) e.message = scrub(e.message);
     throw e;
   }
 }

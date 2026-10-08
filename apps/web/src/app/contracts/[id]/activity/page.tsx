@@ -6,6 +6,7 @@ import { getDb } from "@/lib/db";
 import { AuditGrid, type AuditRow } from "@/components/audit-grid";
 import { PageHeader, Stat } from "@/components/ui";
 import { ACTOR_NAMES, getActor } from "@/lib/session";
+import { countContractOps, disputeIdsOf } from "./paypal-ops";
 
 export const dynamic = "force-dynamic";
 
@@ -50,7 +51,8 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
     event: r.event,
     detail: redactDetail(r.event, r.detail ?? null, canSeeDraft),
   }));
-  const paypal = log.filter((r) => r.event.startsWith("paypal.")).length;
+  // One paypal_ops row per PayPal-Request-Id: the calls themselves, not the paypal.* webhook rows in the log.
+  const paypal = await countContractOps(db, { milestoneIds: ms.map((m) => m.id), disputeIds: disputeIdsOf(log) });
   const decisions = log.filter((r) => r.event === "policy.decided" || r.event.startsWith("client.")).length;
 
   return (

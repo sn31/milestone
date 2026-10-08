@@ -6,6 +6,7 @@ import { ACTOR_NAMES, getActor } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
 import { MilestoneActions } from "@/components/milestone-actions";
 import { LiveRefresh } from "@/components/live-refresh";
+import { awaitingVerdict } from "@/components/live-rules";
 import { LIVE_STATUSES, loadSnapshot, pendingOpMilestones } from "@/app/api/milestones/[id]/status/snapshot";
 import {
   Button,
@@ -78,15 +79,17 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
     const failed = d.failed && typeof d.failed === "object" ? Object.values(d.failed as Record<string, unknown>).filter((v): v is string => typeof v === "string") : [];
     operatorOf.set(f.milestoneId, { reason: typeof d.reason === "string" && d.reason ? d.reason : "A payment for this milestone went wrong", failure: failed.length ? failed.join("; ") : null });
   }
+  const latest = new Map<string, (typeof dels)[number]>();
+  for (const d of dels) if (!latest.has(d.milestoneId)) latest.set(d.milestoneId, d);
   // Milestones that move without anyone on this page acting (the agent, the review window, the client elsewhere, a
-  // PayPal webhook): the page polls them and re-renders when one changes.
-  const liveIds = ms.filter((m) => LIVE_STATUSES.has(m.status) || inFlight.has(m.id)).map((m) => m.id);
+  // PayPal webhook, a delivery the worker has not picked up yet): the page polls them and re-renders when one changes.
+  // A delivery awaiting its verdict counts whatever the status: right after Deliver the milestone is still funded (or
+  // held) until the worker moves it to verifying.
+  const liveIds = ms.filter((m) => LIVE_STATUSES.has(m.status) || inFlight.has(m.id) || awaitingVerdict(latest.get(m.id))).map((m) => m.id);
   const live = new Map((await Promise.all(liveIds.map((mid) => loadSnapshot(db, mid)))).flatMap((s) => (s ? [[s.id, s] as const] : [])));
 
   const name = (uid: string) => people.find((p) => p.id === uid)?.name ?? ACTOR_NAMES[uid] ?? uid;
   const names = { client: name(contract.clientId), freelancer: name(contract.freelancerId) };
-  const latest = new Map<string, (typeof dels)[number]>();
-  for (const d of dels) if (!latest.has(d.milestoneId)) latest.set(d.milestoneId, d);
   const milestoneLabel = new Map(ms.map((m) => [m.id, `${String(m.seq).padStart(2, "0")} ${m.title}`]));
 
   const paidOf = (m: (typeof ms)[number]) => (m.status === "partial_released" ? (m.decision?.amountMinor ?? 0) : m.amountMinor);

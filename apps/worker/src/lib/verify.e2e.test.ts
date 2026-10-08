@@ -79,6 +79,8 @@ describe.skipIf(!run)("verify job end to end", async () => {
     process.env.UPLOAD_DIR = uploads;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.GITHUB_TOKEN;
+    // The model is off: the anthropic provider without a key is "not configured" (a reachable Ollama would judge).
+    process.env.MODEL_PROVIDER = "anthropic";
     process.env.REVIEW_WINDOW_SECONDS = "60";
     repo = await mkdtemp(join(tmpdir(), "milestone-e2e-repo-"));
     await writeFile(join(repo, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0", scripts: { test: "node -e \"process.exit(0)\"", fail: "node -e \"process.exit(1)\"" } }));
@@ -153,9 +155,14 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.status).toBe("review");
     expect(s.m.decision).toMatchObject({ action: "release", deliveryId: t.deliveryId });
     expect(s.m.reviewEndsAt).not.toBeNull();
-    const tamper = (s.d.evidence as Array<{ id: string; status?: string; summary: string }>).find((e) => e.id === "evd_tamper_check");
+    const evidence = s.d.evidence as Array<{ id: string; status?: string; summary: string }>;
+    const tamper = evidence.find((e) => e.id === "evd_tamper_check");
     expect(tamper?.status).toBe("pass");
     expect(tamper?.summary).toMatch(/no baseline recorded/);
+    // F5: context evidence the judge can cite; F11: no worker temp paths in anything the parties see.
+    expect(evidence.filter((e) => ["evd_diff", "evd_tree", "evd_commit"].includes(e.id)).map((e) => e.id)).toEqual(["evd_diff", "evd_tree", "evd_commit"]);
+    expect(evidence.find((e) => e.id === "evd_tree")?.summary).toMatch(/README\.md/);
+    expect(JSON.stringify([s.d.evidence, s.d.verdict])).not.toMatch(/milestone-verify-|\/var\/folders\//);
     const rel = enqueued.filter((e) => e.milestoneId === t.milestoneId);
     expect(rel).toHaveLength(1);
     expect(rel[0]).toMatchObject({ name: "release", data: { deliveryId: t.deliveryId }, opts: { dedupe: t.deliveryId } });
@@ -303,6 +310,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
     const evidence = s.d.evidence as Array<{ id: string; criterion_id?: string; status?: string; summary: string }>;
     expect(evidence.find((e) => e.id === "evd_tamper_check")).toBeUndefined();
     expect(evidence.filter((e) => e.id.startsWith("evd_file_")).map((e) => e.id)).toEqual(["evd_file_1", "evd_file_2"]);
+    expect(JSON.stringify([s.d.evidence, s.d.verdict])).not.toContain(uploads);
     expect((s.d.verdict as { criteria: Array<{ status: string }> }).criteria.map((c) => c.status)).toEqual(["pass", "pass"]);
     expect(s.d.result).toBe("pass");
     expect(s.m.status).toBe("review");

@@ -3,10 +3,10 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import { audit, deliveries, enqueue, milestones, transition, UploadPayload, VerdictOutput, VerdictResult, type CriterionSpec, type Db, type EvidenceSummary, type MilestoneStatus, type PolicyDecision } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader } from "@milestone/verify";
+import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
-import { createEvidenceReader, createUploadEvidenceReader, git, safePath } from "../lib/evidence.ts";
+import { createEvidenceReader, createUploadEvidenceReader, git, safePath, scrubVerdictPaths } from "../lib/evidence.ts";
 import { isFlaggedForOperator } from "./release.ts";
 
 /** The decision stored on the milestone names the delivery it was made for; the release job checks it. */
@@ -93,7 +93,7 @@ export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pic
 /** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
 async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
   try {
-    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, ...tamperBaseline(baselineSha, payload) });
+    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, pullRequest: { title: payload.title, body: payload.body }, ...tamperBaseline(baselineSha, payload) });
   } catch (e) {
     const msg = (e as Error).message;
     if (!msg.startsWith("setup failed")) throw e; // clone/fetch problems are retried by pg-boss
@@ -105,13 +105,15 @@ async function deterministic(payload: DeliveryPayload, criteria: CriterionSpec[]
 }
 
 type Injection = { suspected: boolean; hits: Array<{ source: string; match: string }> };
+type Milestone = NonNullable<JudgeInput["milestone"]>;
 
 /** Judge with the model when one is configured; otherwise deterministic evidence only and everything else unclear. */
-async function conclude(deliveryId: string, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
+async function conclude(deliveryId: string, milestone: Milestone, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
   if (await isModelConfigured()) {
-    const r = await judge({ deliveryId, criteria, evidence, deliveryTexts, reader: reader() });
+    const r = await judge({ deliveryId, milestone, criteria, evidence, deliveryTexts, reader: reader() });
     if (extra.suspected) r.verdict.suspected_injection = true;
-    return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits] };
+    const judged = { toolCalls: r.toolCalls.map((c) => `${c.tool}${c.ok ? "" : " (failed)"}`), attachedEvidence: r.attachedEvidence };
+    return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits], judged };
   }
   const injection = detectInjection(deliveryTexts);
   const verdict = enforce({ delivery_id: deliveryId, criteria: [], suspected_injection: injection.suspected || extra.suspected }, { deliveryId, criteria, evidence });
@@ -120,10 +122,10 @@ async function conclude(deliveryId: string, criteria: CriterionSpec[], evidence:
     const ev = byCriterion.get(c.criterion_id);
     c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : "not judged: no model configured";
   }
-  return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits] };
+  return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
 }
 
-async function produceVerdict(deliveryId: string, payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null) {
+async function produceVerdict(deliveryId: string, milestone: Milestone, payload: DeliveryPayload, criteria: CriterionSpec[], baselineSha: string | null) {
   const stage = await deterministic(payload, criteria, baselineSha);
   try {
     const commitMessage = stage.workdir ? await git(stage.workdir, ["log", "-1", "--format=%B", payload.sha]).catch(() => "") : "";
@@ -132,9 +134,11 @@ async function produceVerdict(deliveryId: string, payload: DeliveryPayload, crit
       { source: "pr_body", text: payload.body },
       { source: "commit_message", text: commitMessage },
     ].filter((t) => t.text.trim() !== "");
-    return await conclude(deliveryId, criteria, stage.evidence, deliveryTexts, () =>
+    const v = await conclude(deliveryId, milestone, criteria, stage.evidence, deliveryTexts, () =>
       createEvidenceReader({ workdir: stage.workdir, sha: payload.sha, baseline: stage.baseline, repoUrl: payload.clone_url, evidence: stage.evidence }),
     );
+    // The stage already strips its workdir from summaries; the model's rationales may still quote a tool error.
+    return stage.workdir ? scrubVerdictPaths(v, [stage.workdir]) : v;
   } finally {
     if (stage.workdir) await rm(stage.workdir, { recursive: true, force: true });
   }
@@ -147,7 +151,7 @@ const EXCERPT = 4_000;
  * File delivery: the upload stage (format, size, dimensions, pages, words, required strings), then the judge with
  * view_file. No repository, so no tamper check: nothing in an upload controls what the checks run.
  */
-async function produceUploadVerdict(deliveryId: string, payload: UploadPayload, criteria: CriterionSpec[]) {
+async function produceUploadVerdict(deliveryId: string, milestone: Milestone, payload: UploadPayload, criteria: CriterionSpec[]) {
   const root = uploadRoot();
   const files = await Promise.all(payload.files.map(async (f) => ({ ...f, absPath: await safePath(root, f.path) })));
   const stage = await runUploadStage({ files, criteria });
@@ -157,7 +161,8 @@ async function produceUploadVerdict(deliveryId: string, payload: UploadPayload, 
     { source: "file_names", text: payload.files.map((f) => f.name).join("\n") },
     ...texts.map((t) => ({ source: t.source, text: t.text.length > EXCERPT ? `${t.text.slice(0, EXCERPT)}\n[excerpt; use view_file for the rest]` : t.text })),
   ];
-  return conclude(deliveryId, criteria, stage.evidence, deliveryTexts, () => createUploadEvidenceReader({ root, files: payload.files, evidence: stage.evidence }), full);
+  const v = await conclude(deliveryId, milestone, criteria, stage.evidence, deliveryTexts, () => createUploadEvidenceReader({ root, files: payload.files, evidence: stage.evidence }), full);
+  return scrubVerdictPaths(v, [root]);
 }
 
 async function loadAll(db: Db, deliveryId: string) {
@@ -188,14 +193,15 @@ export async function verify(job: Job<JobData>): Promise<void> {
       console.warn(`[verify] ${deliveryId}: milestone ${milestone.id} is ${blocked}, nothing to verify`);
       return;
     }
-    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, source.payload, criteria) : await produceVerdict(deliveryId, source.payload, criteria, milestone.baselineSha);
+    const context: Milestone = { title: milestone.title, scope: contract.scopeText };
+    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, context, source.payload, criteria) : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha);
     const stored = await db
       .update(deliveries)
       .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })
       .where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)))
       .returning({ id: deliveries.id });
     if (stored.length) {
-      await audit(db, { actor: "verifier", event: "verdict.stored", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, result: v.result, model: v.model, promptHash: v.promptHash, suspectedInjection: v.verdict.suspected_injection, injectionHits: v.injectionHits } });
+      await audit(db, { actor: "verifier", event: "verdict.stored", milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, result: v.result, model: v.model, promptHash: v.promptHash, suspectedInjection: v.verdict.suspected_injection, injectionHits: v.injectionHits, ...(v.judged ?? {}) } });
     }
     ({ delivery, milestone, contract, criteria } = await loadAll(db, deliveryId));
   }

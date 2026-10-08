@@ -5,6 +5,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { MilestoneSnapshot } from "@/app/api/milestones/[id]/status/snapshot";
 import { signature, verifierLines } from "@/app/api/milestones/[id]/status/lines";
 import { LogStream, type LogLine } from "@/components/ui";
+import { isLiveSnapshot } from "@/components/live-rules";
 
 // One poller per page (LiveRefresh) publishes each milestone's latest snapshot here; the verifier log reads it, so a
 // verifying milestone is polled once, not once per component.
@@ -29,7 +30,8 @@ const IDLE_EVERY_MS = 10_000;
 
 /**
  * Keeps the contract page current while something on it moves by itself (the agent verifying, a review window running
- * out, the client deciding elsewhere, a payout waiting for PayPal's webhook): polls each live milestone's status every
+ * out, the client deciding elsewhere, a payout waiting for PayPal's webhook, a delivery the worker has not picked up
+ * yet): polls each live milestone's status every
  * `everyMs` and re-renders the server page when anything differs from what it rendered. It stops once nothing is live,
  * pauses while the tab is hidden, and slows to every 10 s after ten quiet minutes.
  */
@@ -81,7 +83,9 @@ export function LiveRefresh({ initial, everyMs = 2000 }: { initial: MilestoneSna
           base.set(s.id, sig);
           changed = true;
         }
-        if (s.live) live = true;
+        // A delivery still waiting for its verdict counts even while the milestone is funded or held: the worker moves
+        // it to verifying a moment later and the page must see that without a reload.
+        if (isLiveSnapshot(s)) live = true;
       }
       if (changed) {
         lastChange = Date.now();

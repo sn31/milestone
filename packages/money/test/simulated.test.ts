@@ -236,13 +236,15 @@ describe("simulated refunds", () => {
 describe("simulated invoicing and webhooks", () => {
   it("creates, sends and pays a receipt invoice; a retry with the same request id is a no-op", async () => {
     const c = client();
-    const input = { requestId: "rid-inv", invoiceNumber: "MS-123", freelancerEmail: "f@example.com", clientEmail: "c@example.com", currency: "USD", amountMinor: 30_000, description: "work" };
+    const input = { requestId: "rid-inv", invoiceNumber: "MS-123", freelancerName: "Frankie Freelancer", milestoneLabel: "Milestone 1 · Signup form", payoutBatchId: "B1", clientEmail: "c@example.com", currency: "USD", amountMinor: 30_000, description: "work" };
     const { invoiceId } = await issuePaidReceipt(c, input);
     expect(invoiceId).toMatch(/^SIM-INV2-/);
-    expect(await issuePaidReceipt(c, input)).toEqual({ invoiceId });
+    expect((await issuePaidReceipt(c, input)).invoiceId).toBe(invoiceId);
     const inv = await c.request<{ status: string }>("GET", `/v2/invoicing/invoices/${invoiceId}`);
     expect(inv.status).toBe("PAID");
     await expect(issuePaidReceipt(c, { ...input, requestId: "rid-inv-2" })).rejects.toMatchObject({ status: 422 });
+    // PayPal answers 422 USER_NOT_FOUND when the invoicer is not the calling account.
+    await expect(issuePaidReceipt(c, { ...input, requestId: "rid-inv-3", invoiceNumber: "MS-456", platformEmail: "frankie@example.com" })).rejects.toMatchObject({ status: 422 });
   });
 
   it("verify-webhook-signature says SUCCESS; the route trusts only the simulated header", async () => {

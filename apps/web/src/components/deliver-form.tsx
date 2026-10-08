@@ -7,19 +7,44 @@ import { Button, Field, inputClass, cx } from "@/components/ui";
 const MAX_FILES = 10;
 const MAX_MB = 20;
 
+/** A delivery that is in and waiting for the verifier to pick it up. */
+export interface PendingDelivery {
+  deliveryId: string;
+  /** The repository ref for a commit delivery; null for files. */
+  ref: string | null;
+}
+
 /**
  * The freelancer's delivery: upload files (design files, PDFs, images, documents) and/or point at a commit in a
- * repository. Both start verification; the page refreshes to show the verifying state.
+ * repository. Both start verification. Once a delivery is in, the form gives way to a "waiting for the verifier" note
+ * straight away (from the response here, or `pending` from the server after a reload) while the page polls the
+ * milestone and moves to the verifying state when the worker picks it up.
  */
-export function DeliverForm(props: { milestoneId: string; files: boolean; repo: boolean; defaultRepoUrl?: string | null; accept?: string | null; resubmit?: boolean }) {
+export function DeliverForm(props: {
+  milestoneId: string;
+  files: boolean;
+  repo: boolean;
+  defaultRepoUrl?: string | null;
+  accept?: string | null;
+  resubmit?: boolean;
+  /** The latest delivery when it has no verdict yet. */
+  pending?: PendingDelivery | null;
+}) {
   const router = useRouter();
   const uid = useId();
   const [busy, setBusy] = useState<"files" | "repo" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  // What this form just delivered; shown until the page moves on (verifying) or the freelancer asks to deliver again.
+  const [sent, setSent] = useState<{ deliveryId: string; text: string } | null>(null);
+  // The freelancer chose to deliver something else while the last delivery was still waiting.
+  const [again, setAgain] = useState<string | null>(null);
   const [repoUrl, setRepoUrl] = useState(props.defaultRepoUrl ?? "");
   const [ref, setRef] = useState("main");
   const [picked, setPicked] = useState<File[]>([]);
+
+  const waitingId = sent?.deliveryId ?? props.pending?.deliveryId ?? null;
+  const waiting = waitingId !== null && waitingId !== again;
 
   async function send(kind: "files" | "repo", req: () => Promise<Response>) {
     setBusy(kind);
@@ -27,20 +52,59 @@ export function DeliverForm(props: { milestoneId: string; files: boolean; repo: 
     setDone(null);
     try {
       const res = await req();
-      const body = (await res.json().catch(() => null)) as { error?: string; deliveryId?: string; sha?: string } | null;
+      const body = (await res.json().catch(() => null)) as { error?: string; deliveryId?: string; sha?: string; duplicate?: boolean; files?: unknown[] } | null;
       if (!res.ok) {
         setError(body?.error ?? `request failed (${res.status})`);
         if (res.status === 409) router.refresh();
         return;
       }
-      setDone(kind === "repo" && body?.sha ? `Delivered commit ${body.sha.slice(0, 12)}; verification queued.` : "Files delivered; verification queued.");
       setPicked([]);
+      if (body?.duplicate) {
+        // The same commit was delivered before: no new delivery, and verification already ran (or is running) on it.
+        setDone(`Commit ${body.sha?.slice(0, 12) ?? ""} was already delivered; nothing new to verify.`);
+      } else if (body?.deliveryId) {
+        const n = Array.isArray(body.files) ? body.files.length : 0;
+        setSent({
+          deliveryId: body.deliveryId,
+          text: kind === "repo" && body.sha ? `Delivered commit ${body.sha.slice(0, 12)}.` : `Delivered ${n > 0 ? `${n} file${n === 1 ? "" : "s"}` : "the files"}.`,
+        });
+        setAgain(null);
+      } else {
+        setDone("Delivered; verification queued.");
+      }
+      // The re-render finds the delivery without a verdict and starts polling the milestone (see LiveRefresh).
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
       setBusy(null);
     }
+  }
+
+  if (waiting) {
+    const what = sent?.deliveryId === waitingId ? sent.text : props.pending?.ref ? `Delivered ${props.pending.ref}.` : "Delivered.";
+    return (
+      <section data-tone="verifying" aria-label="Delivered, waiting for the verifier" className="overflow-hidden rounded-panel border border-dashed border-tone">
+        <div className="grid gap-3 px-4 py-4 sm:px-5">
+          <p role="status" className="flex items-baseline gap-2.5 text-[13.5px] leading-relaxed text-fg">
+            <span aria-hidden className="size-1.5 shrink-0 translate-y-[-1px] animate-pulse-dot rounded-full bg-tone" />
+            <span className="min-w-0">
+              {what} Waiting for the verifier to pick it up; this page moves to verifying on its own.
+            </span>
+          </p>
+          <p className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-4 font-mono text-[11px] text-fg-faint tabular">
+            <span>delivery {waitingId}</span>
+            <button
+              type="button"
+              onClick={() => setAgain(waitingId)}
+              className="cursor-pointer rounded-control tracking-[0.08em] text-fg-muted uppercase underline decoration-hairline-strong underline-offset-4 transition-colors duration-200 hover:text-fg hover:decoration-fg"
+            >
+              Deliver something else
+            </button>
+          </p>
+        </div>
+      </section>
+    );
   }
 
   function uploadFiles(e: React.FormEvent) {

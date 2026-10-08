@@ -89,7 +89,20 @@ function getInstance(env: PayPalEnv): Promise<PayPalSdkInstance> {
 function message(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
+  if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") return (e as { message: string }).message;
   return "Something went wrong with PayPal";
+}
+
+/** What the page says when PayPal refuses to open because the tab was not in front. */
+export const BACKGROUND_TAB_NOTICE = "Bring this tab to the front and click Fund again.";
+
+/**
+ * The SDK refuses to show its payment sheet from a background tab or a preview page ("Cannot show PaymentRequest UI in
+ * a preview page or a background tab."). Nothing went wrong with the payment; the click just has to come from the
+ * front tab.
+ */
+export function isBackgroundTabError(e: unknown): boolean {
+  return /background tab|preview page|PaymentRequest UI/i.test(message(e));
 }
 
 type Phase = "loading" | "ready" | "ineligible" | "unavailable" | "paying" | "capturing" | "pending";
@@ -116,6 +129,10 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
   const router = useRouter();
   const [rawPhase, setPhase] = useState<Phase>("loading");
   const [error, setError] = useState<string | null>(null);
+  // A friendly note (not an error) when PayPal refused to open from a background tab.
+  const [notice, setNotice] = useState<string | null>(null);
+  // Set while a refused start waits for the tab to come to the front, to try once more then.
+  const retryOnVisible = useRef<(() => void) | null>(null);
   const sdk = useRef<PayPalSdkInstance | null>(null);
   // From the prop when milestone-actions passes it; otherwise asked from the server once.
   const propMode: PayPalMode | undefined = props.mode === undefined || props.mode === "" ? undefined : props.mode === "simulated" ? "simulated" : "sandbox";
@@ -179,6 +196,20 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
     };
   }, [mode, paypalEnv, currency]);
 
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const retry = retryOnVisible.current;
+      retryOnVisible.current = null;
+      retry?.();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      retryOnVisible.current = null;
+    };
+  }, []);
+
   async function createOrder(): Promise<{ orderId: string }> {
     const res = await fetch(`/api/milestones/${milestoneId}/order`, { method: "POST" });
     if (!res.ok) throw new Error(await errorText(res));
@@ -213,14 +244,37 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
   }
 
   function onClick() {
+    retryOnVisible.current = null;
+    setNotice(null);
     if (mode === "simulated") {
       void onSimulatedClick();
       return;
     }
+    startSession(false);
+  }
+
+  /**
+   * Opens PayPal's checkout. `retry` is the one automatic attempt made when the tab comes back to the front after the
+   * SDK refused to open from the background; if that attempt fails too, the notice stays and the next click tries again.
+   * The order route is idempotent per milestone, so a retry gets the same order back.
+   */
+  function startSession(retry: boolean) {
     const inst = sdk.current;
     if (!inst) return;
     setError(null);
     setPhase("paying");
+    const fail = (e: unknown) => {
+      setPhase("ready");
+      if (isBackgroundTabError(e)) {
+        setError(null);
+        setNotice(BACKGROUND_TAB_NOTICE);
+        if (!retry && document.visibilityState !== "visible") retryOnVisible.current = () => startSession(true);
+        return;
+      }
+      if (retry) return; // keep the notice: the automatic attempt had no click behind it, the next click will
+      setNotice(null);
+      setError(message(e));
+    };
     const session = inst.createPayPalOneTimePaymentSession({
       onApprove: async (data) => {
         setPhase("capturing");
@@ -233,17 +287,18 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
           setPhase("ready");
         }
       },
-      onCancel: () => setPhase("ready"),
-      onError: (e) => {
-        setError(message(e));
+      onCancel: () => {
+        setNotice(null);
         setPhase("ready");
       },
+      onError: fail,
     });
     // start() must run synchronously inside the click so the popup is not blocked; the order is created in parallel.
-    session.start({ presentationMode: "auto" }, createOrder()).catch((e: unknown) => {
-      setError(message(e));
-      setPhase("ready");
-    });
+    try {
+      session.start({ presentationMode: "auto" }, createOrder()).catch(fail);
+    } catch (e) {
+      fail(e);
+    }
   }
 
   const simulated = mode === "simulated";
@@ -283,6 +338,11 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
           <p role="status" className="mt-2 flex items-center gap-2 text-[13px] text-tone">
             <span aria-hidden className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
             PayPal is still processing this payment. The milestone shows as funded once it completes.
+          </p>
+        ) : null}
+        {notice && !error ? (
+          <p role="status" className="mt-2 text-[13px] text-fg">
+            {notice}
           </p>
         ) : null}
         {error ? (

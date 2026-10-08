@@ -688,6 +688,11 @@ function failureMessage(reason: string): string {
 function createInvoice(req: SimRequest): SimResult {
   const body = obj(req.body);
   const detail = obj(body.detail);
+  const invoicer = str(obj(body.invoicer).email_address);
+  const platform = process.env.PAYPAL_PLATFORM_EMAIL || "platform@milestone.sim";
+  if (invoicer && invoicer.toLowerCase() !== platform.toLowerCase()) {
+    return err(422, "UNPROCESSABLE_ENTITY", "User is not associated with paypal based on invoicer email", "USER_NOT_FOUND");
+  }
   const number = str(detail.invoice_number) ?? `SIM-${code(8)}`;
   if (get("index", `invoice-number:${number}`)) return err(422, "UNPROCESSABLE_ENTITY", "Invoice number is already used.", "DUPLICATE_INVOICE_NUMBER");
   const inv: InvoiceRec = { kind: "invoice", id: ids.invoice(), number, status: "DRAFT", body, payments: [] };

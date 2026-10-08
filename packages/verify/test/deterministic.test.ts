@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
-import { findTampering, manifestChanges, parseNameStatus, removeCommittedDependencies, runDeterministicStage, TAMPER_EVIDENCE_ID, type DeterministicInput } from "../src/deterministic.ts";
+import { COMMIT_EVIDENCE_ID, commitSummary, DIFF_EVIDENCE_ID, DIFF_EXCERPT_CHARS, diffSummary, findTampering, manifestChanges, parseNameStatus, parseNumstat, removeCommittedDependencies, runDeterministicStage, stripWorkdir, TAMPER_EVIDENCE_ID, TREE_EVIDENCE_ID, TREE_MAX_ENTRIES, treeSummary, type DeterministicInput } from "../src/deterministic.ts";
 import { enforce, overall } from "../src/verifier.ts";
 
 const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}) => JSON.stringify({ name: "x", version: "1.0.0", ...extra, scripts }, null, 2);
@@ -234,6 +234,81 @@ describe("demo repo branches under the tamper check", () => {
       const r = await stage(sha);
       expect(r.tests).toBe("fail");
       expect(r.tampering).toEqual(["test/pricing.test.js modified (existing test)"]);
+    }
+  });
+});
+
+describe("context evidence for judgment criteria", () => {
+  it("diffSummary lists files with +/- counts, totals and the first 2000 characters of the patch", () => {
+    const files = parseNumstat("12\t0\tsrc/password.js\0" + "30\t2\ttest/password.test.js\0" + "-\t-\tlogo.png\0");
+    expect(files).toEqual([{ path: "src/password.js", added: 12, deleted: 0 }, { path: "test/password.test.js", added: 30, deleted: 2 }, { path: "logo.png", added: null, deleted: null }]);
+    const patch = "x".repeat(DIFF_EXCERPT_CHARS + 500);
+    const s = diffSummary("the funding baseline abc", files, patch);
+    expect(s).toMatch(/^3 file\(s\) changed against the funding baseline abc, \+42 -2:\n  \+12 -0 src\/password\.js\n  \+30 -2 test\/password\.test\.js\n  binary logo\.png/);
+    expect(s).toContain(`diff truncated at ${DIFF_EXCERPT_CHARS} of ${patch.length} characters`);
+    expect(s.split("x".repeat(10)).length).toBeLessThan(DIFF_EXCERPT_CHARS / 10 + 3);
+  });
+  it("treeSummary caps the file list at 200 entries", () => {
+    const paths = Array.from({ length: 250 }, (_, i) => `src/f${i}.js`);
+    const s = treeSummary(paths);
+    expect(s.split("\n")).toHaveLength(1 + TREE_MAX_ENTRIES + 1);
+    expect(s).toMatch(/\.\.\. and 50 more/);
+  });
+  it("commitSummary carries the commit message and PR text, or nothing", () => {
+    expect(commitSummary("feat: x\n", { title: "Add x", body: "Adds x." })).toBe("commit message:\nfeat: x\n\ndelivery title: Add x\n\ndelivery description:\nAdds x.");
+    expect(commitSummary("  ", {})).toBeNull();
+  });
+  it("stripWorkdir removes the workdir and its realpath, longest first", () => {
+    const roots = ["/var/folders/ab/T/milestone-verify-1", "/private/var/folders/ab/T/milestone-verify-1"];
+    expect(stripWorkdir("at /private/var/folders/ab/T/milestone-verify-1/test/a.test.js:3 in /var/folders/ab/T/milestone-verify-1", roots)).toBe("at test/a.test.js:3 in .");
+  });
+});
+
+describe("demo repo m1-pass: citable evidence and no worker paths", () => {
+  let demo: string;
+  const criteria: CriterionSpec[] = [
+    { id: "tests", kind: "test", description: "tests pass", spec: { command: "npm test" }, required: true },
+    { id: "judge", kind: "judgment", description: "The delivery matches the milestone description", spec: {}, required: false },
+  ];
+  beforeAll(async () => {
+    demo = await mkdtemp(join(tmpdir(), "milestone-demo-ctx-"));
+    execFileSync("bash", [new URL("../../../scripts/make-demo-repo.sh", import.meta.url).pathname, demo], { stdio: "ignore" });
+  });
+  afterAll(async () => { if (demo) await rm(demo, { recursive: true, force: true }); });
+
+  it("records evd_diff, evd_tree and evd_commit; no summary or log mentions the workdir", { timeout: 60_000 }, async () => {
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: demo }).toString().trim();
+    const out = await runDeterministicStage({ repoUrl: `file://${demo}`, sha: g("rev-parse", "m1-pass"), criteria, baselineSha: g("rev-parse", "main"), baselineSource: "funding", pullRequest: { title: "Password strength", body: "Adds the check." } });
+    try {
+      const byId = new Map(out.evidence.map((e) => [e.id, e]));
+      expect(byId.get(DIFF_EVIDENCE_ID)).toMatchObject({ kind: "diff" });
+      expect(byId.get(DIFF_EVIDENCE_ID)!.status).toBeUndefined();
+      expect(byId.get(DIFF_EVIDENCE_ID)!.summary).toMatch(/2 file\(s\) changed against the funding baseline [0-9a-f]{12}, \+\d+ -0:\n  \+\d+ -0 src\/password\.js\n  \+\d+ -0 test\/password\.test\.js/);
+      expect(byId.get(DIFF_EVIDENCE_ID)!.summary).toContain("checkPasswordStrength");
+      expect(byId.get(TREE_EVIDENCE_ID)).toMatchObject({ kind: "file" });
+      expect(byId.get(TREE_EVIDENCE_ID)!.summary).toMatch(/src\/password\.js/);
+      expect(byId.get(COMMIT_EVIDENCE_ID)).toMatchObject({ kind: "note", summary: "commit message:\nfeat: password strength check\n\ndelivery title: Password strength\n\ndelivery description:\nAdds the check." });
+      const real = execFileSync("realpath", [out.workdir]).toString().trim();
+      const everything = [...out.evidence.map((e) => e.summary), ...Object.values(out.logs)].join("\n");
+      expect(everything).not.toContain(out.workdir);
+      expect(everything).not.toContain(real);
+      expect(everything).not.toMatch(/milestone-verify-/);
+    } finally {
+      await rm(out.workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("a failing test's output, which names the checkout path, is stripped", { timeout: 60_000 }, async () => {
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: demo }).toString().trim();
+    const out = await runDeterministicStage({ repoUrl: `file://${demo}`, sha: g("rev-parse", "m2-partial"), criteria, baselineSha: g("rev-parse", "main") });
+    try {
+      const tests = out.evidence.find((e) => e.criterion_id === "tests")!;
+      expect(tests.status).toBe("fail");
+      expect(tests.summary).not.toMatch(/milestone-verify-/);
+      expect(out.logs.tests).not.toMatch(/milestone-verify-/);
+      expect(out.logs.tests).toMatch(/test\/pricing\.test\.js/);
+    } finally {
+      await rm(out.workdir, { recursive: true, force: true });
     }
   });
 });

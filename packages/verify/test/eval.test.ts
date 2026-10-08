@@ -32,9 +32,9 @@ function run(c: EvalCase) {
 }
 
 describe("verifier eval set", () => {
-  it("has 20 uniquely identified cases", () => {
-    expect(cases).toHaveLength(20);
-    expect(new Set(cases.map((c) => c.id)).size).toBe(20);
+  it("has at least 20 uniquely identified cases", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(20);
+    expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length);
   });
 
   it.each(cases.map((c) => [c.id, c] as const))("%s", (_id, c) => {

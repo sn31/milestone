@@ -765,19 +765,23 @@ async function issueReceipt(db: Db, m: MilestoneRow, contract: ContractRow, amou
     return;
   }
 
+  const payoutOp = await db.query.paypalOps.findFirst({ where: (o, { and, eq }) => and(eq(o.kind, "payout"), eq(o.key, m.id)) });
   const requestId = await requestIdFor(db, "invoice", m.id);
   try {
-    const { invoiceId } = await issuePaidReceipt(paypal(), {
+    const { invoiceId, invoiceUrl } = await issuePaidReceipt(paypal(), {
       requestId,
       invoiceNumber: receiptInvoiceNumber(m.id),
-      freelancerEmail: freelancer.paypalEmail ?? freelancer.email,
+      freelancerName: freelancer.name ?? freelancer.email,
+      ...(process.env.PAYPAL_PLATFORM_EMAIL ? { platformEmail: process.env.PAYPAL_PLATFORM_EMAIL } : {}),
+      ...(payoutOp?.paypalId ? { payoutBatchId: payoutOp.paypalId } : {}),
+      milestoneLabel: `Milestone ${m.seq} · ${m.title}`,
       clientEmail: client.email,
       currency: contract.currency,
       amountMinor,
       description: `${contract.title}: ${m.title}`,
     });
-    await recordOpResult(db, requestId, { status: "succeeded", paypalId: invoiceId });
-    await audit(db, { ...base, actor: "paypal", event: "paypal.receipt", detail: { invoiceId } });
+    await recordOpResult(db, requestId, { status: "succeeded", paypalId: invoiceId, response: { invoiceId, invoiceUrl: invoiceUrl ?? null } });
+    await audit(db, { ...base, actor: "paypal", event: "paypal.receipt", detail: { invoiceId, invoiceUrl: invoiceUrl ?? null } });
   } catch (err) {
     // The money has moved and the state is final; a missing receipt is logged, not retried forever.
     const error = err instanceof Error ? err.message : String(err);

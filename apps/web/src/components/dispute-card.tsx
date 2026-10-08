@@ -4,12 +4,14 @@ import type { EvidencePack } from "@milestone/verify";
 import { DisputeResponse } from "@/app/disputes/_components/dispute-response";
 import { isOpen, reasonLabel, type Attachment, type DisputeView } from "@/app/disputes/_lib";
 import { auditTime, eventGlyph, eventTone } from "@/lib/events";
+import { getDb } from "@/lib/db";
 import { formatDate, formatMoney } from "@/lib/format";
 import { EvidenceChip, Eyebrow, Hash, Money, Panel, Receipt, ReceiptRow, Stamp, StateGlyph, StatePill, type ToneKey } from "@/components/ui";
 
 export interface DisputeCardProps {
   dispute: DisputeView;
-  milestone: { id: string; seq: number; title: string; amountMinor: number };
+  /** `status` is looked up when left out: accepting the claim depends on it. */
+  milestone: { id: string; seq: number; title: string; amountMinor: number; status?: string };
   contract: { id: string; title: string; currency: string; clientId: string; freelancerId: string };
   /** The viewer is the contract's freelancer (the only party who responds to PayPal). */
   isFreelancer: boolean;
@@ -239,8 +241,16 @@ function Outcome({ dispute, amountLabel }: { dispute: DisputeView; amountLabel: 
   );
 }
 
+/**
+ * The accept route only takes a claim once the milestone's money has left escrow (released or partial_released);
+ * before that it answers 409 milestone_not_final and an operator settles the refund.
+ */
+export function canAcceptClaim(status: string | null | undefined): boolean {
+  return status === "released" || status === "partial_released";
+}
+
 /** One dispute: who disputed what, the evidence pack, and the response (editable for the freelancer while open). */
-export function DisputeCard({ dispute, milestone, contract, isFreelancer, attachments, names }: DisputeCardProps) {
+export async function DisputeCard({ dispute, milestone, contract, isFreelancer, attachments, names }: DisputeCardProps) {
   const meta = STATUS[dispute.status];
   const currency = dispute.currency ?? contract.currency;
   const amountMinor = dispute.amountMinor ?? milestone.amountMinor;
@@ -258,8 +268,21 @@ export function DisputeCard({ dispute, milestone, contract, isFreelancer, attach
       </p>
     );
   } else if (dispute.status === "awaiting_response" && draft) {
+    const status =
+      milestone.status ??
+      (isFreelancer ? (await getDb().query.milestones.findFirst({ columns: { status: true }, where: (t, { eq }) => eq(t.id, milestone.id) }))?.status : undefined);
+    const acceptable = canAcceptClaim(status);
     response = isFreelancer ? (
-      <DisputeResponse disputeId={dispute.disputeId} draft={draft.text} source={draft.source} model={draft.model} citations={draft.citations.length} amountLabel={amountLabel} attachments={attachments} />
+      // DESIGN: DisputeResponse always draws "Accept claim"; until the milestone is paid out the route refuses it, so the
+      // button's column is hidden here (it is the only control there with aria-expanded) and a one-line note says why.
+      <div className={acceptable ? undefined : "grid gap-3 [&_div:has(>button[aria-expanded])]:hidden"}>
+        <DisputeResponse disputeId={dispute.disputeId} draft={draft.text} source={draft.source} model={draft.model} citations={draft.citations.length} amountLabel={amountLabel} attachments={attachments} />
+        {acceptable ? null : (
+          <p className="text-[12.5px] leading-relaxed text-fg-muted">
+            Accepting the claim opens once this milestone is paid out; while the money is in escrow an operator settles any refund.
+          </p>
+        )}
+      </div>
     ) : (
       <div className="grid gap-3">
         <p data-tone="held" className="flex items-baseline gap-2.5 text-[13.5px] leading-relaxed text-fg-muted">

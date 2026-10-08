@@ -55,7 +55,7 @@ await db.insert(contracts).values(contract).onConflictDoUpdate({ target: contrac
 const titles = ["Signup form and validation", "Account creation API and confirmation page", "Polish, accessibility and docs"];
 const criteriaRows: (typeof criteria.$inferInsert)[] = [];
 for (let n = 1; n <= 3; n++) {
-  const m = { id: `mst_${n}`, contractId: "ctr_demo", seq: n, title: titles[n - 1]!, amountMinor: 10000, status: "draft" as const, advanceEligible: n <= 2 };
+  const m = { id: `mst_${n}`, contractId: "ctr_demo", seq: n, title: titles[n - 1]!, amountMinor: 10000, status: "draft" as const, advanceEligible: true };
   const { id: _mid, ...mSet } = m;
   await db.insert(milestones).values(m).onConflictDoUpdate({ target: milestones.id, set: mSet });
   criteriaRows.push(

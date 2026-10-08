@@ -9,7 +9,7 @@ import { wrapUntrusted, type Block, type GenerateRequest, type GenerateResponse,
 
 export const DEFAULT_OLLAMA_MODEL = "qwen3:14b";
 export const DEFAULT_OLLAMA_VISION_MODEL = "qwen2.5vl:7b";
-const NUM_CTX = 32768;
+const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 16384); // 16k keeps qwen3:14b under ~8 GB; 32k doubled the KV cache and starved the Mac
 /** The extracted text of a PDF handed to the model is capped (characters). */
 const PDF_TEXT_MAX = 20_000;
 
@@ -227,6 +227,7 @@ export function createOllamaProvider(opts: OllamaOptions = {}): Provider & { cap
       stream: false,
       // Ollama >= 0.9 accepts think:false; only sent to models that think, others reject the flag.
       ...(thinks ? { think: false } : {}),
+      keep_alive: process.env.OLLAMA_KEEP_ALIVE ?? "2m", // unload the model two minutes after the last call
       options: { temperature: 0, num_ctx: NUM_CTX, num_predict: Math.max(maxTokens, 1024) },
       ...extra,
     });
