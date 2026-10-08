@@ -1,0 +1,26 @@
+{
+  "name": "milestone",
+  "private": true,
+  "packageManager": "pnpm@12.10.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter ./apps/* dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "db:generate": "pnpm --filter @milestone/core generate",
+    "db:migrate": "pnpm --filter @milestone/core migrate",
+    "db:seed": "pnpm --filter @milestone/core seed",
+    "paypal:spike": "pnpm --filter @milestone/money spike"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
