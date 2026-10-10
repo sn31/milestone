@@ -13,7 +13,7 @@ if (!process.env.DATABASE_URL) {
 }
 
 describe.skipIf(process.env.MILESTONE_E2E !== "1")("core DB helpers", () => {
-  const db = createDb();
+  const db = process.env.MILESTONE_E2E === "1" ? createDb() : (undefined as unknown as ReturnType<typeof createDb>); // the suite body is collected even when skipped
   const tag = randomUUID().slice(0, 8);
   const userId = `usr_t_${tag}`;
   const contractId = `ctr_t_${tag}`;

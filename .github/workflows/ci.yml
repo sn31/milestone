@@ -5,14 +5,33 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: milestone
+          POSTGRES_PASSWORD: milestone
+          POSTGRES_DB: milestone
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U milestone" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://milestone:milestone@localhost:5432/milestone
+      PAYPAL_MODE: simulated
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - run: git config --global user.email ci@milestone.test && git config --global user.name ci
       - run: pnpm check:boundaries
       - run: pnpm check:specifiers
       - run: pnpm typecheck
       - run: pnpm --filter @milestone/web lint
       - run: pnpm test
+      - run: pnpm db:migrate
+      - name: Integration tests against Postgres
+        run: pnpm -r test
+        env:
+          MILESTONE_E2E: "1"

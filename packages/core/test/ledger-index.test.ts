@@ -12,7 +12,7 @@ if (!process.env.DATABASE_URL) {
 }
 
 describe.skipIf(process.env.MILESTONE_E2E !== "1")("ledger unique index", () => {
-  const db = createDb();
+  const db = process.env.MILESTONE_E2E === "1" ? createDb() : (undefined as unknown as ReturnType<typeof createDb>); // the suite body is collected even when skipped
   const ref = `test:${randomUUID()}`;
   const entries = (acct: string) => [
     { account: `held:${acct}`, amountMinor: 500, direction: "debit" as const },
