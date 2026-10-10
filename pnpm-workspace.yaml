@@ -1,3 +1,7 @@
 packages:
   - apps/*
   - packages/*
+# Native binaries for tsx/drizzle-kit (esbuild) and eslint's resolver; pnpm 12 refuses unlisted build scripts in CI.
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
