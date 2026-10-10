@@ -95,7 +95,9 @@ export interface FileChange {
   after?: string | null;
 }
 
-const TEST_PATHS = [/(^|\/)(test|tests|__tests__|spec)\//i, /\.(test|spec)\.[cm]?[jt]sx?$/i, /(^|\/)__snapshots__\//i];
+// Conventional locations, including a single suite file such as ms's root tests.js. Files a package.json script names are
+// tests too (scriptTestMatcher), whatever they are called.
+const TEST_PATHS = [/(^|\/)(test|tests|__tests__|spec)\//i, /\.(test|spec)\.[cm]?[jt]sx?$/i, /(^|\/)(tests?|spec)\.[cm]?[jt]sx?$/i, /(^|\/)__snapshots__\//i];
 const CI_PATHS = [/^\.github\/(workflows|actions)\//, /^\.gitlab-ci\.ya?ml$/, /^\.circleci\//, /^\.travis\.ya?ml$/, /^azure-pipelines\.ya?ml$/, /^Jenkinsfile$/, /^\.buildkite\//, /^bitbucket-pipelines\.ya?ml$/];
 /** Config that changes what a test command does even when it is only added (e.g. an .npmrc with script-shell). */
 const RUNNER_CONFIG = [
@@ -153,7 +155,30 @@ export function manifestChanges(before: string | null | undefined, after: string
 const VERB: Record<string, string> = { A: "added", M: "modified", D: "deleted", T: "type changed" };
 
 /** One human-readable line per change that could fake a passing test or build; empty means clean. */
-export function findTampering(changes: FileChange[]): string[] {
+/**
+ * Files and folders the baseline's package.json scripts point at (e.g. "mocha tests.js", "node --test spec/", "tape test/*.js").
+ * Editing any of them changes what the test command runs, so they count as existing tests even with unconventional names.
+ */
+export function scriptTestMatcher(baselinePackageJson: string | null | undefined): (path: string) => boolean {
+  let scripts: Record<string, unknown> = {};
+  try { scripts = (JSON.parse(baselinePackageJson ?? "{}") as { scripts?: Record<string, unknown> }).scripts ?? {}; } catch { /* unparseable: no extra matches */ }
+  const patterns: RegExp[] = [];
+  for (const cmd of Object.values(scripts)) {
+    if (typeof cmd !== "string") continue;
+    for (const raw of cmd.split(/[\s;&|()]+/)) {
+      const token = raw.replace(/^['"]|['"]$/g, "").replace(/^\.\//, "");
+      if (!token || token.startsWith("-") || token.includes("=") || token.startsWith("$") || /node_modules/i.test(token)) continue;
+      if (!/[./*]/.test(token) || /^\.+$/.test(token) || token.includes("://")) continue;
+      const glob = token.replace(/\/+$/, "").replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, "(.*/)?");
+      // A token that names a folder (no extension, or a trailing slash) covers everything under it.
+      const folder = raw.endsWith("/") || !/\.[a-z0-9]+$/i.test(token);
+      patterns.push(new RegExp(`^${glob}${folder ? "(/.*)?" : ""}$`, "i"));
+    }
+  }
+  return (path) => patterns.some((r) => r.test(path));
+}
+
+export function findTampering(changes: FileChange[], isScriptTest: (path: string) => boolean = () => false): string[] {
   const out: string[] = [];
   for (const c of changes) {
     const verb = VERB[c.status] ?? `changed (${c.status})`;
@@ -167,7 +192,7 @@ export function findTampering(changes: FileChange[]): string[] {
       if (keys.length) out.push(`${c.path} ${c.status === "D" ? "deleted" : `${keys.join(", ")} changed`}`);
     } else if (isRunnerConfig(c.path)) {
       out.push(`${c.path} ${verb} (test runner or package manager config)`);
-    } else if (c.status !== "A" && isTestPath(c.path)) {
+    } else if (c.status !== "A" && (isTestPath(c.path) || isScriptTest(c.path))) {
       out.push(`${c.path} ${verb} (existing test)`);
     } else if (c.status !== "A" && isCiPath(c.path)) {
       out.push(`${c.path} ${verb} (CI config)`);
@@ -265,7 +290,8 @@ async function tamperCheck(workdir: string, sha: string, env: Record<string, str
     c.before = await show(from, c.path);
     c.after = c.status === "D" ? null : await show(sha, c.path);
   }
-  return { findings: findTampering(changes), changed: changes.length, base, against, from };
+  const baselinePkg = await show(from, "package.json");
+  return { findings: findTampering(changes, scriptTestMatcher(baselinePkg)), changed: changes.length, base, against, from };
 }
 
 /** Removes every node_modules and .bin entry in the checkout (outside .git), so nothing committed lands on PATH. */

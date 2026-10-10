@@ -312,3 +312,31 @@ describe("demo repo m1-pass: citable evidence and no worker paths", () => {
     }
   });
 });
+
+describe("tests with unconventional names (real-repo finding: ms keeps its suite in a root tests.js)", async () => {
+  const { findTampering, scriptTestMatcher, isTestPath } = await import("../src/deterministic.ts");
+  it("treats a root test.js / tests.js / spec.js as an existing test", () => {
+    expect(isTestPath("tests.js")).toBe(true);
+    expect(isTestPath("test.mjs")).toBe(true);
+    expect(isTestPath("spec.ts")).toBe(true);
+    expect(isTestPath("src/testing.js")).toBe(false);
+    expect(findTampering([{ status: "M", path: "tests.js" }])).toEqual(["tests.js modified (existing test)"]);
+  });
+  it("treats files and folders named by package.json scripts as tests", () => {
+    const m = scriptTestMatcher(JSON.stringify({ scripts: { test: "mocha check.js && node --test ./verify/ && tape 'suite/**/*.js'", lint: "eslint --fix src", build: "tsc -p tsconfig.json" } }));
+    expect(m("check.js")).toBe(true);
+    expect(m("verify/a.js")).toBe(true);
+    expect(m("suite/deep/x.js")).toBe(true);
+    expect(m("suite/x.js")).toBe(true);
+    expect(m("src/index.js")).toBe(false); // a bare word like "src" is not treated as a path; only tokens with a dot, slash or glob are
+    expect(m("README.md")).toBe(false);
+    expect(m("lib/check.js")).toBe(false);
+    expect(findTampering([{ status: "M", path: "check.js" }], m)).toEqual(["check.js modified (existing test)"]);
+    expect(findTampering([{ status: "A", path: "check2.js" }], m)).toEqual([]);
+  });
+  it("ignores flags, env assignments and unparseable manifests", () => {
+    const m = scriptTestMatcher(JSON.stringify({ scripts: { test: "NODE_ENV=test node --test --reporter=spec" } }));
+    expect(m("spec")).toBe(false);
+    expect(scriptTestMatcher("{not json")("tests.js")).toBe(false);
+  });
+});

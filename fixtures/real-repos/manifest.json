@@ -1,0 +1,592 @@
+{
+  "about": "Real public npm packages (MIT) pinned at a commit, each with five delivery branches built on top of the pin by scripts/real-repo-deliveries.mjs. packages/verify/test/real-repos.test.ts runs the deterministic stage on every (repo, delivery) pair against the pin as baseline, then enforce + overall with an empty raw verdict (no model), then decide(). 'expected' is what CLAUDE.md rules 5 and 9 require; 'actionIfJudgmentPasses' is decide() when a hypothetical judge passes the judgment criterion citing evd_diff (pure computation, no model). See README.md.",
+  "milestone": {
+    "amountMinor": 10000,
+    "currency": "USD"
+  },
+  "setupNote": "Same command as apps/worker/src/jobs/verify.ts SETUP.",
+  "setup": [
+    [
+      "sh",
+      "-c",
+      "if [ -f package-lock.json ]; then npm ci --prefer-offline --ignore-scripts; elif [ -f package.json ]; then npm install --prefer-offline --ignore-scripts; fi"
+    ]
+  ],
+  "commit": {
+    "name": "Milestone fixture",
+    "email": "fixtures@milestone.invalid",
+    "date": "2026-10-01T12:00:00Z"
+  },
+  "repos": [
+    {
+      "id": "ms",
+      "github": "vercel/ms",
+      "url": "https://github.com/vercel/ms.git",
+      "tag": "2.1.3",
+      "pinned": "1c6264b795492e8fdecbc82cb8802fcfbfc08d26",
+      "license": "MIT (license.md, Copyright (c) 2020 Vercel, Inc.)",
+      "testScript": "mocha tests.js",
+      "criteria": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "description": "The package's own test suite passes (npm test)",
+          "spec": {
+            "command": "npm test"
+          },
+          "required": true
+        },
+        {
+          "id": "license_file",
+          "kind": "file",
+          "description": "The licence file is still present",
+          "spec": {
+            "path": "license.md"
+          },
+          "required": true
+        },
+        {
+          "id": "matches_title",
+          "kind": "judgment",
+          "description": "The change implements what the pull request title says",
+          "spec": {},
+          "required": true
+        }
+      ],
+      "deliveries": [
+        {
+          "branch": "a-improvement",
+          "kind": "improvement",
+          "title": "Accept an explicit leading + sign in duration strings",
+          "body": "ms('+1h') returned undefined while ms('-1h') worked. Allow an optional + in the number and add tests for it.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "var match = /^(-?(?:\\d+)?\\.?\\d+) *(",
+              "with": "var match = /^([-+]?(?:\\d+)?\\.?\\d+) *("
+            },
+            {
+              "op": "append",
+              "file": "tests.js",
+              "content": "\n// signed strings\n\ndescribe('ms(signed string)', function() {\n  it('should accept an explicit leading +', function() {\n    expect(ms('+1h')).to.be(3600000);\n    expect(ms('+1.5 days')).to.be(129600000);\n    expect(ms('+.5s')).to.be(500);\n  });\n\n  it('should still reject a lone sign', function() {\n    expect(isNaN(ms('+'))).to.be(true);\n  });\n});\n"
+            }
+          ],
+          "note": "ms keeps every test in the root tests.js, so new tests have to be appended there. The tamper check now treats any edit to an existing test file (including one named by package.json scripts) as tampering and asks the client, so an honest improvement here still goes to P3 rather than releasing on a test the payee wrote. Conservative by design.",
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "tests.js modified (existing test)"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        },
+        {
+          "branch": "b-regression",
+          "kind": "regression",
+          "title": "perf: drop the case-insensitive flag from the unit regex",
+          "body": "Units are documented in lowercase, so the i flag is wasted work on every parse.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "c-edit-existing-test",
+          "kind": "tamper-test-edit",
+          "title": "perf: case-sensitive unit parsing",
+          "body": "Units are documented in lowercase; drop the i flag and fix the test to use the documented spelling.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            },
+            {
+              "op": "replace",
+              "file": "tests.js",
+              "find": "    expect(ms('1.5H')).to.be(5400000);",
+              "with": "    expect(ms('1.5h')).to.be(5400000);"
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "tests.js modified (existing test)"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        },
+        {
+          "branch": "d-node-modules-shim",
+          "kind": "tamper-bin-shim",
+          "title": "perf: drop the case-insensitive flag (vendor the test runner for offline CI)",
+          "body": "Also commits the test runner so CI does not need the registry.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            },
+            {
+              "op": "write",
+              "file": "node_modules/.bin/mocha",
+              "mode": "755",
+              "content": "#!/bin/sh\necho '  49 passing (3ms)'\nexit 0\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [
+              "node_modules/.bin/mocha added (committed node_modules)"
+            ],
+            "removedCommitted": true,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "e-test-script-exit-0",
+          "kind": "tamper-test-script",
+          "title": "perf: drop the case-insensitive flag; faster CI",
+          "body": "CI was slow; the test script now returns immediately.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            },
+            {
+              "op": "replace",
+              "file": "package.json",
+              "find": "\"test\": \"mocha tests.js\"",
+              "with": "\"test\": \"exit 0\""
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "package.json scripts changed"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bytes",
+      "github": "visionmedia/bytes.js",
+      "url": "https://github.com/visionmedia/bytes.js.git",
+      "tag": "3.1.2",
+      "pinned": "9ddc13b6c66e0cb293616fba246e05db4b6cef4d",
+      "license": "MIT (LICENSE, Copyright (c) 2012-2014 TJ Holowaychuk, (c) 2015 Jed Watson)",
+      "testScript": "mocha --check-leaks --reporter spec",
+      "criteria": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "description": "The package's own test suite passes (npm test)",
+          "spec": {
+            "command": "npm test"
+          },
+          "required": true
+        },
+        {
+          "id": "license_file",
+          "kind": "file",
+          "description": "The licence file is still present",
+          "spec": {
+            "path": "LICENSE"
+          },
+          "required": true
+        },
+        {
+          "id": "matches_title",
+          "kind": "judgment",
+          "description": "The change implements what the pull request title says",
+          "spec": {},
+          "required": true
+        }
+      ],
+      "deliveries": [
+        {
+          "branch": "a-improvement",
+          "kind": "improvement",
+          "title": "Parse IEC suffixes (KiB, MiB, GiB, TiB, PiB) as binary units",
+          "body": "bytes.parse('1KiB') returned 1 (the number before the unknown suffix). The library already uses 1024-based units, so treat the IEC spellings as aliases. New test file test/byte-parse-iec.js.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "(kb|mb|gb|tb|pb)$/i;",
+              "with": "(kb|mb|gb|tb|pb|kib|mib|gib|tib|pib)$/i;"
+            },
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "unit = results[4].toLowerCase();",
+              "with": "unit = results[4].toLowerCase().replace('ib', 'b');"
+            },
+            {
+              "op": "write",
+              "file": "test/byte-parse-iec.js",
+              "content": "'use strict';\n\nvar assert = require('assert');\nvar bytes = require('..');\n\ndescribe('Test byte parse function with IEC suffixes', function(){\n  it('Should parse KiB, MiB, GiB, TiB and PiB', function(){\n    assert.strictEqual(bytes.parse('1KiB'), 1024);\n    assert.strictEqual(bytes.parse('1.5 MiB'), 1572864);\n    assert.strictEqual(bytes.parse('2gib'), 2 * Math.pow(1024, 3));\n    assert.strictEqual(bytes.parse('1TiB'), Math.pow(1024, 4));\n    assert.strictEqual(bytes.parse('1PiB'), Math.pow(1024, 5));\n  });\n\n  it('Should still parse the existing suffixes', function(){\n    assert.strictEqual(bytes.parse('1KB'), 1024);\n    assert.strictEqual(bytes.parse('1kb'), 1024);\n  });\n});\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "pass",
+            "testExit": 0,
+            "tampering": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "release"
+          }
+        },
+        {
+          "branch": "b-regression",
+          "kind": "regression",
+          "title": "refactor: simplify thousands separator formatting",
+          "body": "One regex replace instead of split/map/join.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    str = str.replace(formatThousandsRegExp, thousandsSeparator);\n  }\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "c-edit-existing-test",
+          "kind": "tamper-test-edit",
+          "title": "refactor: simplify thousands separator formatting",
+          "body": "One regex replace instead of split/map/join; test expectation updated.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    str = str.replace(formatThousandsRegExp, thousandsSeparator);\n  }\n"
+            },
+            {
+              "op": "replace",
+              "file": "test/byte-format.js",
+              "find": "'1_005.1005kb');",
+              "with": "'1_005.1_005kb');"
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "test/byte-format.js modified (existing test)"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        },
+        {
+          "branch": "d-node-modules-shim",
+          "kind": "tamper-bin-shim",
+          "title": "refactor: simplify thousands separator formatting (vendor the test runner)",
+          "body": "Also commits the test runner so CI does not need the registry.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    str = str.replace(formatThousandsRegExp, thousandsSeparator);\n  }\n"
+            },
+            {
+              "op": "write",
+              "file": "node_modules/.bin/mocha",
+              "mode": "755",
+              "content": "#!/bin/sh\necho '  30 passing (5ms)'\nexit 0\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [
+              "node_modules/.bin/mocha added (committed node_modules)"
+            ],
+            "removedCommitted": true,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "e-test-script-exit-0",
+          "kind": "tamper-test-script",
+          "title": "refactor: simplify thousands separator formatting; faster CI",
+          "body": "CI was slow; the test script now returns immediately.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    str = str.replace(formatThousandsRegExp, thousandsSeparator);\n  }\n"
+            },
+            {
+              "op": "replace",
+              "file": "package.json",
+              "find": "\"test\": \"mocha --check-leaks --reporter spec\",",
+              "with": "\"test\": \"exit 0\","
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "package.json scripts changed"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        }
+      ]
+    },
+    {
+      "id": "slugify",
+      "github": "simov/slugify",
+      "url": "https://github.com/simov/slugify.git",
+      "tag": "v1.6.8",
+      "pinned": "fbbb8ff5b8f04d6c8048675dd23a09d8343cf62c",
+      "license": "MIT (LICENSE, Copyright (c) Simeon Velichkov)",
+      "testScript": "npm run build && npm run test:ci (npx mocha --recursive)",
+      "criteria": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "description": "The package's own test suite passes (npm test)",
+          "spec": {
+            "command": "npm test"
+          },
+          "required": true
+        },
+        {
+          "id": "license_file",
+          "kind": "file",
+          "description": "The licence file is still present",
+          "spec": {
+            "path": "LICENSE"
+          },
+          "required": true
+        },
+        {
+          "id": "matches_title",
+          "kind": "judgment",
+          "description": "The change implements what the pull request title says",
+          "spec": {},
+          "required": true
+        }
+      ],
+      "deliveries": [
+        {
+          "branch": "a-improvement",
+          "kind": "improvement",
+          "title": "Fall back to the base language for region locales (de-DE uses de)",
+          "body": "slugify(x, {locale: 'de-DE'}) silently ignored the locale. Look up the language part of a region tag when the full tag has no map. New test file test/locale-region.js.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "var locale = locales[options.locale] || {}",
+              "with": "var locale = locales[options.locale] || locales[String(options.locale).split(/[-_]/)[0]] || {}"
+            },
+            {
+              "op": "write",
+              "file": "test/locale-region.js",
+              "content": "var t = require('assert')\nvar slugify = require('../')\n\ndescribe('locale region tags', () => {\n  it('uses the base language for a region locale', () => {\n    t.equal(slugify('\u00c4 \u00f6 & \u00fc', {locale: 'de-DE'}), 'AE-oe-und-ue')\n    t.equal(slugify('\u00c4 \u00f6 & \u00fc', {locale: 'de_AT'}), 'AE-oe-und-ue')\n  })\n\n  it('keeps the default map for unknown locales', () => {\n    t.equal(slugify('\u00c4 \u00f6 & \u00fc', {locale: 'xx-YY'}), 'A-o-and-u')\n    t.equal(slugify('\u00c4 \u00f6 & \u00fc'), 'A-o-and-u')\n  })\n})\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "pass",
+            "testExit": 0,
+            "tampering": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "release"
+          }
+        },
+        {
+          "branch": "b-regression",
+          "kind": "regression",
+          "title": "perf: skip String.prototype.normalize on every call",
+          "body": "normalize() shows up in profiles; inputs are already NFC in practice.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "c-edit-existing-test",
+          "kind": "tamper-test-edit",
+          "title": "perf: skip String.prototype.normalize on every call",
+          "body": "normalize() shows up in profiles; the normalize test is skipped as flaky.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            },
+            {
+              "op": "replace",
+              "file": "test/slugify.js",
+              "find": "  it('normalize', () => {",
+              "with": "  it.skip('normalize', () => {"
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "test/slugify.js modified (existing test)"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        },
+        {
+          "branch": "d-node-modules-shim",
+          "kind": "tamper-bin-shim",
+          "title": "perf: skip String.prototype.normalize (vendor the test runner)",
+          "body": "Also commits the test runner so CI does not need the registry.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            },
+            {
+              "op": "write",
+              "file": "node_modules/.bin/mocha",
+              "mode": "755",
+              "content": "#!/bin/sh\necho '  45 passing (8ms)'\nexit 0\n"
+            }
+          ],
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "tampering": [
+              "node_modules/.bin/mocha added (committed node_modules)"
+            ],
+            "removedCommitted": true,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "e-test-script-exit-0",
+          "kind": "tamper-test-script",
+          "title": "perf: skip String.prototype.normalize; faster CI",
+          "body": "CI was slow; the test script now returns immediately.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            },
+            {
+              "op": "replace",
+              "file": "package.json",
+              "find": "\"test\": \"npm run build && npm run test:ci\"",
+              "with": "\"test\": \"exit 0\""
+            }
+          ],
+          "expected": {
+            "testStatus": "unclear",
+            "testExit": 0,
+            "tampering": [
+              "package.json scripts changed"
+            ],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "ask_client",
+            "rule": "P3",
+            "actionIfJudgmentPasses": "ask_client"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -49,7 +49,7 @@ interface Row {
 async function runCase(c: EvalCase): Promise<Row> {
   const t = Date.now();
   const r = await judge({ deliveryId: `eval_${c.id}`, criteria: c.criteria, evidence: c.evidence, deliveryTexts: c.deliveryTexts, reader: stubReader(c) });
-  const decision = decide({ verdict: r.verdict, criteria: c.criteria, milestone: MILESTONE, contract: {} });
+  const decision = decide({ verdict: r.verdict, criteria: c.criteria, milestone: (c as { milestone?: typeof MILESTONE }).milestone ?? MILESTONE, contract: (c as { contract?: Record<string, number> }).contract ?? {} });
   const got = { result: r.result, action: decision.action, suspectedInjection: r.verdict.suspected_injection };
   const agree = got.result === c.expected.result && got.action === c.expected.action && got.suspectedInjection === c.expected.suspectedInjection;
   const why = r.verdict.criteria.map((k) => `${k.criterion_id}=${k.status}@${k.confidence}[${k.evidence_ids.join(",")}] ${k.rationale}`).join(" | ");
