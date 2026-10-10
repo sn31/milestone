@@ -10,3 +10,4 @@ coverage/
 fixtures/paypal-recordings/*.local.json
 .DS_Store
 var/
+.next-*/

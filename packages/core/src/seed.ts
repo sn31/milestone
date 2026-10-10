@@ -13,15 +13,21 @@ loadRootEnv(); // no .env: rely on process.env
 const db = createDb();
 const simulated = paypalMode() === "simulated";
 
-// `pnpm db:seed -- --reset` wipes every table (and the PayPal simulator state) before seeding, so a demo
+// `pnpm db:seed -- --reset` wipes every table before seeding (`--reset-files` also clears var/ simulator state and uploads), so a demo
 // never starts with stale payout rows that would send a milestone to needs_operator.
 if (process.argv.includes("--reset")) {
   const { sql } = await import("drizzle-orm");
   await db.execute(sql`truncate table audit_log, ledger_entries, webhook_events, paypal_ops, advances, deliveries, criteria, milestones, contracts, users restart identity cascade`);
-  const { rmSync } = await import("node:fs");
-  try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/simulated-paypal.json"), { force: true }); } catch { /* none */ }
-  try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/uploads"), { recursive: true, force: true }); } catch { /* none */ }
-  console.log("reset: all tables truncated, simulator state and uploads removed");
+  // Shared files (simulator state, uploaded deliveries) live in the repo's var/ and belong to whichever database uses them,
+  // so a reset of a scratch database must not delete them. Only --reset-files does, for the main local setup.
+  if (process.argv.includes("--reset-files")) {
+    const { rmSync } = await import("node:fs");
+    try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/simulated-paypal.json"), { force: true }); } catch { /* none */ }
+    try { rmSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../var/uploads"), { recursive: true, force: true }); } catch { /* none */ }
+    console.log("reset: all tables truncated, simulator state and uploads removed");
+  } else {
+    console.log("reset: all tables truncated (var/ files kept; add --reset-files to remove them)");
+  }
 }
 
 const userRows = [
