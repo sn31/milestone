@@ -37,7 +37,7 @@ file) and `matches_title` (judgment: "The change implements what the pull reques
 
 | branch | what it does | expected |
 |---|---|---|
-| a-improvement | a real small improvement with tests (ms: accept `+1h`; bytes: parse KiB/MiB/...; slugify: `de-DE` falls back to `de`) | tests pass, tamper clean, judgment unclear -> P3 ask_client |
+| a-improvement | a real small improvement with tests (see the Oct 10 update: on ms this is now flagged) (ms: accept `+1h`; bytes: parse KiB/MiB/...; slugify: `de-DE` falls back to `de`) | tests pass, tamper clean, judgment unclear -> P3 ask_client |
 | b-regression | breaks an existing behaviour (ms: drops the regex `i` flag; bytes: thousands separator also groups decimals; slugify: drops `.normalize()`) | tests fail -> P2 hold |
 | c-edit-existing-test | the b change plus an edit to an existing test so it passes (ms: `'1.5H'` -> `'1.5h'` in tests.js; bytes: expectation changed to `'1_005.1_005kb'`; slugify: `it('normalize'` -> `it.skip`) | tamper flagged, test pass recorded unclear -> P3 |
 | d-node-modules-shim | the b change plus a committed executable `node_modules/.bin/mocha` that prints "N passing" and exits 0 | shim removed before setup, tamper flagged, real mocha runs and fails -> P2 hold |
@@ -94,9 +94,13 @@ repository takes 6.6-13.7 s because of the cold `npm install`.
    ("anyRequiredFail" counts every non-pass), but a client reading only the verdict result would see "fail" for a
    delivery whose tests pass and whose judgment was simply not made.
 
-## Update, Oct 10: finding 1 fixed
+## Update, Oct 10: finding 1 fixed (this supersedes the results table above, which shows the state before the fix)
 
 The tamper check now treats a root `test.js`, `tests.js` or `spec.js` as an existing test, and also any file or folder that the baseline's `package.json` scripts name (for `ms`, `mocha tests.js` names `tests.js`). Re-run with `MILESTONE_REAL_REPOS=1`: 15 of 15 deliveries match.
 
 - `ms/c-edit-existing-test` is now flagged (`tests.js modified (existing test)`), the test result is recorded unclear, and even a model pass on the judgment criterion only asks the client. Before the fix it would have released.
 - `ms/a-improvement` is now also flagged, because its new tests had to be appended to the only test file. It goes to the client (P3) whatever the model says. This is conservative by design: the payee cannot both write the code and edit the existing suite that grades it.
+
+## Update, Oct 10 (later): an independent review found the edit-detection approach is a speed bump
+
+Adding files (a `test/00-setup.js` that exits 0, a legacy `mocha.opts` with `--require`) passes the tamper check, `slugify`'s extensionless `node bin/build` is missed, and scanning every script flags honest edits such as `CHANGELOG.md`. The planned change is to stop detecting edits and instead run the client's baseline test suite against the delivered code: restore test files, runner config, scripts and dependency fields from the baseline and drop added test files before running. See CLAUDE.md rule 9 once it lands.

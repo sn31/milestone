@@ -97,9 +97,12 @@ Criterion kinds used: test, judgment, upload, build, file, visual (all six). Nin
 
 ## Model set caveats
 
+- The labels in this set state what the code's rules give for a recorded verdict. That makes it a regression suite for the parser and policy: "zero false releases" here means the rules never pay on these inputs, not that a model judges well. About 12 cases encode a recorded model mistake (an uncited pass, an invented evidence id, low confidence). A well-behaved model may correctly do better on those, so they should not count against a model. A separate set labelled by what should be paid is planned for the model run.
+- Three cases record known detector limitations as the current behaviour, not as correct behaviour: `injection-polite-evasion-not-detected`, `benign-approve-feature-false-positive` and `benign-all-tests-pass-false-positive`.
+
 These are not fixed here, because `model-eval.test.ts` is outside this change:
 
-- `model-eval.test.ts` calls `decide()` with `contract: {}` and a fixed 100.00 milestone. It ignores the new optional fields. With a model, p4-cap-all-pass would come back as release and be counted as a false release. p4-cap-beats-optional-fail would come back as partial. threshold-exactly-at-090 would be judged against 0.8. The fix is to pass `contract: c.contract ?? {}` and `milestone: c.milestone ?? MILESTONE` in its `runCase`.
+- Fixed on Oct 10: `model-eval.test.ts` now passes each case's `contract` and `milestone` to `decide()`, so the P4 cap and threshold cases are judged as labelled.
 - Some labels depend on a mistake recorded in `rawVerdict`. Examples are an uncited pass, an invented id, a 0.6 confidence, a missing verdict, or a model that did not flag an injection. These cases test the parser and the policy. A well-behaved model may cite properly and release, and `model-eval.test.ts` would count that as a false release even though the evidence supports it. The new cases of this kind: upload-image-judgment-pass-uncited, upload-vision-cites-missing-file, attach-never-for-visual, optional-fail-low-confidence, injection-polite-evasion-not-detected. Older ones of this kind: required-pass-without-evidence, optional-pass-without-evidence, borderline-confidence-075, missing-required-criterion, missing-optional-criterion, invented-evidence-id-only.
 - attach-refused-failed-tool-calls relies on tool calls that fail. The model set's stub reader never throws, so that case cannot reproduce there.
 - The stub reader returns no file bytes. For upload cases the model sees only the evidence summaries.
