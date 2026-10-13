@@ -4,11 +4,12 @@
  * MILESTONE_REAL_REPOS_DIR picks the scratch directory (default <os tmpdir>/milestone-real-repos); the npm cache goes
  * to <dir>/npm-cache unless MILESTONE_NPM_CACHE is set.
  *
- * scripts/real-repo-deliveries.mjs builds five delivery branches on top of each pinned public repository
+ * scripts/real-repo-deliveries.mjs builds the delivery branches on top of each pinned public repository
  * (fixtures/real-repos/manifest.json). Per (repo, delivery): runDeterministicStage with the pin as baseline and the
- * worker's setup command, then enforce + overall with an empty raw verdict (no model is called, configured or needed),
- * then decide(). Asserts the manifest's expected outcome and writes <dir>/results.json (durations, exit codes, tamper
- * findings, verdict result, policy rule) for fixtures/real-repos/README.md.
+ * worker's setup command (the client's baseline suite against the delivered code, plus the gaming scan), then enforce +
+ * overall with an empty raw verdict (no model is called, configured or needed), then decide(). Asserts the manifest's
+ * expected outcome and writes <dir>/results.json (durations, exit codes, what the overlay restored and removed, gaming
+ * hits, the informational pass, verdict result, policy rule) for fixtures/real-repos/README.md.
  *
  * Expectations are soft assertions: one pair's mismatch is reported without hiding the others.
  */
@@ -25,7 +26,11 @@ import { decide } from "@milestone/money";
 interface Expected {
   testStatus: "pass" | "fail" | "unclear";
   testExit: number | "nonzero";
-  tampering: string[];
+  /** What the baseline overlay put back, took away and merged ("package.json: scripts"); gaming hits as "file:line rule". */
+  restored: string[];
+  removed: string[];
+  manifests: string[];
+  gaming: string[];
   removedCommitted: boolean;
   result: VerdictResult;
   action: PolicyAction;
@@ -49,7 +54,13 @@ interface Row {
   stageMs: number;
   testExit: number | null;
   testStatus: string | undefined;
-  tampering: string[];
+  restored: string[];
+  removed: string[];
+  manifests: string[];
+  gaming: string[];
+  /** The delivery's own tests (informational pass): exit code, or null when it did not run. */
+  deliveredExit: number | null;
+  untrusted: string | null;
   removedCommitted: string[];
   fileStatus: string | undefined;
   result: VerdictResult;
@@ -79,7 +90,7 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
   afterAll(() => {
     if (!rows.length) return;
     writeFileSync(join(DIR, "results.json"), `${JSON.stringify({ ranAt: new Date().toISOString(), node: process.version, rows }, null, 2)}\n`);
-    console.log(rows.map((r) => [r.pair.padEnd(30), `${String(r.stageMs).padStart(6)}ms`, `exit ${r.testExit}`, (r.testStatus ?? "-").padEnd(7), r.result.padEnd(7), `${r.action} ${r.rule}`.padEnd(16), r.tampering.join("; ") || "clean", r.matchesExpected ? "" : `MISMATCH: ${r.mismatches.join(" | ")}`].join("  ")).join("\n"));
+    console.log(rows.map((r) => [r.pair.padEnd(30), `${String(r.stageMs).padStart(6)}ms`, `exit ${r.testExit}`, (r.testStatus ?? "-").padEnd(7), r.result.padEnd(7), `${r.action} ${r.rule}`.padEnd(16), [...r.restored.map((x) => `restored ${x}`), ...r.removed.map((x) => `removed ${x}`), ...r.manifests, ...r.gaming.map((x) => `gaming ${x}`)].join("; ") || "-", `own tests exit ${r.deliveredExit ?? "-"}`, r.matchesExpected ? "" : `MISMATCH: ${r.mismatches.join(" | ")}`].join("  ")).join("\n"));
   });
 
   it.each(pairs)("%s", { timeout: 600_000 }, async (pair, repo, d) => {
@@ -104,6 +115,11 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
     const exit = /exited (\d+|null)/.exec(tests?.summary ?? "")?.[1];
     const testExit = exit === undefined || exit === "null" ? null : Number(exit);
     const removedCommitted = (out.logs["setup:remove-committed-node_modules"] ?? "").split("\n").filter(Boolean);
+    const overlay = out.overlay ?? { restored: [], removed: [], manifests: [], lockfilesDropped: [] };
+    const manifests = overlay.manifests.map((m) => `${m.path}: ${m.keys.join(", ")}`);
+    const gaming = out.gaming.map((h) => `${h.file}:${h.line} ${h.rule}`);
+    const deliveredRaw = /exited (\d+)/.exec(out.evidence.find((x) => x.id === "evd_tests_delivered")?.summary ?? "")?.[1];
+    const deliveredExit = deliveredRaw === undefined ? null : Number(deliveredRaw);
 
     // No model: an empty raw verdict, so the judgment criterion is "not judged" and enforce makes it unclear.
     const empty: VerdictOutput = { delivery_id: pair, criteria: [], suspected_injection: false };
@@ -120,7 +136,11 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
     const checks: Array<[string, boolean, unknown, unknown]> = [
       ["testStatus", tests?.status === e.testStatus, tests?.status, e.testStatus],
       ["testExit", e.testExit === "nonzero" ? testExit !== null && testExit !== 0 : testExit === e.testExit, testExit, e.testExit],
-      ["tampering", JSON.stringify(out.tampering) === JSON.stringify(e.tampering), out.tampering, e.tampering],
+      ["untrusted", out.untrusted === null, out.untrusted, null],
+      ["restored", JSON.stringify(overlay.restored) === JSON.stringify(e.restored), overlay.restored, e.restored],
+      ["removed", JSON.stringify(overlay.removed) === JSON.stringify(e.removed), overlay.removed, e.removed],
+      ["manifests", JSON.stringify(manifests) === JSON.stringify(e.manifests), manifests, e.manifests],
+      ["gaming", JSON.stringify(gaming) === JSON.stringify(e.gaming), gaming, e.gaming],
       ["removedCommitted", removedCommitted.length > 0 === e.removedCommitted, removedCommitted, e.removedCommitted],
       ["fileStatus", file?.status === "pass", file?.status, "pass"],
       ["result", result === e.result, result, e.result],
@@ -130,7 +150,7 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
     ];
     const mismatches = checks.filter(([, ok]) => !ok).map(([k, , got, want]) => `${k}: got ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);
     rows.push({
-      pair, kind: d.kind, sha, stageMs, testExit, testStatus: tests?.status, tampering: out.tampering, removedCommitted,
+      pair, kind: d.kind, sha, stageMs, testExit, testStatus: tests?.status, restored: overlay.restored, removed: overlay.removed, manifests, gaming, deliveredExit, untrusted: out.untrusted, removedCommitted,
       fileStatus: file?.status, result, action: decision.action, rule: decision.ruleIds.join(","),
       actionIfJudgmentPasses: decisionIfPassed.action, ruleIfJudgmentPasses: decisionIfPassed.ruleIds.join(","),
       matchesExpected: mismatches.length === 0, mismatches,

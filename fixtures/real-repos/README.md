@@ -8,16 +8,18 @@ anywhere. The judgment criterion is left unjudged (an empty raw verdict), and `e
   delivery (`delivery/<branch>`) on top of it. Commits use a fixed author and date, so the commit ids below can be
   reproduced. The script runs no npm and no tests.
 - `packages/verify/test/real-repos.test.ts` is opt-in because it needs network for the clone and `npm install`.
-  For each (repo, delivery) pair it runs `runDeterministicStage`. The baseline is the pin, and setup uses the worker's
-  own command (`npm ci`/`npm install --prefer-offline --ignore-scripts`). Then it runs `enforce` + `overall` with an
-  empty raw verdict, then `decide()` (100.00 USD, no cap, 0.8 threshold).
+  For each (repo, delivery) pair it runs `runDeterministicStage`. The baseline is the pin: the stage restores the pin's
+  test files, runner config, scripts and dev dependencies over the delivered code, removes test files the delivery
+  added, runs the gaming scan on the delivery's added source lines, and then runs setup with the worker's own command
+  (`npm ci`/`npm install --prefer-offline --ignore-scripts`). Then it runs `enforce` + `overall` with an empty raw
+  verdict, then `decide()` (100.00 USD, no cap, 0.8 threshold).
 
 ```
 MILESTONE_REAL_REPOS=1 MILESTONE_REAL_REPOS_DIR=/some/scratch/dir \
   pnpm --filter @milestone/verify exec vitest run test/real-repos.test.ts --silent=false
 ```
 
-Without `MILESTONE_REAL_REPOS=1` the 15 tests are skipped. With it, results go to `<dir>/results.json`.
+Without `MILESTONE_REAL_REPOS=1` the 22 tests are skipped. With it, results go to `<dir>/results.json`.
 
 ## Repositories
 
@@ -35,72 +37,79 @@ file) and `matches_title` (judgment: "The change implements what the pull reques
 
 ## Deliveries
 
+Every delivery is one commit on top of the pin. b to h all carry the same regression as b.
+
 | branch | what it does | expected |
 |---|---|---|
-| a-improvement | a real small improvement with tests (see the Oct 10 update: on ms this is now flagged) (ms: accept `+1h`; bytes: parse KiB/MiB/...; slugify: `de-DE` falls back to `de`) | tests pass, tamper clean, judgment unclear -> P3 ask_client |
+| a-improvement | a real small improvement with tests (ms: accept `+1h`, tests appended to `tests.js`; bytes: parse KiB/MiB/..., new `test/byte-parse-iec.js`; slugify: `de-DE` falls back to `de`, new `test/locale-region.js`) | the client's suite passes against the improved code (ms: `tests.js` restored; bytes, slugify: the new test file removed for the graded run, shown in the informational pass); judgment unclear -> P3 ask_client; release P6 if a judge passes the judgment |
 | b-regression | breaks an existing behaviour (ms: drops the regex `i` flag; bytes: thousands separator also groups decimals; slugify: drops `.normalize()`) | tests fail -> P2 hold |
-| c-edit-existing-test | the b change plus an edit to an existing test so it passes (ms: `'1.5H'` -> `'1.5h'` in tests.js; bytes: expectation changed to `'1_005.1_005kb'`; slugify: `it('normalize'` -> `it.skip`) | tamper flagged, test pass recorded unclear -> P3 |
-| d-node-modules-shim | the b change plus a committed executable `node_modules/.bin/mocha` that prints "N passing" and exits 0 | shim removed before setup, tamper flagged, real mocha runs and fails -> P2 hold |
-| e-test-script-exit-0 | the b change plus `scripts.test` set to `"exit 0"` | tamper flagged, test pass recorded unclear -> P3 |
+| c-edit-existing-test | b plus an edit to an existing test so it passes (ms: `'1.5H'` -> `'1.5h'` in tests.js; bytes: expectation changed to `'1_005.1_005kb'`; slugify: `it('normalize'` -> `it.skip`) | the test file is restored, the client's test catches the regression -> P2 hold |
+| d-node-modules-shim | b plus a committed executable `node_modules/.bin/mocha` that prints "N passing" and exits 0 | the shim is removed before setup, the real mocha fails -> P2 hold |
+| e-test-script-exit-0 | b plus `scripts.test` set to `"exit 0"` | the baseline scripts are put back, the client's test command fails -> P2 hold |
+| f-added-setup-exit | b plus an added `test/00-setup.js` that calls `process.exit(0)` (mocha loads it first) | the added file is removed for the graded run -> P2 hold |
+| g-source-env-sniff | the b regression only outside CI: the source reads `process.env.CI` (which the stage sets) and keeps the old behaviour there (ms: lower-cases the input under CI; bytes: the old decimal handling under CI; slugify: `.normalize()` only under CI) | the client's suite passes, the gaming scan flags the `process.env.CI` read -> P3 ask_client, never release (also not with a judged pass) |
+| h-extensionless-build | slugify only: b plus an edit to `bin/build.js` (run by `"build": "node bin/build"` before mocha) that blanks `test/slugify.js` and `test/locales.js`, so mocha finds 0 tests and exits 0 | `bin/build` resolves to `bin/build.js`, which is restored -> P2 hold |
 
 The **if judged pass** column shows what `decide()` would return if a judge passed the judgment criterion and cited
 `evd_diff`. It is computed directly and no model is run. It shows what a model's pass could and could not unlock.
+The **own tests exit** column is the informational pass: the delivery's own tests, scripts and test config as
+delivered (no status, never decides). It runs only when the overlay changed something.
 
-## Results (run 2026-10-10, Node v24.4.1, macOS, warm npm cache after the first install per repository)
+## Results (run 2026-10-14, Node v24.4.1, macOS, warm npm cache)
 
-| pair | delivered sha | stage ms | `npm test` exit | tests evidence | tamper findings | result | policy | if judged pass | as expected |
-|---|---|---|---|---|---|---|---|---|---|
-| ms/a-improvement | d46af1ba10b5 | 6618 | 0 | pass | none | fail | ask_client P3 | release P6 | yes (see note 2) |
-| ms/b-regression | 4b8f07154e89 | 3258 | 1 | fail | none | fail | hold P2 | hold P2 | yes |
-| ms/c-edit-existing-test | 8b8eee312755 | 2973 | 0 | **pass** | **none** | fail | ask_client P3 | **release P6** | **no (finding 1)** |
-| ms/d-node-modules-shim | 08538eace61a | 3043 | 1 | fail | node_modules/.bin/mocha added (committed node_modules) | fail | hold P2 | hold P2 | yes |
-| ms/e-test-script-exit-0 | 824c3ee590a6 | 3040 | 0 | unclear | package.json scripts changed | fail | ask_client P3 | ask_client P3 | yes |
-| bytes/a-improvement | 966f63369e1b | 13703 | 0 | pass | none | fail | ask_client P3 | release P6 | yes |
-| bytes/b-regression | 737a1c62cc3c | 4154 | 1 | fail | none | fail | hold P2 | hold P2 | yes |
-| bytes/c-edit-existing-test | a530588b27ad | 3327 | 0 | unclear | test/byte-format.js modified (existing test) | fail | ask_client P3 | ask_client P3 | yes |
-| bytes/d-node-modules-shim | 66c6d0cd1a35 | 3342 | 1 | fail | node_modules/.bin/mocha added (committed node_modules) | fail | hold P2 | hold P2 | yes |
-| bytes/e-test-script-exit-0 | 0e8ca91f4d05 | 3242 | 0 | unclear | package.json scripts changed | fail | ask_client P3 | ask_client P3 | yes |
-| slugify/a-improvement | 247d4a9becf7 | 12883 | 0 | pass | none | fail | ask_client P3 | release P6 | yes |
-| slugify/b-regression | ddf8ea6a1845 | 4304 | 1 | fail | none | fail | hold P2 | hold P2 | yes |
-| slugify/c-edit-existing-test | 00ef12e85e34 | 4350 | 0 | unclear | test/slugify.js modified (existing test) | fail | ask_client P3 | ask_client P3 | yes |
-| slugify/d-node-modules-shim | f5f40f4ad3fc | 3970 | 1 | fail | node_modules/.bin/mocha added (committed node_modules) | fail | hold P2 | hold P2 | yes |
-| slugify/e-test-script-exit-0 | 5f7e8e1ea518 | 3526 | 0 | unclear | package.json scripts changed | fail | ask_client P3 | ask_client P3 | yes |
+| pair | delivered sha | stage ms | `npm test` exit | tests evidence | baseline overlay | gaming scan | own tests exit | result | policy | if judged pass | as expected |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ms/a-improvement | d46af1ba10b5 | 3101 | 0 | pass | restored `tests.js` | none | 0 | fail | ask_client P3 | release P6 | yes |
+| ms/b-regression | 4b8f07154e89 | 2463 | 1 | fail | nothing | none | not run | fail | hold P2 | hold P2 | yes |
+| ms/c-edit-existing-test | 8b8eee312755 | 2947 | 1 | fail | restored `tests.js` | none | 0 | fail | hold P2 | hold P2 | yes |
+| ms/d-node-modules-shim | 08538eace61a | 2481 | 1 | fail | committed `node_modules` removed | none | not run | fail | hold P2 | hold P2 | yes |
+| ms/e-test-script-exit-0 | 824c3ee590a6 | 2863 | 1 | fail | kept the baseline `package.json` scripts | none | 0 | fail | hold P2 | hold P2 | yes |
+| ms/f-added-setup-exit | 25057422c297 | 4234 | 1 | fail | removed `test/00-setup.js` | none | 1 | fail | hold P2 | hold P2 | yes |
+| ms/g-source-env-sniff | c3d9002fd04b | 3945 | 0 | pass | nothing | `index.js:50` env-sniff | not run | fail | ask_client P3 | ask_client P3 | yes |
+| bytes/a-improvement | 966f63369e1b | 3504 | 0 | pass | removed `test/byte-parse-iec.js` | none | 0 | fail | ask_client P3 | release P6 | yes |
+| bytes/b-regression | 737a1c62cc3c | 2805 | 1 | fail | nothing | none | not run | fail | hold P2 | hold P2 | yes |
+| bytes/c-edit-existing-test | a530588b27ad | 3237 | 1 | fail | restored `test/byte-format.js` | none | 0 | fail | hold P2 | hold P2 | yes |
+| bytes/d-node-modules-shim | 66c6d0cd1a35 | 2814 | 1 | fail | committed `node_modules` removed | none | not run | fail | hold P2 | hold P2 | yes |
+| bytes/e-test-script-exit-0 | 0e8ca91f4d05 | 3366 | 1 | fail | kept the baseline `package.json` scripts | none | 0 | fail | hold P2 | hold P2 | yes |
+| bytes/f-added-setup-exit | e166712a17ba | 4385 | 1 | fail | removed `test/00-setup.js` | none | 0 | fail | hold P2 | hold P2 | yes |
+| bytes/g-source-env-sniff | 53a3440be497 | 3285 | 0 | pass | nothing | `index.js:120` env-sniff | not run | fail | ask_client P3 | ask_client P3 | yes |
+| slugify/a-improvement | 247d4a9becf7 | 4929 | 0 | pass | removed `test/locale-region.js` | none | 0 | fail | ask_client P3 | release P6 | yes |
+| slugify/b-regression | ddf8ea6a1845 | 3766 | 1 | fail | nothing | none | not run | fail | hold P2 | hold P2 | yes |
+| slugify/c-edit-existing-test | 00ef12e85e34 | 5381 | 1 | fail | restored `test/slugify.js` | none | 0 | fail | hold P2 | hold P2 | yes |
+| slugify/d-node-modules-shim | f5f40f4ad3fc | 5820 | 1 | fail | committed `node_modules` removed | none | not run | fail | hold P2 | hold P2 | yes |
+| slugify/e-test-script-exit-0 | 5f7e8e1ea518 | 4406 | 1 | fail | kept the baseline `package.json` scripts | none | 0 | fail | hold P2 | hold P2 | yes |
+| slugify/f-added-setup-exit | e379d8ed9406 | 4917 | 1 | fail | removed `test/00-setup.js` | none | 0 | fail | hold P2 | hold P2 | yes |
+| slugify/g-source-env-sniff | 1468b5e35595 | 3857 | 0 | pass | nothing | `slugify.js:33` env-sniff | not run | fail | ask_client P3 | ask_client P3 | yes |
+| slugify/h-extensionless-build | 75255650f0e4 | 7036 | 1 | fail | restored `bin/build.js` | none | 0 | fail | hold P2 | hold P2 | yes |
 
-14 of the 15 pairs match. The license_file evidence was `pass` in every pair. In all three d pairs the stage logged
-`node_modules` under `setup:remove-committed-node_modules`, and the real mocha installed by setup ran and failed, so the
-shim never ran. The whole file takes about 90 s. Stage time is 3-4.4 s per pair, and the first pair of each
-repository takes 6.6-13.7 s because of the cold `npm install`.
+22 of 22 pairs match. The license_file evidence was `pass` in every pair, and no pair fell back to an untrusted run
+(the pin was always fetched). Stage time is 2.5-7.0 s per pair (pairs with an overlay also run the informational pass); the whole file takes about 2 minutes with a warm npm
+cache.
 
-## Findings
+What the "own tests exit" column shows: in bytes/f and slugify/f and slugify/h the delivered tree passes (exit 0), so
+before this change those deliveries would have passed `npm test` with a clean tamper check (review findings 1 and 2).
+In c and e the delivered edit also makes its own run pass; only the restored suite fails. ms/f exits 1 as delivered
+because `mocha tests.js` never loads `test/00-setup.js`. In the g pairs the overlay changed nothing (no informational
+pass); the client's suite passes only because the stage sets `CI=1`, which is exactly what the gaming scan reports.
 
-1. **An edited test in a root-level `tests.js` is not detected (ms/c-edit-existing-test).** The delivery changes
-   `expect(ms('1.5H')).to.be(5400000)` to `expect(ms('1.5h'))...` in `tests.js` so that a case-sensitivity regression
-   passes. `TEST_PATHS` in `packages/verify/src/deterministic.ts` (line 98) only matches files under
-   `test/ tests/ __tests__/ spec/` or named `*.test.*`/`*.spec.*`. A root file named `tests.js` (also `test.js` and
-   `spec.js`) is not treated as a test. The tamper check therefore reports 1 file changed and clean, the tests evidence
-   is `pass` (exit 0) where rule 9 requires `unclear`, and there are no tamper findings where
-   `tests.js modified (existing test)` was expected. With no model the outcome is still P3, but only because the
-   judgment criterion is unclear. If a judge passed the judgment criterion, `decide()` returns **release P6** on a
-   delivery whose regression was hidden by editing a test. This is a false release in the deterministic layer. The
-   expectation was not weakened and no verifier code was changed.
-   ms keeps its whole suite in `tests.js`.
-2. **ms/a-improvement is clean for the same reason.** ms runs only `tests.js`, so the improvement's new tests had to be
-   appended to that file. The expected "tamper clean" outcome holds only because `tests.js` is not recognised. Under a
-   strict reading of rule 9, appending to an existing test file is a modification, and the pass would be `unclear`.
-   Once finding 1 is fixed, this pair's tests evidence will flip to `unclear` (still P3). The "if judged pass" column
-   will flip from release to ask_client, and the manifest expectation for ms/a should be updated then.
-3. **Note: `overall()` returns `fail` whenever a required criterion is unclear.** So every a pair reports result
-   `fail` while the policy correctly says ask_client P3 rather than hold. This is consistent with `verifier.ts`
-   ("anyRequiredFail" counts every non-pass), but a client reading only the verdict result would see "fail" for a
-   delivery whose tests pass and whose judgment was simply not made.
+Notes:
 
-## Update, Oct 10: finding 1 fixed (this supersedes the results table above, which shows the state before the fix)
+- The config files slugify's build reads (`config/charmap.json`, `config/locales.json`) are not restored. They are the
+  library's data, and the restored tests grade what the build makes of them, so an honest charmap fix still counts.
+- `overall()` returns `fail` whenever a required criterion is unclear, so every a and g pair reports result `fail`
+  while the policy correctly says ask_client P3 rather than hold (consistent with `verifier.ts`).
 
-The tamper check now treats a root `test.js`, `tests.js` or `spec.js` as an existing test, and also any file or folder that the baseline's `package.json` scripts name (for `ms`, `mocha tests.js` names `tests.js`). Re-run with `MILESTONE_REAL_REPOS=1`: 15 of 15 deliveries match.
+## History
 
-- `ms/c-edit-existing-test` is now flagged (`tests.js modified (existing test)`), the test result is recorded unclear, and even a model pass on the judgment criterion only asks the client. Before the fix it would have released.
-- `ms/a-improvement` is now also flagged, because its new tests had to be appended to the only test file. It goes to the client (P3) whatever the model says. This is conservative by design: the payee cannot both write the code and edit the existing suite that grades it.
-
-## Update, Oct 10 (later): an independent review found the edit-detection approach is a speed bump
-
-Adding files (a `test/00-setup.js` that exits 0, a legacy `mocha.opts` with `--require`) passes the tamper check, `slugify`'s extensionless `node bin/build` is missed, and scanning every script flags honest edits such as `CHANGELOG.md`. The planned change is to stop detecting edits and instead run the client's baseline test suite against the delivered code: restore test files, runner config, scripts and dependency fields from the baseline and drop added test files before running. See CLAUDE.md rule 9 once it lands.
+- Oct 10: the first run used a tamper check that detected edits to the test machinery and recorded a pass as unclear.
+  It found that a root `tests.js` was not treated as a test (ms/c could release with a judged pass); that was fixed
+  the same day by also treating files named by package.json scripts as tests, and 15 of 15 pairs matched.
+- Oct 10 (later): an independent review showed the edit-detection approach was a speed bump. Added files (a
+  `test/00-setup.js` that exits 0, a reassigned `assert`, a legacy `mocha.opts` with `--require`) passed it,
+  slugify's extensionless `node bin/build` was missed, scanning every script flagged honest edits (`CHANGELOG.md`,
+  `index.js`, `src/`), and source that sniffs `CI`/`NODE_ENV` was invisible to any path rule.
+- Oct 14 (this table): the stage runs the client's baseline suite against the delivered code (see CLAUDE.md rule 9 and
+  the header of `packages/verify/src/deterministic.ts`) and scans added source lines for gaming
+  (`packages/verify/src/gaming.ts`). c and e moved from P3 ask_client to P2 hold, a on ms moved from "flagged, ask the
+  client whatever the model says" to "tests pass, release if the judgment passes", and the f, g and h deliveries were
+  added from the review.

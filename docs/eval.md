@@ -41,7 +41,7 @@ Optional case fields. When a field is absent the default applies, which is what 
 | `milestone` | `{ amountMinor, currency }` | 100.00 USD (10000) |
 | `toolCalls` | the run's tool calls (`{ tool, input, ok }`), for the evd_diff attach rule | none |
 | `uploads` | `[{ name, base64 }]` delivered files. `runUploadStage()` runs on the real bytes and must produce exactly the case's evidence (id, criterion_id, kind, status) | none |
-| `tamper` | `{ changes, findings }`. `findTampering(changes)` must equal `findings`. With findings, no test/build evidence may be a pass and `evd_tamper_check` must be unclear; without them it must be pass | none |
+| `tamper` | `{ changes, restored, removed }`. `planOverlay(changes)` (the baseline suite, rule 9) must restore and remove exactly those paths; `evd_tamper_check` must be a pass that names each of them, every test/build criterion must carry a deterministic status, and an informational `evd_*_delivered` item must carry none. See "Tamper cases" below | none |
 
 So the upload and tamper labels are checked against the code twice. Once from the bytes or file changes to the evidence, and once from the evidence to the decision.
 
@@ -63,7 +63,7 @@ The original 22 cases have no `ruleIds`, and they cannot be edited. Their rule l
 | Upload: image judgment, uncited pass after view_file | upload-image-judgment-pass-uncited | P3 |
 | Upload: vision verdict cites a missing evd_file id | upload-vision-cites-missing-file | P3 |
 | evd_diff attach rule | attach-diff-after-get-diff (attached), attach-refused-failed-tool-calls (only failed calls, not attached), attach-never-for-visual (non-judgment, never attached) | P6, P3, P3 |
-| Tamper check (rule 9) | tamper-existing-test-modified (pass recorded unclear), tamper-plus-genuine-test-fail (lockfile plus a real failing test), tamper-clean-new-test-added (adding tests is fine) | P3, P2, P6 |
+| Baseline suite (rule 9) | tamper-existing-test-modified (the edited test is restored and the client's test fails), tamper-plus-genuine-test-fail (lockfile restored, the build is trusted, a real failing test), tamper-clean-new-test-added (the added test is removed for the graded run and shown as information) | P2, P2, P6 |
 | P0 no criteria | p0-no-criteria, p0-beats-injection | P0 |
 | P4 per-release cap | p4-cap-all-pass, p4-cap-beats-optional-fail | P4 |
 | Confidence threshold | borderline-confidence-075, boundary-confidence-080, threshold-exactly-at-090 (contract threshold 0.9), optional-fail-low-confidence | P3, P6 |
@@ -83,6 +83,16 @@ Totals over the 50 cases:
 | Cases | 13 | 5 | 8 | 24 |
 
 Criterion kinds used: test, judgment, upload, build, file, visual (all six). Nine cases expect `suspectedInjection: true`.
+
+## Tamper cases (rule 9), changed Oct 14
+
+The deterministic stage no longer detects edits to the test machinery and distrusts the pass. It runs the client's baseline suite against the delivered code: test files, runner config, scripts, dev dependencies and lockfiles come back from the baseline, test files the delivery added are removed for the graded run, and the delivery's own tests run afterwards as information that never decides (`evd_<criterion>_delivered`, no status, no criterion). `evd_tamper_check` keeps its id and now reads `baseline suite: ran the baseline suite from ...; restored ...; removed ...`; it is unclear only when no client suite could run (a baseline that cannot be fetched, a root commit with none). The three tamper cases were rewritten to the evidence the new stage produces; this is the one exception to the append-only rule, made because the old evidence described a stage that no longer exists. What changed in each:
+
+- `tamper-existing-test-modified`: the meaning changed. Before, the edited test's pass was recorded unclear and the case expected P3 / ask_client. Now `test/invoice.test.js` is restored, the client's test fails against the delivered code (`evd_tests` fail), the delivery's edited test passes only in the informational pass, and the case expects **P2 / hold** (result fail, amount 0). `tamper.findings` became `tamper.restored: ["test/invoice.test.js"]`.
+- `tamper-plus-genuine-test-fail`: same outcome (P2 / hold). The lockfile is restored instead of making the build untrusted, so `evd_build` is now a trusted pass; the test failure decides. `tamper.restored: ["package-lock.json"]`.
+- `tamper-clean-new-test-added`: same outcome (P6 / release). The added `test/export.test.js` is removed for the graded run (`tamper.removed`), the client's suite passes, and the new test's own run is an informational item.
+
+The first change moves one case from P3 to P2: the totals table above should read P2 9, P3 11, and the actions hold 9, ask_client 23 (only the tamper section is edited in this change). `eval-coverage.test.ts` still passes: every rule appears at least twice and there are no false releases. Gaming-scan hits (source that sniffs `CI`/`NODE_ENV`/`npm_lifecycle_*` or patches assertions, `packages/verify/src/gaming.ts`) have no eval case yet; they are covered by `test/gaming.test.ts`, `test/deterministic.test.ts` and the real-repo `g-source-env-sniff` deliveries.
 
 ## What the code does today (labelled as is, not changed)
 

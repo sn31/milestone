@@ -12,7 +12,7 @@ The plan lives in the Claude Doc "Milestone — Build Plan" (tabs: Build Plan, I
 6. **Money is integer minor units + currency.** Balances are derived from `ledger_entries`; every `txn_id` sums to zero.
 7. **A milestone is Released only when PayPal's webhook confirms the payout**, never when the call returns.
 8. **One payout attempt per milestone.** The release job claims the payout `paypal_ops` row under a row lock before calling PayPal. If any payout item fails, is blocked, returned or reversed, the milestone goes to `held` with a `milestone.needs_operator` audit entry and is never auto-released again; an operator resolves it by hand.
-9. **The payee cannot grade their own work.** The deterministic stage diffs the delivery against the milestone's baseline and marks test/build passes `unclear` when existing tests, `package.json` scripts or dependencies, lockfiles, CI or runner config, or anything under `node_modules` changed. Setup runs with `--ignore-scripts` after removing `node_modules`.
+9. **The client's suite grades the work:** the deterministic stage runs the baseline's tests, runner config, scripts and dev dependencies against the delivered code, removes test files the delivery added, and flags source changes that sniff the test environment or patch assertions. Setup runs with `--ignore-scripts` after removing committed `node_modules`.
 
 ## Known limitation (accepted for the hackathon)
 Delivered code runs on the worker host under the worker's user with network access; only the child environment is cleaned. The demo repo is ours. A real deployment needs a container or microVM per verification. Say so in the submission.

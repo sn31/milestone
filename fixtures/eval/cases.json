@@ -710,17 +710,18 @@
   },
   {
     "id": "tamper-existing-test-modified",
-    "description": "Tamper check: the delivery modifies an existing test, so the deterministic stage records the passing npm test as unclear (evd_tests status unclear). The model's pass cannot override it; P3 asks the client.",
+    "description": "Baseline suite (rule 9, changed Oct 14): the delivery edits an existing test (test/invoice.test.js) along with the code it tests. The stage restores the client's test from the baseline and runs it against the delivered code; it fails, so the edit hides nothing. The delivery's own edited test passes in the informational pass, which never decides. The model's pass cannot override a deterministic fail; P2 holds. Before Oct 14 the edited test's pass was recorded unclear and this case expected P3 / ask_client.",
     "criteria": [
       { "id": "tests", "kind": "test", "description": "Test suite passes", "spec": { "command": "npm test" }, "required": true },
       { "id": "readme", "kind": "judgment", "description": "README explains setup", "spec": {}, "required": true }
     ],
     "evidence": [
-      { "id": "evd_tamper_check", "kind": "diff", "summary": "tamper check against the funding baseline 3f1c0a9e2b7d: the delivery changes what the test/build commands run: test/invoice.test.js modified (existing test)", "status": "unclear" },
-      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "tamper check: npm test exited 0, but the result is not trusted: test/invoice.test.js modified (existing test)", "status": "unclear" },
+      { "id": "evd_tamper_check", "kind": "diff", "summary": "baseline suite: ran the baseline suite from the funding baseline 3f1c0a9e2b7d (2 file(s) changed); restored test/invoice.test.js", "status": "pass" },
+      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "npm test exited 1 with the client's baseline suite; last lines:\n# pass 11\n# fail 1", "status": "fail" },
+      { "id": "evd_tests_delivered", "kind": "log", "summary": "informational, does not decide: npm test with the delivery's own tests, scripts and test config (tests) exited 0; last lines:\n# pass 12\n# fail 0" },
       { "id": "evd_readme_note", "kind": "note", "summary": "README has a Setup section with install and run steps" }
     ],
-    "tamper": { "changes": [{ "status": "M", "path": "test/invoice.test.js" }, { "status": "M", "path": "src/invoice.js" }], "findings": ["test/invoice.test.js modified (existing test)"] },
+    "tamper": { "changes": [{ "status": "M", "path": "test/invoice.test.js" }, { "status": "M", "path": "src/invoice.js" }], "restored": ["test/invoice.test.js"], "removed": [] },
     "rawVerdict": {
       "delivery_id": "dlv_33",
       "criteria": [
@@ -732,21 +733,22 @@
     "deliveryTexts": [
       { "source": "commit_message", "text": "fix: invoice totals and update tests" }
     ],
-    "expected": { "result": "fail", "action": "ask_client", "suspectedInjection": false, "ruleIds": ["P3"], "amountMinor": 0 }
+    "expected": { "result": "fail", "action": "hold", "suspectedInjection": false, "ruleIds": ["P2"], "amountMinor": 0 }
   },
   {
     "id": "tamper-plus-genuine-test-fail",
-    "description": "Tamper check: the lockfile changed, so the passing build is recorded unclear, but the test suite genuinely fails (tampering can only fake a pass, a fail stays a fail). P2 runs before P3, so the milestone is held.",
+    "description": "Baseline suite (rule 9, changed Oct 14): the delivery changes the lockfile. The stage restores the baseline package-lock.json, so the build and the tests run on the client's dependency tree: the build passes and is trusted, the test suite genuinely fails, and P2 holds. Before Oct 14 the lockfile edit made the build pass unclear (same outcome, P2 / hold).",
     "criteria": [
       { "id": "tests", "kind": "test", "description": "Test suite passes", "spec": { "command": "npm test" }, "required": true },
       { "id": "build", "kind": "build", "description": "Production build succeeds", "spec": { "command": "npm run build" }, "required": true }
     ],
     "evidence": [
-      { "id": "evd_tamper_check", "kind": "diff", "summary": "tamper check against the funding baseline 3f1c0a9e2b7d: the delivery changes what the test/build commands run: package-lock.json modified (lockfile)", "status": "unclear" },
-      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "npm test exited 1; last lines:\n# pass 16\n# fail 2", "status": "fail" },
-      { "id": "evd_build", "criterion_id": "build", "kind": "log", "summary": "tamper check: npm run build exited 0, but the result is not trusted: package-lock.json modified (lockfile)", "status": "unclear" }
+      { "id": "evd_tamper_check", "kind": "diff", "summary": "baseline suite: ran the baseline suite from the funding baseline 3f1c0a9e2b7d (2 file(s) changed); restored package-lock.json", "status": "pass" },
+      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "npm test exited 1 with the client's baseline suite; last lines:\n# pass 16\n# fail 2", "status": "fail" },
+      { "id": "evd_build", "criterion_id": "build", "kind": "log", "summary": "npm run build exited 0 with the client's baseline suite; last lines:\nbuild complete", "status": "pass" },
+      { "id": "evd_tests_delivered", "kind": "log", "summary": "informational, does not decide: npm test with the delivery's own tests, scripts and test config (tests) exited 1; last lines:\n# pass 16\n# fail 2" }
     ],
-    "tamper": { "changes": [{ "status": "M", "path": "package-lock.json" }, { "status": "M", "path": "src/export.js" }], "findings": ["package-lock.json modified (lockfile)"] },
+    "tamper": { "changes": [{ "status": "M", "path": "package-lock.json" }, { "status": "M", "path": "src/export.js" }], "restored": ["package-lock.json"], "removed": [] },
     "rawVerdict": {
       "delivery_id": "dlv_34",
       "criteria": [
@@ -762,17 +764,18 @@
   },
   {
     "id": "tamper-clean-new-test-added",
-    "description": "Tamper check: the delivery adds a new test file and edits source only; adding tests is allowed, the tamper check passes, the npm test pass is trusted and the milestone releases.",
+    "description": "Baseline suite (rule 9, changed Oct 14): the delivery adds a new test file and edits source only. The new test is removed for the graded run and runs in the informational pass, which never decides; the client's suite passes against the delivered code, so the npm test pass is trusted and the milestone releases (same outcome as before Oct 14, P6 / release).",
     "criteria": [
       { "id": "tests", "kind": "test", "description": "Test suite passes", "spec": { "command": "npm test" }, "required": true },
       { "id": "readme", "kind": "judgment", "description": "README explains setup", "spec": {}, "required": true }
     ],
     "evidence": [
-      { "id": "evd_tamper_check", "kind": "diff", "summary": "tamper check: 2 file(s) changed against the funding baseline 3f1c0a9e2b7d; no package.json scripts or dependencies, lockfiles, node_modules, existing tests, CI or runner config modified", "status": "pass" },
-      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "npm test exited 0; last lines:\n# pass 18\n# fail 0", "status": "pass" },
+      { "id": "evd_tamper_check", "kind": "diff", "summary": "baseline suite: ran the baseline suite from the funding baseline 3f1c0a9e2b7d (2 file(s) changed); removed test/export.test.js", "status": "pass" },
+      { "id": "evd_tests", "criterion_id": "tests", "kind": "log", "summary": "npm test exited 0 with the client's baseline suite; last lines:\n# pass 16\n# fail 0", "status": "pass" },
+      { "id": "evd_tests_delivered", "kind": "log", "summary": "informational, does not decide: npm test with the delivery's own tests, scripts and test config (tests) exited 0; last lines:\n# pass 18\n# fail 0" },
       { "id": "evd_readme_note", "kind": "note", "summary": "README has a Setup section with install and run steps" }
     ],
-    "tamper": { "changes": [{ "status": "A", "path": "test/export.test.js" }, { "status": "M", "path": "src/export.js" }], "findings": [] },
+    "tamper": { "changes": [{ "status": "A", "path": "test/export.test.js" }, { "status": "M", "path": "src/export.js" }], "restored": [], "removed": ["test/export.test.js"] },
     "rawVerdict": {
       "delivery_id": "dlv_35",
       "criteria": [

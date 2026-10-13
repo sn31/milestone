@@ -7,15 +7,16 @@
  * - milestone: { amountMinor, currency }, default 100.00 USD
  * - toolCalls: the run's tool calls, for the evidence-attach rule (default none)
  * - uploads: [{ name, base64 }] files; the upload stage runs on them and must produce the case's evidence ids/statuses
- * - tamper: { changes, findings }; findTampering(changes) must equal findings, and with findings no test/build
- *   evidence may carry a pass
+ * - tamper: { changes, restored, removed }; planOverlay(changes) must restore and remove exactly those paths, and the
+ *   evidence must say so: evd_tamper_check passes (the client's suite ran) and names each path, every test/build
+ *   criterion carries a deterministic status, and the informational pass (if any) carries none
  * - expected.ruleIds / expected.amountMinor / expected.attachedEvidence are checked when present
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { VerdictOutput, type CriterionSpec, type EvidenceSummary, type PolicyAction, type VerdictResult } from "@milestone/core";
 import { decide, type DecideInput } from "@milestone/money";
-import { findTampering, type FileChange } from "../src/deterministic.ts";
+import { isTestInfraPath, planOverlay, type FileChange } from "../src/deterministic.ts";
 import { detectInjection } from "../src/injection.ts";
 import { runUploadStage } from "../src/upload-checks.ts";
 import { enforce, overall, type ToolCallRecord } from "../src/verifier.ts";
@@ -31,7 +32,7 @@ interface EvalCase {
   milestone?: DecideInput["milestone"];
   toolCalls?: ToolCallRecord[];
   uploads?: Array<{ name: string; base64: string }>;
-  tamper?: { changes: FileChange[]; findings: string[] };
+  tamper?: { changes: FileChange[]; restored: string[]; removed: string[] };
   expected: {
     result: VerdictResult;
     action: PolicyAction;
@@ -88,13 +89,18 @@ describe("verifier eval set", () => {
   });
 
   const tamperCases = cases.filter((c) => c.tamper);
-  it.each(tamperCases.map((c) => [c.id, c] as const))("tamper check agrees with %s", (_id, c) => {
-    expect(findTampering(c.tamper!.changes)).toEqual(c.tamper!.findings);
-    const commandKinds = new Set(c.criteria.filter((k) => k.kind === "test" || k.kind === "build").map((k) => k.id));
-    const commandStatuses = c.evidence.filter((e) => e.criterion_id && commandKinds.has(e.criterion_id)).map((e) => e.status);
-    // A tampered delivery can never carry a trusted pass; a fail stays a fail.
-    if (c.tamper!.findings.length) expect(commandStatuses).not.toContain("pass");
-    expect(c.evidence.find((e) => e.id === "evd_tamper_check")?.status).toBe(c.tamper!.findings.length ? "unclear" : "pass");
+  it.each(tamperCases.map((c) => [c.id, c] as const))("baseline suite agrees with %s", (_id, c) => {
+    // The case's changes carry no package.json texts, so location rules alone decide (no script-named paths).
+    const plan = planOverlay(c.tamper!.changes, isTestInfraPath, () => ({ baseline: null, delivered: null }));
+    expect(plan.restore).toEqual(c.tamper!.restored);
+    expect(plan.remove).toEqual(c.tamper!.removed);
+    const suite = c.evidence.find((e) => e.id === "evd_tamper_check")!;
+    expect(suite.status).toBe("pass");
+    for (const p of c.tamper!.restored) expect(suite.summary).toContain(`restored ${p}`);
+    for (const p of c.tamper!.removed) expect(suite.summary).toContain(`removed ${p}`);
+    // The client's suite decides each command criterion; the delivery's own tests never do.
+    for (const k of c.criteria.filter((k) => k.kind === "test" || k.kind === "build")) expect(c.evidence.find((e) => e.criterion_id === k.id)?.status).toBeDefined();
+    for (const e of c.evidence.filter((e) => e.id.endsWith("_delivered"))) expect([e.status, e.criterion_id]).toEqual([undefined, undefined]);
   });
 
   it("releases nothing that should fail (false releases = 0)", () => {

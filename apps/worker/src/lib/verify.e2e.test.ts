@@ -72,6 +72,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
   let sha: string;
   let tamperSha: string;
   let laterSha: string;
+  let sniffSha: string;
   let uploads: string;
 
   beforeAll(async () => {
@@ -83,21 +84,32 @@ describe.skipIf(!run)("verify job end to end", async () => {
     process.env.MODEL_PROVIDER = "anthropic";
     process.env.REVIEW_WINDOW_SECONDS = "60";
     repo = await mkdtemp(join(tmpdir(), "milestone-e2e-repo-"));
-    await writeFile(join(repo, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0", scripts: { test: "node -e \"process.exit(0)\"", fail: "node -e \"process.exit(1)\"" } }));
-    await writeFile(join(repo, "README.md"), "# e2e\n");
+    // The client's repository: a function and the client's test for it.
+    await writeFile(join(repo, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0", scripts: { test: "node test.js", fail: "node -e \"process.exit(1)\"" } }));
+    await writeFile(join(repo, "index.js"), "exports.add = (a, b) => a + b;\n");
+    await writeFile(join(repo, "test.js"), "require('node:assert').strictEqual(require('./index.js').add(2, 2), 4);\n");
     const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=e2e@test", "-c", "user.name=e2e", ...a], { cwd: repo }).toString().trim();
-    g("init", "-q", "-b", "main"); g("add", "."); g("commit", "-qm", "feat: add readme");
+    g("init", "-q", "-b", "main"); g("add", "."); g("commit", "-qm", "chore: init");
+    // The clean delivery: a README on top (its first parent is the client's commit).
+    await writeFile(join(repo, "README.md"), "# e2e\n");
+    g("add", "."); g("commit", "-qm", "feat: add readme");
     sha = g("rev-parse", "HEAD");
-    // A delivery that makes its own tests pass by rewriting the test script.
+    // A delivery that breaks add() and hides it by rewriting the test script.
     g("checkout", "-qb", "tamper");
+    await writeFile(join(repo, "index.js"), "exports.add = (a, b) => a - b;\n");
     await writeFile(join(repo, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0", scripts: { test: "exit 0", fail: "node -e \"process.exit(1)\"" } }));
     g("add", "."); g("commit", "-qm", "chore: faster tests");
     tamperSha = g("rev-parse", "HEAD");
-    // The same script rewrite in an earlier commit, then a delivery commit that only adds a file:
-    // the first-parent diff misses it, a baseline from funding or the PR base catches it.
+    // The same rewrite in an earlier commit, then a delivery commit that only adds a file:
+    // the first-parent fallback misses it, a baseline from funding or the PR base restores the client's script.
     await writeFile(join(repo, "CHANGELOG.md"), "- faster tests\n");
     g("add", "."); g("commit", "-qm", "docs: changelog");
     laterSha = g("rev-parse", "HEAD");
+    // A delivery that breaks add() except when CI is set: the client's suite passes, the gaming scan flags it.
+    g("checkout", "-q", sha); g("checkout", "-qb", "sniff");
+    await writeFile(join(repo, "index.js"), "exports.add = (a, b) => (process.env.CI ? a + b : a - b);\n");
+    g("add", "."); g("commit", "-qm", "perf: faster add");
+    sniffSha = g("rev-parse", "HEAD");
     g("checkout", "-q", "main");
     const db = getDb();
     await db.insert(contracts).values({ id: contractId, clientId: "usr_client", freelancerId: "usr_freelancer", title: "e2e", scopeText: "e2e", currency: "USD", totalMinor: 30000, repoFullName: `e2e/${tag}`, status: "active" });
@@ -192,18 +204,39 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.decision?.ruleIds).toEqual(["P2"]);
   });
 
-  it("a delivery that edits package.json scripts: tamper check -> unclear -> needs_client, nothing released", { timeout: 120_000 }, async () => {
+  it("a delivery that rewrites the test script: the client's script runs, the regression fails -> held, nothing released", { timeout: 120_000 }, async () => {
     const t = await setup(4, [{ kind: "test", spec: { command: "npm test" }, required: true }, { kind: "file", spec: { path: "README.md" }, required: true }], { sha: tamperSha });
     await verify(t.job);
     const s = await t.state();
     const evidence = s.d.evidence as Array<{ id: string; criterion_id?: string; status?: string; summary: string }>;
-    expect(evidence.find((e) => e.id === "evd_tamper_check")).toMatchObject({ status: "unclear" });
-    expect(evidence.find((e) => e.criterion_id === `crt_e2e_${tag}_4_0`)?.summary).toMatch(/tamper check.*package\.json scripts changed/);
+    const suite = evidence.find((e) => e.id === "evd_tamper_check")!;
+    expect(suite).toMatchObject({ status: "pass" });
+    expect(suite.summary).toMatch(/^baseline suite: .*package\.json: kept the baseline scripts/);
+    expect(evidence.find((e) => e.criterion_id === `crt_e2e_${tag}_4_0`)).toMatchObject({ status: "fail" });
+    // The delivery's own script ("exit 0") ran as information only.
+    expect(evidence.find((e) => e.id === `evd_crt_e2e_${tag}_4_0_delivered`)?.summary).toMatch(/^informational, does not decide: .* exited 0/);
     const v = s.d.verdict as { criteria: Array<{ status: string }> };
-    expect(v.criteria.map((c) => c.status)).toEqual(["unclear", "pass"]);
+    expect(v.criteria.map((c) => c.status)).toEqual(["fail", "pass"]);
     expect(s.d.result).toBe("fail");
+    expect(s.m.status).toBe("held");
+    expect(s.m.decision).toMatchObject({ action: "hold", ruleIds: ["P2"], deliveryId: t.deliveryId });
+    expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
+  });
+
+  it("source that only works under CI passes the client's suite; the gaming scan sends it to the client", { timeout: 120_000 }, async () => {
+    const t = await setup(16, [{ kind: "test", spec: { command: "npm test" }, required: true }, { kind: "file", spec: { path: "README.md" }, required: true }], { sha: sniffSha, milestone: { baselineSha: sha } });
+    await verify(t.job);
+    const s = await t.state();
+    const evidence = s.d.evidence as Array<{ id: string; criterion_id?: string; status?: string; summary: string }>;
+    const crit = `crt_e2e_${tag}_16_0`;
+    expect(evidence.find((e) => e.id === `evd_${crit}`)).toMatchObject({ status: "pass" });
+    expect(evidence.find((e) => e.id === `evd_gaming_${crit}_1`)).toMatchObject({ criterion_id: crit, kind: "diff", status: "unclear" });
+    expect(evidence.find((e) => e.id === `evd_gaming_${crit}_1`)!.summary).toMatch(/^gaming scan: index\.js:1 reads process\.env\.CI/);
+    const v = s.d.verdict as { criteria: Array<{ status: string; rationale: string }> };
+    expect(v.criteria.map((c) => c.status)).toEqual(["unclear", "pass"]);
+    expect(v.criteria[0]!.rationale).toMatch(/^gaming scan/);
     expect(s.m.status).toBe("needs_client");
-    expect(s.m.decision).toMatchObject({ action: "ask_client", deliveryId: t.deliveryId });
+    expect(s.m.decision).toMatchObject({ action: "ask_client", ruleIds: ["P3"] });
     expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
   });
 
@@ -223,21 +256,21 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.status).toBe("review");
   });
 
-  it("the funding-time baseline on the milestone catches a script rewrite in an earlier commit -> needs_client", { timeout: 120_000 }, async () => {
+  it("the funding-time baseline on the milestone restores a script rewritten in an earlier commit -> held", { timeout: 120_000 }, async () => {
     const t = await setup(7, crit2, { sha: laterSha, milestone: { baselineSha: sha }, payload: { base_sha: tamperSha } });
     const { s, tamper, tests } = await tamperEvidence(t);
-    expect(tamper).toMatchObject({ status: "unclear" });
-    expect(tamper.summary).toMatch(/funding-time default branch baseline .*package\.json scripts changed/);
-    expect(tests).toMatchObject({ status: "unclear" });
-    expect(s.m.status).toBe("needs_client");
+    expect(tamper).toMatchObject({ status: "pass" });
+    expect(tamper.summary).toMatch(/^baseline suite: ran the baseline suite from the funding-time default branch baseline .*package\.json: kept the baseline scripts/);
+    expect(tests).toMatchObject({ status: "fail" });
+    expect(s.m.status).toBe("held");
     expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
   });
 
   it("with no milestone baseline, the delivery's PR base sha is used", { timeout: 120_000 }, async () => {
     const t = await setup(8, crit2, { sha: laterSha, payload: { base_sha: sha } });
     const { s, tamper } = await tamperEvidence(t);
-    expect(tamper.summary).toMatch(/pull request base baseline .*package\.json scripts changed/);
-    expect(s.m.status).toBe("needs_client");
+    expect(tamper.summary).toMatch(/pull request base baseline .*package\.json: kept the baseline scripts/);
+    expect(s.m.status).toBe("held");
   });
 
   it("a recorded baseline that cannot be fetched fails closed -> needs_client", { timeout: 120_000 }, async () => {
@@ -340,7 +373,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
     { kind: "upload" as const, spec: { pattern: "*.pdf", format: "pdf", maxPages: 12, mustContain: ["Typography"] }, required: true },
   ];
 
-  it("an upload delivery whose files pass every check -> review; no tamper check runs", { timeout: 60_000 }, async () => {
+  it("an upload delivery whose files pass every check -> review; no baseline suite runs", { timeout: 60_000 }, async () => {
     const t = await setup(11, logoCriteria, { files: { "logo.png": png(1024, 32), "style-guide.pdf": pdf(["Colour", "Typography"]) } });
     await verify(t.job);
     const s = await t.state();
@@ -376,8 +409,9 @@ describe.skipIf(!run)("verify job end to end", async () => {
 
   it("a manual repo delivery is verified exactly like a merged pull request", { timeout: 120_000 }, async () => {
     const t = await setup(14, crit2, { source: "manual", sha: tamperSha, milestone: { baselineSha: sha } });
-    const { s, tamper } = await tamperEvidence(t);
-    expect(tamper).toMatchObject({ status: "unclear" });
-    expect(s.m.status).toBe("needs_client");
+    const { s, tamper, tests } = await tamperEvidence(t);
+    expect(tamper).toMatchObject({ status: "pass" });
+    expect(tests).toMatchObject({ status: "fail" });
+    expect(s.m.status).toBe("held");
   });
 });

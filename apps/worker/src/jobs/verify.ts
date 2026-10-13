@@ -72,8 +72,8 @@ async function enterVerifying(db: Db, milestoneId: string, deliveryId: string): 
 }
 
 /**
- * The tamper check's baseline: the default branch head recorded at funding, else the PR's base commit. With
- * neither, the stage falls back to the first parent and says so in its evidence.
+ * The baseline whose test suite grades the delivery (rule 9): the default branch head recorded at funding, else the
+ * PR's base commit. With neither, the stage falls back to the first parent and says so in its evidence.
  */
 export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pick<CommitPayload, "base_sha">): { baselineSha: string; baselineSource: string } | null {
   if (milestoneBaselineSha) return { baselineSha: milestoneBaselineSha, baselineSource: "funding-time default branch" };
@@ -108,7 +108,11 @@ export function evidenceProgress(db: Db, deliveryId: string): { reset(): Promise
   };
 }
 
-/** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
+/**
+ * Deterministic stage: the client's baseline suite against the delivered code, plus the gaming scan. A delivery whose
+ * dependencies do not install (setup runs with the baseline's dev dependencies and lockfile) becomes failing evidence
+ * instead of a retry loop.
+ */
 async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null, onEvidence?: OnEvidence): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
   try {
     return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, pullRequest: { title: payload.title, body: payload.body }, ...tamperBaseline(baselineSha, payload), ...(onEvidence ? { onEvidence } : {}) });
@@ -117,7 +121,7 @@ async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], 
     if (!msg.startsWith("setup failed")) throw e; // clone/fetch problems are retried by pg-boss
     const evidence: EvidenceSummary[] = criteria
       .filter((c) => c.kind === "test" || c.kind === "build" || c.kind === "file")
-      .map((c) => ({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log" as const, status: c.kind === "file" ? ("unclear" as const) : ("fail" as const), summary: `${msg}; the delivery could not be installed` }));
+      .map((c) => ({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log" as const, status: c.kind === "file" ? ("unclear" as const) : ("fail" as const), summary: `${msg}; the delivery could not be installed with the client's baseline test setup` }));
     return { evidence, workdir: null, baseline: null };
   }
 }

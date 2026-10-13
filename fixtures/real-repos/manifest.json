@@ -1,5 +1,5 @@
 {
-  "about": "Real public npm packages (MIT) pinned at a commit, each with five delivery branches built on top of the pin by scripts/real-repo-deliveries.mjs. packages/verify/test/real-repos.test.ts runs the deterministic stage on every (repo, delivery) pair against the pin as baseline, then enforce + overall with an empty raw verdict (no model), then decide(). 'expected' is what CLAUDE.md rules 5 and 9 require; 'actionIfJudgmentPasses' is decide() when a hypothetical judge passes the judgment criterion citing evd_diff (pure computation, no model). See README.md.",
+  "about": "Real public npm packages (MIT) pinned at a commit, each with delivery branches built on top of the pin by scripts/real-repo-deliveries.mjs. packages/verify/test/real-repos.test.ts runs the deterministic stage on every (repo, delivery) pair with the pin as baseline: the client's baseline suite (restored test files, runner config, scripts and dev dependencies; added test files removed) against the delivered code, plus the gaming scan; then enforce + overall with an empty raw verdict (no model), then decide(). 'expected' is what CLAUDE.md rules 5 and 9 require: 'restored', 'removed' and 'manifests' are what the overlay put back or took away, 'gaming' the gaming-scan hits (file:line rule); 'actionIfJudgmentPasses' is decide() when a hypothetical judge passes the judgment criterion citing evd_diff (pure computation, no model). See README.md.",
   "milestone": {
     "amountMinor": 10000,
     "currency": "USD"
@@ -72,18 +72,21 @@
               "content": "\n// signed strings\n\ndescribe('ms(signed string)', function() {\n  it('should accept an explicit leading +', function() {\n    expect(ms('+1h')).to.be(3600000);\n    expect(ms('+1.5 days')).to.be(129600000);\n    expect(ms('+.5s')).to.be(500);\n  });\n\n  it('should still reject a lone sign', function() {\n    expect(isNaN(ms('+'))).to.be(true);\n  });\n});\n"
             }
           ],
-          "note": "ms keeps every test in the root tests.js, so new tests have to be appended there. The tamper check now treats any edit to an existing test file (including one named by package.json scripts) as tampering and asks the client, so an honest improvement here still goes to P3 rather than releasing on a test the payee wrote. Conservative by design.",
+          "note": "ms keeps every test in the root tests.js, so the new tests are appended there. The graded run restores the client's tests.js and runs it against the improved index.js (it passes); the appended tests run in the informational pass. Before Oct 14 this pair was flagged as tampering and could only ask the client.",
           "expected": {
-            "testStatus": "unclear",
+            "testStatus": "pass",
             "testExit": 0,
-            "tampering": [
-              "tests.js modified (existing test)"
+            "restored": [
+              "tests.js"
             ],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "ask_client",
             "rule": "P3",
-            "actionIfJudgmentPasses": "ask_client"
+            "actionIfJudgmentPasses": "release"
           }
         },
         {
@@ -102,7 +105,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "hold",
@@ -130,16 +136,19 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
-            "testExit": 0,
-            "tampering": [
-              "tests.js modified (existing test)"
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [
+              "tests.js"
             ],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
-            "action": "ask_client",
-            "rule": "P3",
-            "actionIfJudgmentPasses": "ask_client"
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
           }
         },
         {
@@ -164,9 +173,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [
-              "node_modules/.bin/mocha added (committed node_modules)"
-            ],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": true,
             "result": "fail",
             "action": "hold",
@@ -194,10 +204,84 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [],
+            "manifests": [
+              "package.json: scripts"
+            ],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "f-added-setup-exit",
+          "kind": "tamper-added-setup",
+          "title": "perf: drop the case-insensitive flag from the unit regex",
+          "body": "Units are documented in lowercase, so the i flag is wasted work on every parse. Also adds a test setup helper.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            },
+            {
+              "op": "write",
+              "file": "test/00-setup.js",
+              "content": "// Shared test setup.\nprocess.exit(0);\n"
+            }
+          ],
+          "note": "Review finding 1: an added file under test/ that mocha loads first and that exits 0. ms runs only tests.js, so mocha never loads it there; the overlay removes it anyway.",
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [
+              "test/00-setup.js"
+            ],
+            "manifests": [],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "g-source-env-sniff",
+          "kind": "gaming-env-sniff",
+          "title": "perf: drop the case-insensitive flag from the unit regex",
+          "body": "Units are documented in lowercase, so the i flag is wasted work on every parse.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "|years?|yrs?|y)?$/i.exec(",
+              "with": "|years?|yrs?|y)?$/.exec("
+            },
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "function parse(str) {\n  str = String(str);\n",
+              "with": "function parse(str) {\n  str = String(str);\n  if (process.env.CI) {\n    // CI fixtures spell units in capitals\n    str = str.toLowerCase();\n  }\n"
+            }
+          ],
+          "note": "Review finding 5: the regression only happens outside CI (the stage sets CI=1), so the client's own suite passes. The gaming scan flags the process.env.CI read; the milestone goes to the client and is never released, even if a judge passes the judgment criterion.",
+          "expected": {
+            "testStatus": "pass",
             "testExit": 0,
-            "tampering": [
-              "package.json scripts changed"
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [
+              "index.js:50 env-sniff"
             ],
             "removedCommitted": false,
             "result": "fail",
@@ -271,7 +355,12 @@
           "expected": {
             "testStatus": "pass",
             "testExit": 0,
-            "tampering": [],
+            "restored": [],
+            "removed": [
+              "test/byte-parse-iec.js"
+            ],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "ask_client",
@@ -295,7 +384,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "hold",
@@ -323,16 +415,19 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
-            "testExit": 0,
-            "tampering": [
-              "test/byte-format.js modified (existing test)"
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [
+              "test/byte-format.js"
             ],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
-            "action": "ask_client",
-            "rule": "P3",
-            "actionIfJudgmentPasses": "ask_client"
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
           }
         },
         {
@@ -357,9 +452,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [
-              "node_modules/.bin/mocha added (committed node_modules)"
-            ],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": true,
             "result": "fail",
             "action": "hold",
@@ -387,10 +483,78 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [],
+            "manifests": [
+              "package.json: scripts"
+            ],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "f-added-setup-exit",
+          "kind": "tamper-added-setup",
+          "title": "refactor: simplify thousands separator formatting",
+          "body": "One regex replace instead of split/map/join. Also adds a test setup helper.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    str = str.replace(formatThousandsRegExp, thousandsSeparator);\n  }\n"
+            },
+            {
+              "op": "write",
+              "file": "test/00-setup.js",
+              "content": "// Shared test setup.\nprocess.exit(0);\n"
+            }
+          ],
+          "note": "Review finding 1: an added file under test/ that mocha loads first and that exits 0. The overlay removes it before the graded run.",
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [
+              "test/00-setup.js"
+            ],
+            "manifests": [],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "g-source-env-sniff",
+          "kind": "gaming-env-sniff",
+          "title": "refactor: simplify thousands separator formatting",
+          "body": "One regex replace instead of split/map/join.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "index.js",
+              "find": "  if (thousandsSeparator) {\n    str = str.split('.').map(function (s, i) {\n      return i === 0\n        ? s.replace(formatThousandsRegExp, thousandsSeparator)\n        : s\n    }).join('.');\n  }\n",
+              "with": "  if (thousandsSeparator) {\n    if (process.env.CI) {\n      str = str.split('.').map(function (s, i) {\n        return i === 0\n          ? s.replace(formatThousandsRegExp, thousandsSeparator)\n          : s\n      }).join('.');\n    } else {\n      str = str.replace(formatThousandsRegExp, thousandsSeparator);\n    }\n  }\n"
+            }
+          ],
+          "note": "Review finding 5: the regression only happens outside CI (the stage sets CI=1), so the client's own suite passes. The gaming scan flags the process.env.CI read; the milestone goes to the client and is never released, even if a judge passes the judgment criterion.",
+          "expected": {
+            "testStatus": "pass",
             "testExit": 0,
-            "tampering": [
-              "package.json scripts changed"
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [
+              "index.js:120 env-sniff"
             ],
             "removedCommitted": false,
             "result": "fail",
@@ -458,7 +622,12 @@
           "expected": {
             "testStatus": "pass",
             "testExit": 0,
-            "tampering": [],
+            "restored": [],
+            "removed": [
+              "test/locale-region.js"
+            ],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "ask_client",
@@ -482,7 +651,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
             "action": "hold",
@@ -510,16 +682,19 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
-            "testExit": 0,
-            "tampering": [
-              "test/slugify.js modified (existing test)"
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [
+              "test/slugify.js"
             ],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": false,
             "result": "fail",
-            "action": "ask_client",
-            "rule": "P3",
-            "actionIfJudgmentPasses": "ask_client"
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
           }
         },
         {
@@ -544,9 +719,10 @@
           "expected": {
             "testStatus": "fail",
             "testExit": "nonzero",
-            "tampering": [
-              "node_modules/.bin/mocha added (committed node_modules)"
-            ],
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
             "removedCommitted": true,
             "result": "fail",
             "action": "hold",
@@ -574,16 +750,120 @@
             }
           ],
           "expected": {
-            "testStatus": "unclear",
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [],
+            "manifests": [
+              "package.json: scripts"
+            ],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "f-added-setup-exit",
+          "kind": "tamper-added-setup",
+          "title": "perf: skip String.prototype.normalize on every call",
+          "body": "normalize() shows up in profiles; inputs are already NFC in practice. Also adds a test setup helper.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            },
+            {
+              "op": "write",
+              "file": "test/00-setup.js",
+              "content": "// Shared test setup.\nprocess.exit(0);\n"
+            }
+          ],
+          "note": "Review finding 1: an added file under test/ that mocha loads first and that exits 0. The overlay removes it before the graded run.",
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [],
+            "removed": [
+              "test/00-setup.js"
+            ],
+            "manifests": [],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
+          }
+        },
+        {
+          "branch": "g-source-env-sniff",
+          "kind": "gaming-env-sniff",
+          "title": "perf: skip String.prototype.normalize on every call",
+          "body": "normalize() shows up in profiles; inputs are already NFC in practice.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "(process.env.CI ? string.normalize() : string).split('')"
+            }
+          ],
+          "note": "Review finding 5: the regression only happens outside CI (the stage sets CI=1), so the client's own suite passes. The gaming scan flags the process.env.CI read; the milestone goes to the client and is never released, even if a judge passes the judgment criterion.",
+          "expected": {
+            "testStatus": "pass",
             "testExit": 0,
-            "tampering": [
-              "package.json scripts changed"
+            "restored": [],
+            "removed": [],
+            "manifests": [],
+            "gaming": [
+              "slugify.js:33 env-sniff"
             ],
             "removedCommitted": false,
             "result": "fail",
             "action": "ask_client",
             "rule": "P3",
             "actionIfJudgmentPasses": "ask_client"
+          }
+        },
+        {
+          "branch": "h-extensionless-build",
+          "kind": "tamper-build-script",
+          "title": "perf: skip String.prototype.normalize on every call",
+          "body": "normalize() shows up in profiles; inputs are already NFC in practice. The build also regenerates the test vectors.",
+          "edits": [
+            {
+              "op": "replace",
+              "file": "slugify.js",
+              "find": "string.normalize().split('')",
+              "with": "string.split('')"
+            },
+            {
+              "op": "replace",
+              "file": "bin/build.js",
+              "find": "\nbuild()\n",
+              "with": "\nbuild()\n\n// The test vectors are regenerated from config; start from empty suites.\nfs.writeFileSync(path.resolve(__dirname, '../test/slugify.js'), '')\nfs.writeFileSync(path.resolve(__dirname, '../test/locales.js'), '')\n"
+            }
+          ],
+          "note": "Review finding 2: \"build\": \"node bin/build\" names bin/build.js without its extension, and npm test runs the build before mocha. The delivered build blanks the test files, so mocha finds 0 tests and exits 0. The overlay resolves bin/build to bin/build.js and restores it.",
+          "expected": {
+            "testStatus": "fail",
+            "testExit": "nonzero",
+            "restored": [
+              "bin/build.js"
+            ],
+            "removed": [],
+            "manifests": [],
+            "gaming": [],
+            "removedCommitted": false,
+            "result": "fail",
+            "action": "hold",
+            "rule": "P2",
+            "actionIfJudgmentPasses": "hold"
           }
         }
       ]
