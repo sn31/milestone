@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Money, type ToneKey } from "@/components/ui";
 import { postJson, thrownText } from "@/lib/api-client";
+import { auditTime } from "@/lib/events";
 
 interface Terms {
   principalMinor: number;
@@ -66,7 +67,7 @@ function Row({ label, children, strong = false }: { label: string; children: Rea
  * then the funded principal and the repayment that will be deducted from the release. Renders nothing for a milestone
  * that is not eligible unless `showIneligible` is set.
  */
-export function AdvanceOffer({ milestoneId, showIneligible = false }: { milestoneId: string; showIneligible?: boolean }) {
+export function AdvanceOffer({ milestoneId, showIneligible = false, compact = false }: { milestoneId: string; showIneligible?: boolean; compact?: boolean }) {
   const router = useRouter();
   const [data, setData] = useState<OfferResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -127,13 +128,15 @@ export function AdvanceOffer({ milestoneId, showIneligible = false }: { mileston
 
   if (loading)
     return (
-      <div aria-label="Loading advance offer" className="flex h-24 items-center rounded-panel border border-dashed border-hairline-strong px-4 sm:px-5">
+      <div aria-label="Loading advance offer" className={`flex items-center rounded-panel border border-dashed border-hairline-strong px-4 sm:px-5 ${compact ? "h-[188px] items-start pt-3" : "h-24"}`}>
         <p className="type-label text-fg-faint">Milestone Advance · loading offer</p>
       </div>
     );
   if (!data) return error ? <p role="alert" className="text-[13px] text-state-danger">{error}</p> : null;
   const cur = data.currency;
   const money = (minor: number, tone?: ToneKey) => <Money minor={minor} currency={cur} tone={tone} />;
+
+  if (compact) return <CompactAdvance data={data} busy={busy} error={error} onAccept={accept} />;
 
   if (data.advance) {
     const a = data.advance;
@@ -167,7 +170,7 @@ export function AdvanceOffer({ milestoneId, showIneligible = false }: { mileston
         {a.fundedAt || a.status === "offered" || error ? (
           <div className="border-t border-hairline px-4 py-2.5 sm:px-5">
             {a.status === "offered" ? <p className="font-mono text-[11px] text-fg-faint">sending via PayPal from the capital partner...</p> : null}
-            {a.fundedAt ? <p className="font-mono text-[11px] text-fg-faint tabular">funded {a.fundedAt.slice(0, 16).replace("T", " ")} UTC</p> : null}
+            {a.fundedAt ? <p className="font-mono text-[11px] text-fg-faint tabular">funded {auditTime(a.fundedAt).slice(0, 12)} UTC</p> : null}
             {error ? <p role="alert" className="text-[13px] text-state-danger">{error}</p> : null}
           </div>
         ) : null}
@@ -213,6 +216,56 @@ export function AdvanceOffer({ milestoneId, showIneligible = false }: { mileston
         <span className="text-[12.5px] text-fg-faint">Paid by our capital partner via PayPal, repaid automatically out of the release.</span>
       </div>
       {error ? <p role="alert" className="px-4 pb-3 text-[13px] text-state-danger sm:px-5">{error}</p> : null}
+    </section>
+  );
+}
+
+/**
+ * The advance as a narrow card beside the deliver form: the amount, what it costs, what is left at release, and the
+ * one action. The explanation moves to the card's title.
+ */
+function CompactAdvance({ data, busy, error, onAccept }: { data: OfferResponse; busy: boolean; error: string | null; onAccept: () => void }) {
+  const cur = data.currency;
+  const money = (minor: number, tone?: ToneKey) => <Money minor={minor} currency={cur} tone={tone} />;
+  const a = data.advance;
+  const t = data.terms;
+  if (!a && (!data.offer.eligible || !t)) return null;
+  const tone: ToneKey = a ? (a.status === "shortfall" ? "danger" : a.status === "offered" ? "funded" : "released") : "funded";
+  const state = a ? (a.status === "funded" ? "Paid to you" : a.status === "repaid" ? "Repaid" : a.status === "shortfall" ? "Shortfall" : "Paying you now") : "Get paid now";
+  const principal = a ? a.principalMinor : t!.principalMinor;
+  const fee = a ? a.feeMinor : t!.expectedFeeMinor;
+  const repayment = a ? a.repaymentMinor : t!.repaymentMinor;
+  return (
+    <section data-tone={tone} aria-live="polite" aria-label="Milestone Advance" title={data.explanation ?? a?.explanation ?? undefined} className="overflow-hidden rounded-panel border border-hairline bg-surface-sunken">
+      <div className="flex items-start justify-between gap-3 border-b border-dashed border-hairline-strong px-4 py-3">
+        <div className="min-w-0">
+          <p className="type-label text-fg-faint">Milestone Advance</p>
+          <p className="mt-1 flex items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-tone uppercase">
+            <span aria-hidden className={`size-1.5 rounded-full bg-tone ${a?.status === "offered" ? "animate-pulse-dot" : ""}`} />
+            {state}
+          </p>
+        </div>
+        <Money minor={principal} currency={cur} size="m" tone={tone} animate />
+      </div>
+      <dl className="px-4 py-1.5">
+        <Row label={a ? "Fee" : `Fee by the due date`}>{money(fee)}</Row>
+        <Row label="You receive on release" strong>
+          {money(Math.max(0, data.amountMinor - repayment))}
+        </Row>
+      </dl>
+      {a ? (
+        <p className="border-t border-hairline px-4 py-2.5 font-mono text-[11px] text-fg-faint tabular">
+          {a.status === "offered" ? "sending via PayPal from the capital partner..." : a.fundedAt ? `funded ${auditTime(a.fundedAt).slice(0, 12)} UTC · repaid from the release` : "repaid from the release"}
+        </p>
+      ) : (
+        <div className="flex items-center gap-3 border-t border-hairline px-4 py-3">
+          <Button variant="secondary" size="sm" onClick={onAccept} disabled={busy} aria-busy={busy}>
+            {busy ? "Working..." : "Get paid now"}
+          </Button>
+          <span className="text-[12px] leading-snug text-fg-faint">{pct(t!.feeBpsPerDay)}/day, repaid from the release</span>
+        </div>
+      )}
+      {error ? <p role="alert" className="px-4 pb-3 text-[13px] text-state-danger">{error}</p> : null}
     </section>
   );
 }

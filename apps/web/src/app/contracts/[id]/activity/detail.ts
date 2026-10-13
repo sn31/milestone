@@ -20,18 +20,3 @@ export function redactDetail(event: string, detail: unknown, canSeeDraft: boolea
 
 /** Whether there is anything to open: not null, and not an empty object. */
 export const hasDetail = (d: unknown) => d !== null && d !== undefined && !(typeof d === "object" && Object.keys(d as object).length === 0);
-
-/** The grid's Detail column ships this, not the detail itself: the full object is fetched when a row is opened. */
-export const SUMMARY_MAX = 200;
-
-/** `key=value  key=value`, nested values as JSON, cut to SUMMARY_MAX characters. */
-export function summarizeDetail(detail: unknown): string {
-  if (detail === null || detail === undefined) return "";
-  const text =
-    typeof detail !== "object"
-      ? String(detail)
-      : Object.entries(detail as Record<string, unknown>)
-          .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? JSON.stringify(v) : String(v)}`)
-          .join("  ");
-  return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text;
-}

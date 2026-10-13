@@ -1,10 +1,18 @@
 import { isModelConfigured } from "@milestone/verify";
 import type { Metadata } from "next";
 import { Button, PageHeader, Panel, StateGlyph, cx } from "@/components/ui";
+import { UseExample } from "./use-example";
 
 export const metadata: Metadata = { title: "New contract" };
 
 const CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD"] as const;
+
+/** The placeholder brief; "Use the example" puts it in the form. */
+const EXAMPLE_TITLE = "Signup flow for the landing page";
+const EXAMPLE_SCOPE =
+  "Build a signup flow for our landing page.\n\n" +
+  "A form with email and password and inline validation, an API endpoint that creates the account, and a confirmation page that echoes the email.\n\n" +
+  "Tests for the new endpoint. Update the README with setup steps.";
 
 /** Inline mono control in the composer's footer: no box, a hairline underline that strengthens on hover and focus. */
 const inline =
@@ -55,15 +63,18 @@ export default async function NewContract({ searchParams }: PageProps<"/contract
         <form action="/api/contracts" method="post" aria-label="Contract scope">
           <Panel padded={false} className="overflow-hidden">
             <div className="border-b border-hairline px-5 pt-5 pb-4 sm:px-6">
-              <label htmlFor="title" className="type-label text-fg-faint">
-                Title <span className="normal-case tracking-normal">(optional)</span>
-              </label>
+              <div className="flex items-center justify-between gap-4">
+                <label htmlFor="title" className="type-label text-fg-faint">
+                  Title <span className="normal-case tracking-normal">(optional)</span>
+                </label>
+                <UseExample title={EXAMPLE_TITLE} scope={EXAMPLE_SCOPE} />
+              </div>
               <input
                 id="title"
                 name="title"
                 maxLength={120}
                 autoComplete="off"
-                placeholder="Signup flow for the landing page"
+                placeholder={EXAMPLE_TITLE}
                 className="type-display-s mt-2 block w-full border-0 bg-transparent p-0 text-fg placeholder:text-fg-faint/70 focus-visible:outline-none"
               />
             </div>
@@ -77,11 +88,7 @@ export default async function NewContract({ searchParams }: PageProps<"/contract
                 name="scope"
                 required
                 rows={12}
-                placeholder={
-                  "Build a signup flow for our landing page.\n\n" +
-                  "A form with email and password and inline validation, an API endpoint that creates the account, and a confirmation page that echoes the email.\n\n" +
-                  "Tests for the new endpoint. Update the README with setup steps."
-                }
+                placeholder={EXAMPLE_SCOPE}
                 className="block min-h-[300px] w-full resize-y border-0 bg-surface-sunken/60 px-5 py-5 text-[16px] leading-[1.7] text-fg placeholder:text-fg-faint/80 focus-visible:bg-surface-sunken focus-visible:outline-none sm:px-6"
               />
               <span aria-hidden className="pointer-events-none absolute top-5 left-0 h-8 w-[2px] rounded-full bg-hairline-strong" />
@@ -162,7 +169,7 @@ export default async function NewContract({ searchParams }: PageProps<"/contract
           <p className="mt-8 border-t border-hairline pt-4 font-mono text-[11px] leading-relaxed text-fg-faint">
             {compilesWithModel
               ? "Compiled by the model; the policy that releases money is fixed code, not the model."
-              : "No model key is set, so a three-milestone demo contract is drafted from your total."}
+              : "Drafting from a template: three milestones split from your total. With a model connected, the compiler reads your scope."}
           </p>
         </aside>
       </div>

@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { cx } from "./cx";
 import { StateGlyph } from "./state-pill";
-import { VERDICT_GLYPH, verdictTone, type ToneKey } from "./states";
+import { VERDICT_GLYPH, verdictTone, type GlyphKey, type ToneKey } from "./states";
 
 export interface ReceiptProps {
   /** Serif heading, e.g. "Verdict". */
@@ -47,16 +47,25 @@ export interface ReceiptRowProps {
   meter?: ReactNode;
   /** <EvidenceChip>s torn off under the row. */
   children?: ReactNode;
+  /** The word printed in the status column instead of the status (e.g. "clean", "client"). */
+  statusLabel?: string;
+  /** The row's tone instead of the status's (e.g. needs for a judgment left to the client). */
+  tone?: ToneKey;
+  /** The glyph instead of the status's. */
+  glyph?: GlyphKey;
 }
 
-/** One criterion on the receipt: label, dotted leader, gauge and status in mono; rationale and evidence underneath. */
-export function ReceiptRow({ label, status, confidence, kind, detail, required, meter, children }: ReceiptRowProps) {
-  const tone = verdictTone(status);
+/**
+ * One criterion on the receipt: label, dotted leader, gauge and status in mono; rationale and evidence underneath. The
+ * status sits in a fixed 8ch column so PASS, FAIL, UNCLEAR and CLIENT line up down the receipt.
+ */
+export function ReceiptRow({ label, status, confidence, kind, detail, required, meter, children, statusLabel, tone: toneOverride, glyph }: ReceiptRowProps) {
+  const tone = toneOverride ?? verdictTone(status);
   return (
     <div data-tone={tone} className="border-b border-dashed border-hairline py-3.5 last:border-b-0">
       <div className="flex items-baseline gap-3">
         <span className="mt-[3px] grid size-4 shrink-0 place-items-center self-start rounded-chip bg-tone-soft text-tone">
-          <StateGlyph glyph={VERDICT_GLYPH[status]} className="size-[9px]" />
+          <StateGlyph glyph={glyph ?? VERDICT_GLYPH[status]} className="size-[9px]" />
         </span>
         <span className="min-w-0 text-[14px] text-fg">
           {kind ? <span className="type-label mr-2 text-[10px] text-fg-faint">{kind}</span> : null}
@@ -65,8 +74,8 @@ export function ReceiptRow({ label, status, confidence, kind, detail, required, 
         </span>
         <span aria-hidden className="leader hidden sm:block" />
         {meter ? <span className="hidden shrink-0 self-center sm:block">{meter}</span> : null}
-        <span className="ml-auto w-[4.5ch] shrink-0 text-right font-mono text-[12px] uppercase tracking-[0.08em] text-tone tabular sm:ml-0">
-          {status}
+        <span className="ml-auto w-[8.5ch] shrink-0 text-right font-mono text-[12px] uppercase tracking-[0.08em] whitespace-nowrap text-tone tabular sm:ml-0">
+          {statusLabel ?? status}
           {confidence !== undefined ? <span className="ml-2 text-fg-muted">{confidence.toFixed(2)}</span> : null}
         </span>
       </div>
@@ -125,6 +134,8 @@ export interface StampProps {
   note?: ReactNode;
   /** md: the receipt's foot (two lines, pressed in on mount). sm: one inked line for a folded receipt's summary. */
   size?: "sm" | "md";
+  /** What happened after the decision, inked under it (e.g. "Approved by Casey · Oct 8 15:13"). */
+  countersign?: ReactNode;
   className?: string;
 }
 
@@ -132,33 +143,34 @@ const ACTION_TONE: Record<string, ToneKey> = { release: "released", partial: "pa
 const ACTION_LABEL: Record<string, string> = { release: "Release", partial: "Partial", hold: "Hold", ask_client: "Ask client" };
 
 /** The policy decision, inked like a rubber stamp: double-ruled, tilted 4 degrees, pressed in once on mount. */
-export function Stamp({ action, ruleIds, note, size = "md", className }: StampProps) {
+export function Stamp({ action, ruleIds, note, size = "md", countersign, className }: StampProps) {
   const tone = ACTION_TONE[action] ?? "neutral";
   if (size === "sm") {
     return (
       <span
         data-tone={tone}
-        className={cx("inline-flex -rotate-2 rounded-chip border-[1.5px] border-[color:var(--tone)] p-[2px] opacity-90", className)}
+        className={cx("inline-flex -rotate-2 rounded-chip border-[1.5px] border-[color:var(--tone)] p-[2px]", className)}
       >
-        <span className="flex items-center gap-2 rounded-[2px] border border-[color:var(--tone)] px-2 py-[3px] font-mono text-[10.5px] leading-none tracking-[0.16em] whitespace-nowrap text-tone uppercase tabular">
+        <span className="flex items-center gap-2 rounded-[2px] border border-[color:var(--tone)] px-2 py-[3px] font-mono text-[10.5px] leading-none tracking-[0.16em] whitespace-nowrap text-tone-ink uppercase tabular">
           <span className="text-[11.5px] tracking-[0.2em]">{ACTION_LABEL[action] ?? action}</span>
-          {ruleIds?.length ? <span className="opacity-80">{ruleIds.join(" · ")}</span> : null}
+          {ruleIds?.length ? <span>{ruleIds.join(" · ")}</span> : null}
           {/* The amount is on the station already; on a phone the stamp keeps to the action and rule. */}
-          {note ? <span className="opacity-80 max-sm:hidden">{note}</span> : null}
+          {note ? <span className="max-sm:hidden">{note}</span> : null}
         </span>
       </span>
     );
   }
   return (
-    <div data-tone={tone} className={cx("inline-block animate-stamp rounded-chip border-2 border-[color:var(--tone)] p-[3px] opacity-90", className)}>
+    <div data-tone={tone} className={cx("inline-block animate-stamp rounded-chip border-2 border-[color:var(--tone)] p-[3px]", className)}>
       <div className="rounded-[2px] border border-[color:var(--tone)] px-3 py-2 text-tone">
         <p className="font-mono text-[15px] leading-none tracking-[0.22em] uppercase">{ACTION_LABEL[action] ?? action}</p>
         {ruleIds?.length || note ? (
-          <p className="mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] tracking-[0.12em] uppercase opacity-80">
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] tracking-[0.12em] uppercase text-tone-ink">
             {ruleIds?.length ? <span>rule {ruleIds.join(" · ")}</span> : null}
             {note ? <span>{note}</span> : null}
           </p>
         ) : null}
+        {countersign ? <p className="mt-2 border-t border-dashed border-[color:var(--tone)] pt-1.5 font-mono text-[10px] tracking-[0.1em] text-tone-ink uppercase">{countersign}</p> : null}
       </div>
     </div>
   );

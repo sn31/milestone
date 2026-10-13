@@ -1,13 +1,13 @@
 import type { GlyphKey, ToneKey } from "@/components/ui/states";
 
 /**
- * Dispute events by name (the patterns below would leave most of them neutral). A dispute holds the milestone's money
- * in question, the copilot's draft is the verifier at work, evidence sent waits on PayPal's review, an accepted claim is
- * a refund, and the outcome itself is not in the event name.
+ * Dispute events by name (the patterns below would leave most of them neutral). An open dispute waits on an answer
+ * (needs), the drafted pack is a record of that wait, evidence sent waits on PayPal's review, an accepted claim is a
+ * refund, and the outcome itself is not in the event name. Review 3, item 14: violet stays with the verifier at work.
  */
 const DISPUTE_EVENTS: Record<string, { tone: ToneKey; glyph?: GlyphKey }> = {
-  "dispute.opened": { tone: "held" },
-  "dispute.drafted": { tone: "verifying" },
+  "dispute.opened": { tone: "needs" },
+  "dispute.drafted": { tone: "needs", glyph: "check" },
   "dispute.updated": { tone: "needs" },
   "dispute.evidence_submitted": { tone: "review" },
   "dispute.claim_accepted": { tone: "partial" },
@@ -31,7 +31,9 @@ export function eventTone(event: string): ToneKey {
   if (/held|veto|client\.hold|waiting|skipped|withdrawn/.test(e)) return "held";
   if (/refund|partial/.test(e)) return "partial";
   if (/released|payout|repaid|settled/.test(e)) return "released";
-  if (/verif|verdict|delivery|github/.test(e)) return "verifying";
+  // Only the verifier at work is violet; a delivery arriving or a verdict stored is a record, not a live state.
+  if (/verifying/.test(e)) return "verifying";
+  if (/verdict|delivery|github/.test(e)) return "draft";
   if (/^contract\./.test(e)) return /approved/.test(e) ? "funded" : "draft";
   if (/review|approve|policy|claimed/.test(e)) return "review";
   if (/fund|capture|order|receipt|advance/.test(e)) return "funded";
@@ -67,3 +69,6 @@ export function auditTime(at: Date | string, short = false): string {
   const d = typeof at === "string" ? new Date(at) : at;
   return Number.isNaN(d.getTime()) ? String(at) : (short ? TIME_SHORT : TIME).format(d).replace(",", "");
 }
+
+/** The audit log's system actors, as people read them (user ids go through ACTOR_NAMES). */
+export const SYSTEM_ACTOR_NAMES: Record<string, string> = { paypal: "PayPal", policy: "Policy", verifier: "Verifier", system: "System", worker: "Worker" };

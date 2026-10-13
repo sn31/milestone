@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cx } from "./cx";
 import { EASE } from "./motion";
 import type { ToneKey } from "./states";
@@ -18,7 +18,7 @@ export interface LogStreamProps {
   /** Max height in px before it scrolls. Default 280. */
   maxHeight?: number;
   /** Caption in the well's header, e.g. "verifier · npm test". */
-  title?: string;
+  title?: ReactNode;
   className?: string;
 }
 

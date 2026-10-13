@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui";
+import { Button, cx } from "@/components/ui";
 import { postJson, type JsonReply } from "@/lib/api-client";
 
 // Minimal local types for the PayPal JS SDK v6 surface we use. Kept local (not a global Window
@@ -130,7 +130,35 @@ async function fetchMode(): Promise<PayPalMode> {
   }
 }
 
-export function FundButton(props: { milestoneId: string; currency: string; amountLabel: string; paypalEnv?: PayPalEnv; mode?: string | undefined }) {
+/** Brings a milestone's station into view (the rail's <li id={milestoneId}>), so the funding lands where the viewer looks. */
+function scrollToStation(milestoneId: string) {
+  const el = document.getElementById(milestoneId);
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  if (r.top < 80 || r.top > window.innerHeight * 0.6) el.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+}
+
+/**
+ * PayPal's own button (the v6 SDK's <paypal-button> web component), unmodified: we style only the slot around it. The
+ * SDK renders its branded button and fires click; we start the payment session from that click.
+ */
+function PayPalSdkButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+  // A callback ref (state), so nothing reads a ref during render.
+  const [el, setEl] = useState<HTMLElement | null>(null);
+  const handler = useRef(onClick);
+  useEffect(() => {
+    handler.current = onClick;
+  }, [onClick]);
+  useEffect(() => {
+    if (!el) return;
+    const listener = () => handler.current();
+    el.addEventListener("click", listener);
+    return () => el.removeEventListener("click", listener);
+  }, [el]);
+  return createElement("paypal-button", { ref: setEl, type: "pay", "aria-disabled": disabled ? "true" : undefined, class: "block w-full" });
+}
+
+export function FundButton(props: { milestoneId: string; currency: string; amountLabel: string; paypalEnv?: PayPalEnv; mode?: string | undefined; quiet?: boolean }) {
   const { milestoneId, currency, amountLabel, paypalEnv = "sandbox" } = props;
   const router = useRouter();
   const [rawPhase, setPhase] = useState<Phase>("loading");
@@ -140,6 +168,8 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
   // Set while a refused start waits for the tab to come to the front, to try once more then.
   const retryOnVisible = useRef<(() => void) | null>(null);
   const sdk = useRef<PayPalSdkInstance | null>(null);
+  // The SDK registered its <paypal-button> element: render PayPal's own button instead of ours.
+  const [branded, setBranded] = useState(false);
   // From the prop when milestone-actions passes it; otherwise asked from the server once.
   const propMode: PayPalMode | undefined = props.mode === undefined || props.mode === "" ? undefined : props.mode === "simulated" ? "simulated" : "sandbox";
   const [askedMode, setAskedMode] = useState<PayPalMode | undefined>(undefined);
@@ -163,6 +193,8 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
     const orderId = params.get("approved");
     if (!orderId || params.get("milestone") !== milestoneId || capturedReturns.has(orderId)) return;
     capturedReturns.add(orderId);
+    // The approve page navigated away and back: land on this station, not the top of the page, before it turns funded.
+    scrollToStation(milestoneId);
     (async () => {
       setPhase("capturing");
       try {
@@ -190,6 +222,7 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
         const methods = await inst.findEligibleMethods({ currencyCode: currency });
         if (!live) return;
         sdk.current = inst;
+        setBranded(typeof window.customElements?.get === "function" && window.customElements.get("paypal-button") !== undefined);
         setPhase(methods.isEligible("paypal") ? "ready" : "ineligible");
       } catch (e) {
         if (!live) return;
@@ -313,12 +346,60 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
     simulated ? "Fund (simulated PayPal)" :
     `Fund ${amountLabel} with PayPal`;
 
+  const showButton = phase !== "ineligible" && phase !== "unavailable" && phase !== "pending";
+  const status = (
+    <>
+      {phase === "ineligible" ? <p className="mt-2 text-[13px] text-fg-muted">PayPal is not available for {currency} payments here.</p> : null}
+      {phase === "pending" ? (
+        <p role="status" className="mt-2 flex items-center gap-2 text-[13px] text-tone">
+          <span aria-hidden className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
+          PayPal is still processing this payment. The milestone shows as funded once it completes.
+        </p>
+      ) : null}
+      {notice && !error ? (
+        <p role="status" className="mt-2 text-[13px] text-fg">
+          {notice}
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="mt-2 text-[13px] text-state-danger">
+          {phase === "unavailable" ? `PayPal could not be loaded: ${error}` : error}
+        </p>
+      ) : null}
+    </>
+  );
+
+  // A later milestone on the same contract: one line and a secondary button, so the page keeps one primary.
+  if (props.quiet) {
+    return (
+      <section data-tone="funded" data-paypal-mode={mode ?? "unknown"} aria-label="Fund this milestone" className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0 text-[13px] text-fg-muted">
+          <p>
+            Fund when you are ready{simulated ? <span className="ml-2 font-mono text-[10.5px] tracking-[0.1em] text-fg-faint uppercase">simulated</span> : null}
+            {mode === "sandbox" ? <span className="ml-2 font-mono text-[10.5px] tracking-[0.1em] text-fg-faint uppercase">PayPal sandbox</span> : null}
+          </p>
+          {status}
+        </div>
+        {showButton ? (
+          <Button variant="secondary" size="sm" onClick={onClick} disabled={busy} aria-busy={busy} data-paypal-mode={mode ?? "unknown"}>
+            {busy ? label : <>Fund <span className="font-mono tabular">{amountLabel}</span></>}
+          </Button>
+        ) : null}
+      </section>
+    );
+  }
+
+  // Sandbox: PayPal's checkout, with PayPal's own button in a plain slot (a solid frame, not the dashed simulated one).
+  const sandbox = mode === "sandbox";
   return (
     <section
       data-tone="funded"
       data-paypal-mode={mode ?? "unknown"}
       aria-label="Fund this milestone"
-      className="flex flex-col gap-4 rounded-panel border border-dashed border-hairline-strong px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5"
+      className={cx(
+        "flex flex-col gap-4 rounded-panel border px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5",
+        sandbox ? "border-hairline-strong bg-surface-sunken" : "border-dashed border-hairline-strong",
+      )}
     >
       <div className="min-w-0">
         <p className="type-label flex items-center gap-2 text-fg">
@@ -334,25 +415,17 @@ export function FundButton(props: { milestoneId: string; currency: string; amoun
             no real money moves
           </p>
         ) : null}
-        {phase === "ineligible" ? <p className="mt-2 text-[13px] text-fg-muted">PayPal is not available for {currency} payments here.</p> : null}
-        {phase === "pending" ? (
-          <p role="status" className="mt-2 flex items-center gap-2 text-[13px] text-tone">
-            <span aria-hidden className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
-            PayPal is still processing this payment. The milestone shows as funded once it completes.
-          </p>
+        {sandbox && phase !== "pending" ? (
+          <p className="mt-2 font-mono text-[10.5px] tracking-[0.1em] text-fg-faint uppercase">PayPal sandbox · test accounts only</p>
         ) : null}
-        {notice && !error ? (
-          <p role="status" className="mt-2 text-[13px] text-fg">
-            {notice}
-          </p>
-        ) : null}
-        {error ? (
-          <p role="alert" className="mt-2 text-[13px] text-state-danger">
-            {phase === "unavailable" ? `PayPal could not be loaded: ${error}` : error}
-          </p>
-        ) : null}
+        {status}
       </div>
-      {phase !== "ineligible" && phase !== "unavailable" && phase !== "pending" ? (
+      {showButton && sandbox && branded && phase === "ready" ? (
+        // PayPal's button guidelines: the button itself is not restyled; the slot gives it room and a fixed width.
+        <div className="w-full shrink-0 sm:w-[240px]" aria-label={`Pay ${amountLabel} with PayPal`}>
+          <PayPalSdkButton onClick={onClick} disabled={busy} />
+        </div>
+      ) : showButton ? (
         <Button
           variant="primary"
           onClick={onClick}

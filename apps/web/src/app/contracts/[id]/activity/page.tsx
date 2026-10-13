@@ -5,8 +5,10 @@ import { getDb } from "@/lib/db";
 import { AuditGrid, type AuditRow } from "@/components/audit-grid";
 import { PageHeader, Stat } from "@/components/ui";
 import { ACTOR_NAMES, getActor, isContractFreelancer } from "@/lib/session";
+import { SYSTEM_ACTOR_NAMES } from "@/lib/events";
 import { auditDetail } from "./actions";
-import { hasDetail, redactDetail, summarizeDetail } from "./detail";
+import { hasDetail, redactDetail } from "./detail";
+import { eventSentence } from "./sentence";
 import { countContractOps, disputeIdsOf } from "./paypal-ops";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +23,7 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
   const { id } = await params;
   const db = getDb();
   const [contract, actor, ms, log] = await Promise.all([
-    db.query.contracts.findFirst({ columns: { id: true, title: true, freelancerId: true }, where: (t, { eq }) => eq(t.id, id) }),
+    db.query.contracts.findFirst({ columns: { id: true, title: true, freelancerId: true, currency: true }, where: (t, { eq }) => eq(t.id, id) }),
     getActor(),
     db.query.milestones.findMany({ columns: { id: true, seq: true, title: true }, where: (t, { eq }) => eq(t.contractId, id) }),
     db.query.auditLog.findMany({ where: (t, { eq }) => eq(t.contractId, id), orderBy: (t, { desc }) => [desc(t.createdAt)] }),
@@ -29,16 +31,17 @@ export default async function ActivityPage({ params }: PageProps<"/contracts/[id
   if (!contract) notFound();
   const canSeeDraft = isContractFreelancer(actor, contract);
   const label = new Map(ms.map((m) => [m.id, `${m.seq} ${m.title}`]));
-  // Each row ships a short summary of its detail; the full detail is fetched (and redacted the same way) when opened.
+  const names: Record<string, string> = { ...ACTOR_NAMES, ...SYSTEM_ACTOR_NAMES };
+  // Each row ships its event as one sentence; the full detail is fetched (and redacted the same way) when opened.
   const rows: AuditRow[] = log.map((r) => {
     const detail = redactDetail(r.event, r.detail ?? null, canSeeDraft);
     return {
       id: r.id,
       at: r.createdAt.toISOString(),
       milestone: r.milestoneId ? (label.get(r.milestoneId) ?? r.milestoneId) : "",
-      actor: ACTOR_NAMES[r.actor] ?? r.actor,
+      actor: names[r.actor] ?? r.actor,
       event: r.event,
-      summary: summarizeDetail(detail),
+      summary: eventSentence(r.event, detail, names, contract.currency),
       hasDetail: hasDetail(detail),
     };
   });

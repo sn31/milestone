@@ -90,8 +90,8 @@ export default async function DisputesPage() {
         aside={
           listed.length ? (
             <>
-              <Stat label="Open" value={open.length} tone={open.length ? "held" : undefined} />
-              <Stat label="At stake" minor={atStake} currency={currency} tone={atStake ? "held" : undefined} />
+              <Stat label="Open" value={open.length} tone={open.length ? "needs" : undefined} />
+              <Stat label="At stake" minor={atStake} currency={currency} tone={atStake ? "needs" : undefined} />
             </>
           ) : null
         }

@@ -34,10 +34,21 @@
   --state-held: #9b5408;
   --state-needs: #875f00;
   --state-danger: #c02d40;
+  /* state inks: the state colour darkened for small text on its own 10% wash (pills, danger buttons). Review 3, item 17. */
+  --ink-draft: #525867;
+  --ink-funded: #1656a7;
+  --ink-verifying: #5d3bc5;
+  --ink-review: #08625e;
+  --ink-released: #0d6437;
+  --ink-partial: #3f610c;
+  --ink-held: #854807;
+  --ink-needs: #745200;
+  --ink-danger: #a32636;
   /* texture */
   --grain-opacity: 0.07;
   --grain-blend: multiply;
   --tone: var(--fg-muted);
+  --tone-ink: var(--fg-muted);
   color-scheme: light;
 }
 
@@ -67,6 +78,15 @@
     --state-held: #f6a53c;
     --state-needs: #ffc94d;
     --state-danger: #ff6b7a;
+    --ink-draft: var(--state-draft);
+    --ink-funded: var(--state-funded);
+    --ink-verifying: var(--state-verifying);
+    --ink-review: var(--state-review);
+    --ink-released: var(--state-released);
+    --ink-partial: var(--state-partial);
+    --ink-held: var(--state-held);
+    --ink-needs: var(--state-needs);
+    --ink-danger: var(--state-danger);
     --grain-opacity: 0.05;
     --grain-blend: screen;
     color-scheme: dark;
@@ -98,22 +118,31 @@
   --state-held: #f6a53c;
   --state-needs: #ffc94d;
   --state-danger: #ff6b7a;
+  --ink-draft: var(--state-draft);
+  --ink-funded: var(--state-funded);
+  --ink-verifying: var(--state-verifying);
+  --ink-review: var(--state-review);
+  --ink-released: var(--state-released);
+  --ink-partial: var(--state-partial);
+  --ink-held: var(--state-held);
+  --ink-needs: var(--state-needs);
+  --ink-danger: var(--state-danger);
   --grain-opacity: 0.05;
   --grain-blend: screen;
   color-scheme: dark;
 }
 
 /* Tone: any element with data-tone sets --tone for its subtree; utilities below read it. */
-[data-tone="draft"] { --tone: var(--state-draft); }
-[data-tone="funded"] { --tone: var(--state-funded); }
-[data-tone="verifying"] { --tone: var(--state-verifying); }
-[data-tone="review"] { --tone: var(--state-review); }
-[data-tone="released"] { --tone: var(--state-released); }
-[data-tone="partial"] { --tone: var(--state-partial); }
-[data-tone="held"] { --tone: var(--state-held); }
-[data-tone="needs"] { --tone: var(--state-needs); }
-[data-tone="danger"] { --tone: var(--state-danger); }
-[data-tone="neutral"] { --tone: var(--fg-muted); }
+[data-tone="draft"] { --tone: var(--state-draft); --tone-ink: var(--ink-draft); }
+[data-tone="funded"] { --tone: var(--state-funded); --tone-ink: var(--ink-funded); }
+[data-tone="verifying"] { --tone: var(--state-verifying); --tone-ink: var(--ink-verifying); }
+[data-tone="review"] { --tone: var(--state-review); --tone-ink: var(--ink-review); }
+[data-tone="released"] { --tone: var(--state-released); --tone-ink: var(--ink-released); }
+[data-tone="partial"] { --tone: var(--state-partial); --tone-ink: var(--ink-partial); }
+[data-tone="held"] { --tone: var(--state-held); --tone-ink: var(--ink-held); }
+[data-tone="needs"] { --tone: var(--state-needs); --tone-ink: var(--ink-needs); }
+[data-tone="danger"] { --tone: var(--state-danger); --tone-ink: var(--ink-danger); }
+[data-tone="neutral"] { --tone: var(--fg-muted); --tone-ink: var(--fg-muted); }
 
 @theme inline {
   --color-bg: var(--bg);
@@ -131,6 +160,7 @@
   --color-fg-inverse: var(--fg-inverse);
   --color-focus: var(--focus);
   --color-tone: var(--tone);
+  --color-tone-ink: var(--tone-ink);
   --color-state-draft: var(--state-draft);
   --color-state-funded: var(--state-funded);
   --color-state-verifying: var(--state-verifying);
@@ -232,13 +262,22 @@ button:not(:disabled),
   cursor: pointer;
 }
 
-/* Count-ups render the final value on the server and hide it until the client animates it (html.js is set in <head>). */
-.js .countup-pending {
-  opacity: 0;
-  animation: countup-failsafe 0s linear 1.6s forwards;
+/*
+ * Route loading skeletons fade in after 250ms, so a fast navigation or a role switch never flashes one (Review 3, item 19).
+ * Reduced motion zeroes the delay below, which shows the skeleton at once with no fade.
+ */
+.loading-delayed {
+  animation: loading-in 200ms cubic-bezier(0.16, 1, 0.3, 1) 250ms both;
 }
-@keyframes countup-failsafe {
+@keyframes loading-in {
+  from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* First-run band on "/": hidden before first paint once a viewer dismissed it (html[data-intro="hidden"], set in <head>). */
+[data-intro="hidden"] .intro-shown,
+:root:not([data-intro="hidden"]) .intro-hidden {
+  display: none;
 }
 
 /* ---------- utilities ---------- */
@@ -397,8 +436,5 @@ button:not(:disabled),
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
-  }
-  .js .countup-pending {
-    opacity: 1;
   }
 }

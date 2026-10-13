@@ -45,8 +45,11 @@ export function CountdownRing({ endsAt, totalSeconds, size = 124, label = "revie
   const remaining = known ? Math.max(0, end - now) : totalSeconds;
   const fraction = totalSeconds > 0 ? Math.min(1, remaining / totalSeconds) : 0;
   const closed = known && remaining === 0;
-  const stroke = 3;
-  const r = size / 2 - 10;
+  // Below 100 px the caption does not fit inside the dial: the ring keeps the time and the caption goes to aria-label.
+  const compact = size < 100;
+  const text = known ? formatCountdown(remaining) : "--:--";
+  const stroke = size < 64 ? 2.5 : 3;
+  const r = size / 2 - (size < 64 ? 7 : 10);
   const c = 2 * Math.PI * r;
   const mid = size / 2;
   return (
@@ -61,8 +64,8 @@ export function CountdownRing({ endsAt, totalSeconds, size = 124, label = "revie
         {Array.from({ length: TICKS }, (_, i) => {
           const a = (i / TICKS) * 2 * Math.PI;
           const lit = i / TICKS < fraction;
-          const r1 = mid - 3;
-          const r2 = mid - (i % 4 === 0 ? 7 : 5);
+          const r1 = mid - (size < 64 ? 1.5 : 3);
+          const r2 = r1 - (i % 4 === 0 ? (size < 64 ? 3 : 4) : 2);
           return (
             <line
               key={i}
@@ -91,8 +94,10 @@ export function CountdownRing({ endsAt, totalSeconds, size = 124, label = "revie
         />
       </svg>
       <div className="relative text-center">
-        <p className={cx("type-num-s text-[15px]", closed ? "text-fg-muted" : "text-fg")}>{known ? formatCountdown(remaining) : "--:--"}</p>
-        <p className="mt-1 font-mono text-[8.5px] tracking-[0.08em] text-tone uppercase">{closed ? closedLabel : label}</p>
+        <p className={cx("font-mono leading-none tabular", size < 64 ? (text.length > 5 ? "text-[8.5px] tracking-[-0.04em]" : "text-[10.5px] tracking-[-0.02em]") : compact ? (text.length > 5 ? "text-[11.5px]" : "text-[13.5px]") : "text-[15px]", closed ? "text-fg-muted" : "text-fg")}>
+          {text}
+        </p>
+        {compact ? null : <p className="mt-1 font-mono text-[8.5px] tracking-[0.08em] text-tone uppercase">{closed ? closedLabel : label}</p>}
       </div>
     </div>
   );

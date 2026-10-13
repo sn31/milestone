@@ -76,7 +76,8 @@ export default async function LenderPage() {
       partnerId: a.partnerId,
       clientId: cl.id,
       client: cl.name,
-      milestone: `${m.seq}. ${m.title}`,
+      // The milestone by title: its number reads as a rank in a list of advances.
+      milestone: m.title,
       milestoneStatus: m.status,
       currency: c.currency,
       amountMinor: m.amountMinor,

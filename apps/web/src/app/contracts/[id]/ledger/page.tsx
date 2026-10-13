@@ -5,6 +5,7 @@ import { asc, eq, inArray, or } from "drizzle-orm";
 import { advances, ledgerEntries, ledgerRefs, milestones } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { LedgerGrid, type LedgerRow } from "@/components/ledger-grid";
+import { txnKind } from "@/components/ledger-labels";
 import { PageHeader, Stat } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -55,12 +56,22 @@ export default async function LedgerPage({ params }: PageProps<"/contracts/[id]/
     if (m && !txnMilestone.has(e.txnId)) txnMilestone.set(e.txnId, m);
   }
 
+  // Transactions numbered in the order they were posted on this contract, and named by what their legs did: a random
+  // or long txn id tells nobody which is which, "03 fund" and "07 repayment" do (the full id stays in the chip's title).
+  const seqOf = new Map<string, number>();
+  for (const e of entries) if (!seqOf.has(e.txnId)) seqOf.set(e.txnId, seqOf.size + 1);
+  const legsOf = new Map<string, typeof entries>();
+  for (const e of entries) legsOf.set(e.txnId, [...(legsOf.get(e.txnId) ?? []), e]);
+  const kindOf = new Map([...legsOf].map(([t, legs]) => [t, txnKind(legs)]));
+
   const rows: LedgerRow[] = entries.map((e) => {
     const m = txnMilestone.get(e.txnId) ?? null;
     return {
       id: e.id,
       at: e.createdAt.toISOString(),
       txnId: e.txnId,
+      txnSeq: seqOf.get(e.txnId) ?? 0,
+      txnKind: kindOf.get(e.txnId) ?? "entry",
       milestone: m ? (label.get(m) ?? m) : "",
       account: e.account,
       direction: e.direction,

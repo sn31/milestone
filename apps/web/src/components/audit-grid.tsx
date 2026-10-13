@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, ICellRendererParams, IRowNode, PostSortRowsParams } from "ag-grid-community";
 import { Panel, StateGlyph, cx, inputClass, type LogLine } from "@/components/ui";
-import { DetailLogRow, ToggleCell, detailGridProps, expandRows, logRowHeight, toggled, useDetailGrid, type DetailCtx, type DetailRow, type ToggleCellParams } from "@/components/ui/detail-grid";
+import { DetailLogRow, ToggleCell, detailGridProps, expandRows, logRowHeight, textLines, toggled, useDetailGrid, type DetailCtx, type DetailRow, type ToggleCellParams } from "@/components/ui/detail-grid";
 import { auditTime, eventGlyph, eventTone } from "@/lib/events";
 
 export interface AuditRow {
@@ -13,7 +13,7 @@ export interface AuditRow {
   milestone: string; // "2 Title" or ""
   actor: string;
   event: string;
-  /** The detail as one short `key=value` line (the server cuts it); the full detail is loaded when the row opens. */
+  /** The event as one sentence (activity/sentence.ts); the full detail is loaded when the row opens. */
   summary: string;
   /** Whether there is any detail to open. */
   hasDetail: boolean;
@@ -48,6 +48,7 @@ function detailLines(detail: unknown): LogLine[] {
 }
 
 const LOG_MAX = 260;
+const PAGE = 20;
 const NOT_LOADED: LogLine[] = [{ text: "could not load this event's detail", tone: "err" }];
 
 const toggleParams: ToggleCellParams<AuditItem> = { label: (r) => `detail for ${r.event}`, expandable: (r) => r.hasDetail };
@@ -58,11 +59,11 @@ function AuditLogRow(p: ICellRendererParams<GridRow>) {
   return <DetailLogRow lines={r.lines ?? ["(no detail)"]} maxHeight={LOG_MAX} title={`${r.event} · ${auditTime(r.at)} UTC · ${r.actor}`} />;
 }
 
-function EventCell(p: ICellRendererParams<GridRow>) {
+function EventCell(p: ICellRendererParams<GridRow> & { narrow?: boolean }) {
   const ev = p.data?.event ?? "";
   const tone = eventTone(ev);
   const dot = ev.indexOf(".");
-  return (
+  const name = (
     <span data-tone={tone} className="inline-flex min-w-0 items-center gap-2 font-mono text-[12px]">
       <StateGlyph glyph={eventGlyph(ev)} className="text-tone" />
       <span className="truncate">
@@ -71,6 +72,14 @@ function EventCell(p: ICellRendererParams<GridRow>) {
       </span>
     </span>
   );
+  // On a phone the sentence column is hidden, so the event carries it underneath.
+  if (!p.narrow) return <div className="flex h-full min-w-0 items-center">{name}</div>;
+  return (
+    <div className="flex h-full min-w-0 flex-col justify-center gap-1 leading-tight">
+      {name}
+      <span className="line-clamp-2 pl-[18px] text-[12.5px] leading-[1.4] whitespace-normal text-fg-muted">{p.data?.summary}</span>
+    </div>
+  );
 }
 
 function MilestoneCell(p: ICellRendererParams<GridRow>) {
@@ -78,12 +87,37 @@ function MilestoneCell(p: ICellRendererParams<GridRow>) {
   if (!v) return <span className="font-mono text-[12px] text-fg-faint">contract</span>;
   const m = /^(\d+)\s+(.*)$/.exec(v);
   return (
-    <span className="truncate" title={v}>
-      {m ? <span className="mr-2 font-mono text-[11px] text-fg-faint tabular">{m[1].padStart(2, "0")}</span> : null}
-      <span className="text-fg-muted">{m ? m[2] : v}</span>
-    </span>
+    <div className="flex h-full min-w-0 items-center" title={v}>
+      <span className="truncate">
+        {m ? <span className="mr-2 font-mono text-[11px] text-fg-faint tabular">{m[1].padStart(2, "0")}</span> : null}
+        <span className="text-fg-muted">{m ? m[2] : v}</span>
+      </span>
+    </div>
   );
 }
+
+function ActorCell(p: ICellRendererParams<GridRow>) {
+  return (
+    <div className="flex h-full min-w-0 items-center" title={p.data?.actor}>
+      <span className="truncate">{p.data?.actor}</span>
+    </div>
+  );
+}
+
+/** The sentence, on up to two lines (the row grows to fit; the tooltip has the rest). */
+function SummaryCell(p: ICellRendererParams<GridRow>) {
+  return (
+    <div className="flex h-full min-w-0 items-center">
+      <span className="line-clamp-2 leading-[1.4] whitespace-normal">{p.data?.summary}</span>
+    </div>
+  );
+}
+
+// Plain-text cells centre on rows that grew to two lines (AG Grid's own cell CSS outranks utility classes, so inline).
+const CENTER = { display: "flex", alignItems: "center" } as const;
+
+// Column widths at 640px and up; "What happened" takes the rest.
+const W = { toggle: 48, at: 140, event: 228, milestone: 168, actor: 108 };
 
 /** Keeps each open detail row directly under its event whatever the sort. */
 function keepDetailsUnderParents(p: PostSortRowsParams<GridRow>) {
@@ -108,6 +142,7 @@ function keepDetailsUnderParents(p: PostSortRowsParams<GridRow>) {
  */
 export function AuditGrid({ rows, loadDetail }: { rows: AuditRow[]; loadDetail: (id: string) => Promise<unknown> }) {
   const [quick, setQuick] = useState("");
+  const [limit, setLimit] = useState(PAGE);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   // Detail log lines by row id, filled the first time a row is opened.
   const [lines, setLines] = useState<ReadonlyMap<string, LogLine[]>>(new Map());
@@ -130,36 +165,55 @@ export function AuditGrid({ rows, loadDetail }: { rows: AuditRow[]; loadDetail: 
 
   const cols = useMemo<ColDef<GridRow>[]>(
     () => [
-      { colId: "toggle", headerName: "", width: narrow ? 40 : 48, resizable: false, sortable: false, filter: false, cellRenderer: ToggleCell, cellRendererParams: toggleParams },
+      { colId: "toggle", headerName: "", width: narrow ? 40 : W.toggle, resizable: false, sortable: false, filter: false, cellRenderer: ToggleCell, cellRendererParams: toggleParams },
       {
         field: "at",
         headerName: narrow ? "Time" : "Time (UTC)",
-        width: narrow ? 96 : 150,
+        width: narrow ? 96 : W.at,
         sort: "desc",
         valueFormatter: (v) => (v.value ? auditTime(String(v.value), narrow) : ""),
         cellClass: "font-mono text-[12px] text-fg-muted tabular",
+        cellStyle: CENTER,
       },
-      { field: "event", headerName: "Event", width: 250, flex: narrow ? 1 : undefined, minWidth: 180, cellRenderer: EventCell },
-      { field: "milestone", headerName: "Milestone", width: 210, hide: narrow, cellRenderer: MilestoneCell },
-      { field: "actor", headerName: "Actor", width: 150, hide: narrow, cellClass: "text-fg-muted" },
+      { field: "event", headerName: "Event", width: W.event, flex: narrow ? 1 : undefined, minWidth: 180, cellRenderer: EventCell, cellRendererParams: { narrow } },
+      { field: "milestone", headerName: "Milestone", width: W.milestone, hide: narrow, cellRenderer: MilestoneCell },
+      { field: "actor", headerName: "Actor", width: W.actor, hide: narrow, cellClass: "text-fg-muted", cellRenderer: ActorCell },
       {
         field: "summary",
-        headerName: "Detail",
+        headerName: "What happened",
         flex: 1,
-        minWidth: 220,
+        minWidth: 240,
         hide: narrow,
         sortable: false,
         filter: "agTextColumnFilter",
-        // The search box filters events, as it did when this column held the detail object.
-        getQuickFilterText: () => "",
         tooltipValueGetter: (p) => p.data?.summary || undefined,
-        cellClass: "font-mono text-[11.5px] text-fg-faint",
+        cellRenderer: SummaryCell,
+        cellClass: "text-[13px] text-fg-muted",
       },
     ],
     [narrow],
   );
 
-  const pageSize = 20;
+  // Rows grow to two lines when the sentence needs them, so nothing that tells the
+  // story is cut off mid-word. Widths are the columns' own, measured from the grid box.
+  const rowHeight = (r: GridRow): number => {
+    const w = width || 1050;
+    if (narrow) return textLines(r.summary, w - 40 - 96 - 18) > 1 ? 78 : 60;
+    const summaryW = Math.max(240, w - W.toggle - W.at - W.event - W.milestone - W.actor);
+    return textLines(r.summary, summaryW) > 1 ? 62 : 44;
+  };
+
+  // No stock pager: the newest events first, then a mono "Show 20 more" row (the search looks through every event).
+  const q = quick.trim().toLowerCase();
+  const matching = useMemo(
+    () => (q ? rows.filter((r) => q.split(/\s+/).every((w) => `${r.event} ${r.summary} ${r.actor} ${r.milestone} ${auditTime(r.at)}`.toLowerCase().includes(w))) : rows),
+    [rows, q],
+  );
+  const shownRows = useMemo(() => {
+    const ids = new Set(matching.slice(0, limit).map((r) => r.id));
+    return data.filter((r) => ids.has(r.id));
+  }, [matching, limit, data]);
+  const left = matching.length - Math.min(limit, matching.length);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -178,7 +232,7 @@ export function AuditGrid({ rows, loadDetail }: { rows: AuditRow[]; loadDetail: 
           />
         </label>
         <p className="font-mono text-[11px] text-fg-faint tabular">
-          {rows.length} {rows.length === 1 ? "event" : "events"} · newest first · times in UTC
+          {q ? `${matching.length} of ${rows.length}` : rows.length} {rows.length === 1 ? "event" : "events"} · newest first · times in UTC
         </p>
       </div>
       <Panel variant="solid" padded={false} className="overflow-hidden">
@@ -187,20 +241,40 @@ export function AuditGrid({ rows, loadDetail }: { rows: AuditRow[]; loadDetail: 
             // Remount across the breakpoint: rows rendered before it would keep the other time format.
             key={narrow ? "narrow" : "wide"}
             ref={grid}
-            {...detailGridProps<AuditItem>((r) => logRowHeight(r.lines ?? ["(no detail)"], width, narrow, LOG_MAX))}
-            rowData={data}
+            {...detailGridProps<AuditItem>((r) => logRowHeight(r.lines ?? ["(no detail)"], width, narrow, LOG_MAX), rowHeight)}
+            rowData={shownRows}
             columnDefs={cols}
             context={{ onToggle } satisfies DetailCtx}
             defaultColDef={{ sortable: true, filter: true, resizable: true, suppressMovable: true }}
-            quickFilterText={quick}
-            pagination={rows.length > pageSize}
-            paginationPageSize={pageSize}
-            paginationPageSizeSelector={[10, 20, 50, 100]}
             fullWidthCellRenderer={AuditLogRow}
             postSortRows={keepDetailsUnderParents}
             overlayNoRowsTemplate="<span>No events match.</span>"
           />
         </div>
+        {matching.length > PAGE ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-hairline px-4 py-2.5 font-mono text-[11px] text-fg-faint tabular sm:px-5">
+            <span>
+              {Math.min(limit, matching.length)} of {matching.length} {matching.length === 1 ? "event" : "events"}
+            </span>
+            {left > 0 ? (
+              <button
+                type="button"
+                onClick={() => setLimit((n) => n + PAGE)}
+                className="rounded-chip px-2 py-1 tracking-[0.08em] text-fg-muted uppercase transition-colors duration-200 hover:bg-surface-raised hover:text-fg"
+              >
+                Show {Math.min(PAGE, left)} more
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setLimit(PAGE)}
+                className="rounded-chip px-2 py-1 tracking-[0.08em] text-fg-faint uppercase transition-colors duration-200 hover:bg-surface-raised hover:text-fg"
+              >
+                Show fewer
+              </button>
+            )}
+          </div>
+        ) : null}
       </Panel>
     </div>
   );

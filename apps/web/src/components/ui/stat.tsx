@@ -12,12 +12,14 @@ export type StatProps = {
   tone?: ToneKey;
   /** One short line under the figure. */
   hint?: ReactNode;
-  /** Count up on mount (default true). */
+  /** Count from the old figure to the new one when the value changes while the page is open (default true). The first
+   *  paint always shows the final figure. */
   animate?: boolean;
   className?: string;
 } & ({ minor: number; currency: string; value?: never; decimals?: never; suffix?: never } | { value: number; decimals?: number; suffix?: string; minor?: never; currency?: never });
 
-/** A label and one big mono figure that counts up on mount. Money when given minor + currency, otherwise a plain number. */
+/** A label and one big mono figure, final on first paint, counting when it changes live. Money when given minor + currency,
+ *  otherwise a plain number. */
 export function Stat(props: StatProps) {
   const { label, size = "l", tone, hint, animate = true, className } = props;
   return (

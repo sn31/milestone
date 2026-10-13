@@ -26,7 +26,7 @@ const VARIANT: Record<ButtonVariant, string> = {
   primary: "bg-fg text-fg-inverse hover:bg-fg/88 [box-shadow:inset_0_1px_0_0_rgb(255_255_255/0.28),inset_0_-1px_0_0_rgb(0_0_0/0.22)]",
   secondary: "glass text-fg hover:border-hairline-strong hover:bg-surface-raised",
   ghost: "text-fg-muted hover:bg-fg/6 hover:text-fg",
-  danger: "border border-state-danger/45 bg-state-danger/8 text-state-danger hover:border-state-danger/70 hover:bg-state-danger/15",
+  danger: "border border-state-danger/45 bg-state-danger/8 text-[color:var(--ink-danger)] hover:border-state-danger/70 hover:bg-state-danger/15",
 };
 
 /** Every action. Renders a next/link when given href. Press feedback (1px drop, 1.5% shrink) is built in. */

@@ -5,10 +5,13 @@ function Bar({ className }: { className: string }) {
   return <span aria-hidden className={`block rounded-chip bg-fg/[0.06] ${className}`} />;
 }
 
-/** Loading the ledger: the page header and a few contract rows drawn as ghosts, in the ledger's own grid. */
+/**
+ * Loading the ledger: the page header and a few contract rows drawn as ghosts, in the ledger's own grid. It fades in after
+ * 250ms (.loading-delayed), so a quick navigation keeps the previous page painted and never flashes it.
+ */
 export default function Loading() {
   return (
-    <main aria-busy="true" aria-live="polite">
+    <main aria-busy="true" aria-live="polite" className="loading-delayed">
       <p className="type-label flex items-center gap-2 text-fg-faint" data-tone="neutral">
         <span className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
         Loading

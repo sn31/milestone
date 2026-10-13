@@ -7,20 +7,46 @@ export interface CriterionItem {
   required: boolean;
 }
 
+/** "3 checks · 2 required". */
+export function checksSummary(items: CriterionItem[]): string {
+  const required = items.filter((c) => c.required).length;
+  return `${items.length} ${items.length === 1 ? "check" : "checks"} · ${required} required`;
+}
+
 /**
  * The release conditions of a milestone, printed like the spec side of a receipt: a box per check, its kind in mono,
  * the condition, a dotted leader and whether it is required. `checking` marks every box as being worked on (verifying).
+ * `folded` prints one line ("Release conditions · 3 checks · 2 required ›") that opens the list: stations that are
+ * not the current one keep to a line. `bare` drops the header and frame (inside another panel's disclosure).
  */
-export function CriteriaList({ items, checking = false, className }: { items: CriterionItem[]; checking?: boolean; className?: string }) {
-  const required = items.filter((c) => c.required).length;
+export function CriteriaList({ items, checking = false, folded = false, bare = false, label = "Release conditions", className }: { items: CriterionItem[]; checking?: boolean; folded?: boolean; bare?: boolean; label?: string; className?: string }) {
+  if (folded) {
+    return (
+      <details className={cx("group/conds overflow-hidden rounded-panel border border-hairline bg-surface-sunken", className)}>
+        <summary className="flex cursor-pointer list-none items-center gap-2.5 px-4 py-2.5 transition-colors duration-200 hover:bg-surface-raised [&::-webkit-details-marker]:hidden">
+          <svg aria-hidden viewBox="0 0 10 10" className="size-2.5 shrink-0 text-fg-faint transition-transform duration-200 ease-glide group-open/conds:rotate-90" fill="none" stroke="currentColor" strokeWidth={1.5}>
+            <path d="M3.5 1.8 L6.8 5 L3.5 8.2" />
+          </svg>
+          <span className="type-label truncate whitespace-nowrap text-fg-faint">{label}</span>
+          <span className="ml-auto shrink-0 font-mono text-[11px] whitespace-nowrap text-fg-faint tabular">
+            <span className="sm:hidden">{`${items.length} ${items.length === 1 ? "check" : "checks"}`}</span>
+            <span className="max-sm:hidden">{checksSummary(items)}</span>
+          </span>
+        </summary>
+        <div className="border-t border-dashed border-hairline-strong">
+          <CriteriaList items={items} checking={checking} bare />
+        </div>
+      </details>
+    );
+  }
   return (
-    <div className={cx("overflow-hidden rounded-panel border border-hairline bg-surface-sunken", className)}>
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-dashed border-hairline-strong px-4 py-2.5">
-        <p className="type-label text-fg-faint">Release conditions</p>
-        <p className="shrink-0 font-mono text-[11px] whitespace-nowrap text-fg-faint tabular">
-          {items.length} {items.length === 1 ? "check" : "checks"} · {required} required
-        </p>
-      </div>
+    <div className={cx(!bare && "overflow-hidden rounded-panel border border-hairline bg-surface-sunken", className)}>
+      {bare ? null : (
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-dashed border-hairline-strong px-4 py-2.5">
+          <p className="type-label text-fg-faint">{label}</p>
+          <p className="shrink-0 font-mono text-[11px] whitespace-nowrap text-fg-faint tabular">{checksSummary(items)}</p>
+        </div>
+      )}
       {items.length === 0 ? (
         <p className="px-4 py-3 text-[13px] text-fg-muted">No checks on this milestone; the client releases it by hand.</p>
       ) : (

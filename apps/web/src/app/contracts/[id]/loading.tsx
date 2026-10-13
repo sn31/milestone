@@ -6,11 +6,12 @@ function Bar({ className }: { className: string }) {
 
 /**
  * Loading a contract: its header and the milestone rail drawn as ghosts. Stations are hollow nodes on a dashed line,
- * the way the rail looks before any money has arrived. Only the status dot is live.
+ * the way the rail looks before any money has arrived. Only the status dot is live. It fades in after 250ms
+ * (.loading-delayed): a warm navigation or a role switch keeps the current page painted instead of flashing it.
  */
 export default function Loading() {
   return (
-    <main aria-busy="true" aria-live="polite">
+    <main aria-busy="true" aria-live="polite" className="loading-delayed">
       <p className="type-label flex items-center gap-2 text-fg-faint" data-tone="neutral">
         <span className="size-1.5 animate-pulse-dot rounded-full bg-tone" />
         Loading contract

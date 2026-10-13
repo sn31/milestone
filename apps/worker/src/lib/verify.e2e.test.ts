@@ -278,6 +278,43 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.audits).toEqual(["milestone.needs_operator", "verify.refused_needs_operator"]);
     expect(enqueued.filter((e) => e.milestoneId === t.milestoneId)).toEqual([]);
   });
+  it("the stages report each check as it finishes, in output order, scrubbed", { timeout: 120_000 }, async () => {
+    const { runDeterministicStage, runUploadStage } = await import("@milestone/verify");
+    const seen: Array<{ id: string; summary: string }> = [];
+    const crit = [{ id: "crt_stream_t", kind: "test" as const, description: "t", spec: { command: "npm test" }, required: true }, { id: "crt_stream_f", kind: "file" as const, description: "f", spec: { path: "README.md" }, required: true }];
+    const out = await runDeterministicStage({ repoUrl: `file://${repo}`, sha, criteria: crit, onEvidence: (e) => void seen.push(e) });
+    try {
+      expect(seen.map((e) => e.id)).toEqual(out.evidence.map((e) => e.id));
+      expect(seen).toEqual(out.evidence);
+      expect(seen[0]!.id).toBe("evd_tamper_check");
+      expect(JSON.stringify(seen)).not.toMatch(/milestone-verify-/);
+    } finally {
+      await rm(out.workdir, { recursive: true, force: true });
+    }
+    const up: string[] = [];
+    const stage = await runUploadStage({ files: [{ name: "a.md", size: 5, bytes: Buffer.from("# hi\n") }], criteria: [{ id: "crt_up", kind: "upload", description: "u", spec: { pattern: "*.md" }, required: true }], roots: [uploads], onEvidence: (e) => void up.push(e.id) });
+    expect(up).toEqual(stage.evidence.map((e) => e.id));
+  });
+
+  it("progress lands in deliveries.evidence one item at a time while unverified, never after the verdict", { timeout: 60_000 }, async () => {
+    const { evidenceProgress } = await import("../jobs/verify.ts");
+    const db = getDb();
+    const t = await setup(15, [{ kind: "file", spec: { path: "README.md" }, required: true }]);
+    const read = async () => (await t.state()).d.evidence as Array<{ id: string }> | null;
+    const p = evidenceProgress(db, t.deliveryId);
+    await p.reset();
+    expect(await read()).toEqual([]);
+    await p.append({ id: "evd_a", kind: "log", status: "pass", summary: "a" });
+    await p.append({ id: "evd_b", kind: "log", status: "fail", summary: "b" });
+    expect((await read())!.map((e) => e.id)).toEqual(["evd_a", "evd_b"]);
+    await verify(t.job);
+    const final = await read();
+    expect(final!.map((e) => e.id)).not.toContain("evd_a");
+    await p.append({ id: "evd_late", kind: "log", summary: "late" });
+    await p.reset();
+    expect(await read()).toEqual(final);
+  });
+
   // ---------- file deliveries ----------
 
   const chunk = (type: string, data: Buffer) => {

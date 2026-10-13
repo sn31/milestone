@@ -1,11 +1,12 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { createPart, type ColDef, type GridApi, type ICellRendererParams, type IRowNode, type RowClassRules, type ValueGetterParams } from "ag-grid-community";
 import { gridThemeInset } from "./ag-grid-theme";
 import { useNarrow } from "@/components/ui/detail-grid";
-import { Hash, Money, Panel, StateGlyph, cx, inputClass, type ToneKey } from "@/components/ui";
+import { Money, Panel, StateGlyph, cx, inputClass, type ToneKey } from "@/components/ui";
+import { accountLabel, refShort, type TxnKind } from "./ledger-labels";
 import { formatMoney, minorDigits } from "@/lib/format";
 import { auditTime } from "@/lib/events";
 
@@ -14,6 +15,10 @@ export interface LedgerRow {
   /** ISO time the entry was posted. */
   at: string;
   txnId: string;
+  /** The transaction's place in this contract's ledger, 1-based, in posting order. */
+  txnSeq: number;
+  /** What the transaction did, from its legs (fund, release, repayment, refund, advance). */
+  txnKind: TxnKind;
   /** "2 Title", or "" when the transaction names no milestone. */
   milestone: string;
   account: string;
@@ -85,14 +90,48 @@ function TimeCell(p: ICellRendererParams<GridRow, string, Ctx> & { narrow: boole
   return <span className={cx("font-mono text-[12px] tabular", g && !g.first ? "text-fg-faint" : "text-fg-muted")}>{auditTime(p.value, p.narrow)}</span>;
 }
 
+/**
+ * A transaction as its number on this contract and what it did ("03 fund"): two transactions never print alike, which a
+ * middle-truncated id could not promise. The full id is in the title and is what a click copies.
+ */
+export function TxnChip({ seq, kind, txnId, className }: { seq: number; kind: string; txnId: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1400);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <button
+      type="button"
+      title={`${txnId} (click to copy)`}
+      aria-label={`Transaction ${seq}, ${kind}: copy ${txnId}`}
+      onClick={() =>
+        navigator.clipboard?.writeText(txnId).then(
+          () => setCopied(true),
+          () => undefined,
+        )
+      }
+      className={cx(
+        "inline-flex h-6 items-center gap-1.5 rounded-chip border border-hairline bg-surface-sunken px-1.5 font-mono text-[11.5px] whitespace-nowrap tabular",
+        "transition-colors duration-200 hover:border-hairline-strong active:translate-y-px",
+        className,
+      )}
+    >
+      <span className="text-fg-faint">{String(seq).padStart(2, "0")}</span>
+      <span className={copied ? "text-state-released" : "text-fg"}>{copied ? "copied" : kind}</span>
+    </button>
+  );
+}
+
 function TxnCell(p: ICellRendererParams<GridRow, string, Ctx>) {
-  if (isTotal(p) || !p.value) return null;
+  if (isTotal(p) || !p.value || !p.data) return null;
   const g = groupOf(p);
   // One chip per transaction; its other legs hang off a short rule, so the group reads as one entry.
   if (g && !g.first) return <span aria-hidden className="ml-3 block h-full w-px bg-hairline-strong" />;
   return (
     <div className="flex h-full items-center">
-      <Hash value={p.value} />
+      <TxnChip seq={p.data.txnSeq} kind={p.data.txnKind} txnId={p.value} />
     </div>
   );
 }
@@ -120,17 +159,15 @@ function AccountCell(p: ICellRendererParams<GridRow, string>) {
       </span>
     );
   }
-  // family:owner[:book]. The family and the book (receivable, cash, fees) always show; the owner id gives way.
+  // family · book: the owner id gives way to the role it names ("partner · receivable", "held · mst_3").
   const a = p.value ?? "";
-  const [family, ...rest] = a.split(":");
-  const book = rest.length > 1 ? rest.pop() : undefined;
+  const { family, rest } = accountLabel(a);
   return (
     <span data-tone={accountTone(a)} className="flex h-full min-w-0 items-center gap-2 font-mono text-[12px]" title={a}>
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-tone" />
       <span className="flex min-w-0">
         <span className="shrink-0 text-tone">{family}</span>
-        {rest.length > 0 ? <span className="min-w-0 truncate text-fg-faint">:{rest.join(":")}</span> : null}
-        {book ? <span className="shrink-0 text-fg-muted">:{book}</span> : null}
+        {rest ? <span className="min-w-0 truncate text-fg-muted">&nbsp;· {rest}</span> : null}
       </span>
     </span>
   );
@@ -153,36 +190,41 @@ function RefCell(p: ICellRendererParams<GridRow, string>) {
     const diff = t.debitMinor - t.creditMinor;
     const ok = diff === 0;
     return (
-      <span data-tone={ok ? "released" : "danger"} className="inline-flex items-center gap-2" title={ok ? "Debits minus credits: zero, every transaction balances" : "Debits minus credits is not zero"}>
+      <span
+        data-tone={ok ? "released" : "danger"}
+        className="inline-flex items-center gap-2"
+        title={ok ? "Debits minus credits: zero, every transaction balances" : "Debits minus credits is not zero"}
+      >
         <StateGlyph glyph={ok ? "check" : "cross"} className="text-tone" />
         <span className="type-label text-fg-faint">Diff</span>
         <Money minor={diff} currency={t.currency} tone={ok ? "released" : "danger"} />
       </span>
     );
   }
-  return <MiddleTruncate value={p.value ?? ""} className="font-mono text-[11.5px] text-fg-faint" />;
+  return <MiddleTruncate value={refShort(p.value ?? "")} title={p.value ?? ""} className="font-mono text-[11.5px] text-fg-faint" />;
 }
 
 /**
  * Middle truncation only when needed: the head gives way with an ellipsis, the tail (the part that tells refs apart:
  * "...SHOW110K2F", "...:partner") always shows. A value that fits prints in full.
  */
-function MiddleTruncate({ value, className }: { value: string; className?: string }) {
+function MiddleTruncate({ value, title, className }: { value: string; title?: string; className?: string }) {
   // Keep the last segment ("…:partner", "…_repaid", "…-SHOW110K2F") when it is short, else the last 8 characters.
-  const sep = Math.max(value.lastIndexOf(":"), value.lastIndexOf("_"), value.lastIndexOf("-"));
+  const sep = Math.max(value.lastIndexOf(" "), value.lastIndexOf("_"), value.lastIndexOf("-"));
   const seg = sep > 0 ? value.length - sep : 0;
   const tail = seg >= 4 && seg <= 13 ? seg : 8;
   const cut = value.length > tail + 4 ? value.length - tail : value.length;
   return (
-    <span className={cx("flex h-full min-w-0 items-center", className)} title={value}>
-      <span className="min-w-0 truncate">{value.slice(0, cut)}</span>
-      {cut < value.length ? <span className="shrink-0">{value.slice(cut)}</span> : null}
+    <span className={cx("flex h-full min-w-0 items-center", className)} title={title ?? value}>
+      <span className="min-w-0 truncate whitespace-pre">{value.slice(0, cut)}</span>
+      {cut < value.length ? <span className="shrink-0 whitespace-pre">{value.slice(cut)}</span> : null}
     </span>
   );
 }
 
 /** Debit or credit side of an entry, null on the other side. */
-const sideValue = (side: "debit" | "credit") => (p: ValueGetterParams<GridRow>) => (p.data && !p.data.totals && p.data.direction === side ? p.data.amountMinor : null);
+const sideValue = (side: "debit" | "credit") => (p: ValueGetterParams<GridRow>) =>
+  p.data && !p.data.totals && p.data.direction === side ? p.data.amountMinor : null;
 /** Column filters work in whole units ("100" matches $100.00), not minor units. */
 const sideFilterValue = (side: "debit" | "credit") => (p: ValueGetterParams<GridRow>) =>
   p.data && p.data.direction === side ? p.data.amountMinor / 10 ** minorDigits(p.data.currency) : null;
@@ -190,7 +232,14 @@ const sideFilterValue = (side: "debit" | "credit") => (p: ValueGetterParams<Grid
 function totalsOf(rows: LedgerRow[]): GridRow[] {
   const by = new Map<string, Totals & { ids: Set<string> }>();
   for (const r of rows) {
-    const t = by.get(r.currency) ?? { currency: r.currency, debitMinor: 0, creditMinor: 0, entries: 0, txns: 0, ids: new Set<string>() };
+    const t = by.get(r.currency) ?? {
+      currency: r.currency,
+      debitMinor: 0,
+      creditMinor: 0,
+      entries: 0,
+      txns: 0,
+      ids: new Set<string>(),
+    };
     if (r.direction === "debit") t.debitMinor += r.amountMinor;
     else t.creditMinor += r.amountMinor;
     t.entries += 1;
@@ -201,6 +250,8 @@ function totalsOf(rows: LedgerRow[]): GridRow[] {
     id: `total:${t.currency}`,
     at: "",
     txnId: "",
+    txnSeq: 0,
+    txnKind: "entry",
     milestone: "",
     account: "",
     direction: "debit",
@@ -266,9 +317,31 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
         filterValueGetter: (p) => (p.data?.at ? auditTime(p.data.at) : ""),
         getQuickFilterText: (p) => (p.data?.at ? auditTime(p.data.at) : ""),
       },
-      { field: "txnId", headerName: "Txn", width: 124, cellRenderer: TxnCell, filter: "agTextColumnFilter" },
-      { field: "milestone", headerName: "Milestone", flex: 1, minWidth: 240, cellRenderer: MilestoneCell, filter: "agTextColumnFilter" },
-      { field: "account", headerName: "Account", width: 208, cellRenderer: AccountCell, filter: "agTextColumnFilter", getQuickFilterText: (p) => `${p.data?.account ?? ""} ${p.data?.direction ?? ""}` },
+      {
+        field: "txnId",
+        headerName: "Txn",
+        width: 132,
+        cellRenderer: TxnCell,
+        filter: "agTextColumnFilter",
+        filterValueGetter: (p) => (p.data ? `${p.data.txnSeq} ${p.data.txnKind} ${p.data.txnId}` : ""),
+        getQuickFilterText: (p) => (p.data ? `${p.data.txnKind} ${p.data.txnId}` : ""),
+      },
+      {
+        field: "milestone",
+        headerName: "Milestone",
+        flex: 1,
+        minWidth: 240,
+        cellRenderer: MilestoneCell,
+        filter: "agTextColumnFilter",
+      },
+      {
+        field: "account",
+        headerName: "Account",
+        width: 200,
+        cellRenderer: AccountCell,
+        filter: "agTextColumnFilter",
+        getQuickFilterText: (p) => `${p.data?.account ?? ""} ${p.data?.direction ?? ""}`,
+      },
       {
         colId: "debit",
         headerName: "Debit",
@@ -293,7 +366,14 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
         filterValueGetter: sideFilterValue("credit"),
         getQuickFilterText: (p) => (typeof p.value === "number" && p.data ? formatMoney(p.value, p.data.currency) : ""),
       },
-      { field: "ref", headerName: "Ref", flex: 1, minWidth: 150, cellRenderer: RefCell, filter: "agTextColumnFilter" },
+      {
+        field: "ref",
+        headerName: "Ref",
+        flex: 1,
+        minWidth: 148,
+        cellRenderer: RefCell,
+        filter: "agTextColumnFilter",
+      },
     ],
     [narrow],
   );
@@ -303,7 +383,14 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <label className="relative block w-full sm:w-72">
           <span className="sr-only">Filter entries</span>
-          <svg aria-hidden viewBox="0 0 16 16" className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-fg-faint" fill="none" stroke="currentColor" strokeWidth={1.4}>
+          <svg
+            aria-hidden
+            viewBox="0 0 16 16"
+            className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-fg-faint"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.4}
+          >
             <circle cx="7" cy="7" r="4.5" />
             <path d="M10.5 10.5 L14 14" />
           </svg>
@@ -319,28 +406,134 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
           {rows.length} {rows.length === 1 ? "entry" : "entries"} · {txnCount} {txnCount === 1 ? "transaction" : "transactions"} · times in UTC
         </p>
       </div>
-      <Panel variant="solid" padded={false} className="overflow-hidden">
-        <AgGridReact<GridRow>
-          // Remount across the breakpoint so every row uses the same time format.
-          key={narrow ? "narrow" : "wide"}
-          theme={ledgerTheme}
-          rowData={rows}
-          columnDefs={cols}
-          context={{ groups } satisfies Ctx}
-          rowClassRules={rowClassRules}
-          pinnedBottomRowData={totals}
-          domLayout="autoHeight"
-          suppressCellFocus
-          defaultColDef={{ sortable: true, filter: true, resizable: true, suppressMovable: true }}
-          quickFilterText={quick}
-          pagination={rows.length > PAGE}
-          paginationPageSize={PAGE}
-          paginationPageSizeSelector={false}
-          getRowId={(p) => p.data.id}
-          onModelUpdated={(e) => regroup(e.api)}
-          overlayNoRowsTemplate="<span>No entries match.</span>"
-        />
-      </Panel>
+      {narrow ? (
+        <LedgerList rows={rows} totals={totals} quick={quick} />
+      ) : (
+        <Panel variant="solid" padded={false} className="overflow-hidden">
+          <AgGridReact<GridRow>
+            theme={ledgerTheme}
+            rowData={rows}
+            columnDefs={cols}
+            context={{ groups } satisfies Ctx}
+            rowClassRules={rowClassRules}
+            pinnedBottomRowData={totals}
+            domLayout="autoHeight"
+            // Every row in the DOM from the first paint (a bounded grid): full-page captures and the recorder never see
+            // an empty band where the rows below the viewport belong.
+            suppressRowVirtualisation={rows.length <= 400}
+            suppressColumnVirtualisation
+            suppressCellFocus
+            defaultColDef={{
+              sortable: true,
+              filter: true,
+              resizable: true,
+              suppressMovable: true,
+            }}
+            quickFilterText={quick}
+            pagination={rows.length > PAGE}
+            paginationPageSize={PAGE}
+            paginationPageSizeSelector={false}
+            getRowId={(p) => p.data.id}
+            onModelUpdated={(e) => regroup(e.api)}
+            overlayNoRowsTemplate="<span>No entries match.</span>"
+          />
+        </Panel>
+      )}
     </div>
+  );
+}
+
+/** The quick filter's haystack for one entry (the grid's own quick filter on wide screens). */
+const haystack = (r: LedgerRow) =>
+  [r.txnKind, r.txnId, r.milestone, r.account, r.direction, r.ref, auditTime(r.at), formatMoney(r.amountMinor, r.currency)].join(" ").toLowerCase();
+
+/**
+ * The ledger on a phone: one block per transaction (its chip, time and milestone), each leg as account and amount on
+ * one line, debits and credits marked, so the money is on screen without a sideways scroll.
+ */
+function LedgerList({ rows, totals, quick }: { rows: LedgerRow[]; totals: GridRow[]; quick: string }) {
+  const q = quick.trim().toLowerCase();
+  const groups = useMemo(() => {
+    const out: Array<{ txnId: string; legs: LedgerRow[] }> = [];
+    const sorted = [...rows].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.txnSeq - b.txnSeq));
+    for (const r of sorted) {
+      const last = out[out.length - 1];
+      if (last && last.txnId === r.txnId) last.legs.push(r);
+      else out.push({ txnId: r.txnId, legs: [r] });
+    }
+    return out;
+  }, [rows]);
+  const shown = q ? groups.filter((g) => g.legs.some((l) => q.split(/\s+/).every((w) => haystack(l).includes(w)))) : groups;
+  return (
+    <Panel variant="solid" padded={false} className="overflow-hidden">
+      {shown.length === 0 ? <p className="px-4 py-6 font-mono text-[12px] text-fg-faint">No entries match.</p> : null}
+      <ol className="divide-y divide-hairline">
+        {shown.map((g) => {
+          const head = g.legs[0]!;
+          const m = /^(\d+)\s+(.*)$/.exec(head.milestone);
+          return (
+            <li key={g.txnId} className="px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <TxnChip seq={head.txnSeq} kind={head.txnKind} txnId={g.txnId} />
+                <span className="font-mono text-[11px] text-fg-faint tabular">{auditTime(head.at)}</span>
+              </div>
+              <p className="mt-1.5 truncate text-[12.5px] text-fg-muted" title={head.milestone}>
+                {m ? <span className="mr-1.5 font-mono text-[11px] text-fg-faint tabular">{m[1]!.padStart(2, "0")}</span> : null}
+                {m ? m[2] : head.milestone || "contract"}
+              </p>
+              <ul className="mt-2 grid gap-1 border-l border-hairline-strong pl-3">
+                {g.legs.map((l) => {
+                  const a = accountLabel(l.account);
+                  return (
+                    <li
+                      key={l.id}
+                      data-tone={accountTone(l.account)}
+                      className="flex items-baseline gap-2 font-mono text-[12px]"
+                      title={`${l.account} · ${l.ref}`}
+                    >
+                      <span className="w-5 shrink-0 text-[10px] tracking-[0.08em] text-fg-faint uppercase">{l.direction === "debit" ? "dr" : "cr"}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        <span className="text-tone">{a.family}</span>
+                        {a.rest ? <span className="text-fg-muted"> · {a.rest}</span> : null}
+                      </span>
+                      <Money minor={l.amountMinor} currency={l.currency} />
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+          );
+        })}
+      </ol>
+      {totals.map((t) => {
+        const x = t.totals!;
+        const diff = x.debitMinor - x.creditMinor;
+        return (
+          <div key={t.id} className="grid gap-1.5 border-t border-hairline-strong bg-surface-sunken px-4 py-3 font-mono text-[12px] tabular">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="type-label text-fg-faint">Total</span>
+              <span className="text-[11px] text-fg-faint">
+                {x.entries} entries · {x.txns} txns
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-fg-faint">debits</span>
+              <Money minor={x.debitMinor} currency={x.currency} />
+            </div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-fg-faint">credits</span>
+              <Money minor={x.creditMinor} currency={x.currency} />
+            </div>
+            <div data-tone={diff === 0 ? "released" : "danger"} className="flex items-baseline justify-between gap-3">
+              <span className="flex items-center gap-2 text-fg-faint">
+                <StateGlyph glyph={diff === 0 ? "check" : "cross"} className="text-tone" />
+                diff
+              </span>
+              <Money minor={diff} currency={x.currency} tone={diff === 0 ? "released" : "danger"} />
+            </div>
+          </div>
+        );
+      })}
+    </Panel>
   );
 }

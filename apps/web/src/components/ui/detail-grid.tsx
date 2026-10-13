@@ -90,6 +90,15 @@ export function logRowHeight(lines: LogLine[], gridWidth: number, narrow: boolea
   return Math.round(24 + 33 + Math.min(16 + n * LINE, max) + 2);
 }
 
+/** Geist at 13px averages ~6.7px a character in running text. */
+const SANS13 = 6.7;
+
+/** How many lines `text` takes at 13px in a cell `cellWidth` wide (16px padding either side), capped at `max`. */
+export function textLines(text: string, cellWidth: number, max = 2): number {
+  const per = Math.max(8, Math.floor((cellWidth - 32) / SANS13));
+  return Math.min(max, Math.max(1, Math.ceil(text.length / per)));
+}
+
 /** Width of an element in px, kept current with a ResizeObserver; 0 until measured. */
 export function useWidth(ref: RefObject<HTMLElement | null>): number {
   const [w, setW] = useState(0);
@@ -131,14 +140,19 @@ export function useDetailGrid<T>() {
 }
 
 /** The AG Grid props every detail grid shares: inset theme, auto height, row ids, full-width detail rows and their heights. */
-export function detailGridProps<T>(detailHeight: (row: DetailRow<T>) => number, rowHeight = 44) {
+export function detailGridProps<T>(detailHeight: (row: DetailRow<T>) => number, rowHeight: number | ((row: DetailRow<T>) => number) = 44) {
   return {
     theme: gridThemeInset,
     domLayout: "autoHeight" as const,
+    // Bounded lists: every row is in the DOM from the first paint, so a full-page capture or a recorded frame never
+    // shows an empty band where rows below the viewport belong.
+    suppressRowVirtualisation: true,
+    suppressColumnVirtualisation: true,
     suppressCellFocus: true,
     tooltipShowDelay: 400,
     getRowId: (p: GetRowIdParams<DetailRow<T>>) => p.data.rowKey,
     isFullWidthRow: (p: IsFullWidthRowParams<DetailRow<T>>) => p.rowNode.data?.rowKind === "detail",
-    getRowHeight: (p: RowHeightParams<DetailRow<T>>) => (p.data?.rowKind === "detail" ? detailHeight(p.data) : rowHeight),
+    getRowHeight: (p: RowHeightParams<DetailRow<T>>) =>
+      p.data?.rowKind === "detail" ? detailHeight(p.data) : typeof rowHeight === "function" && p.data ? rowHeight(p.data) : typeof rowHeight === "number" ? rowHeight : 44,
   };
 }

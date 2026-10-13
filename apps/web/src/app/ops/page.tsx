@@ -2,13 +2,31 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { and, asc, inArray } from "drizzle-orm";
 import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps } from "@milestone/core";
-import { paypalMode } from "@milestone/money";
+import { armedSimulatedFailures, paypalMode } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { ACTOR_NAMES, getActor, isOperator } from "@/lib/session";
 import { auditTime, eventTone } from "@/lib/events";
 import { formatDateTime, formatMoney, humanize } from "@/lib/format";
-import { Button, EmptyState, Hash, LogStream, Money, PageHeader, Panel, Reveal, Stat, StatePill, cx, type LogLine, type ToneKey } from "@/components/ui";
+import {
+  Button,
+  EmptyState,
+  Hash,
+  LogStream,
+  Money,
+  PageHeader,
+  Panel,
+  Reveal,
+  SectionTitle,
+  Stat,
+  StatePill,
+  cx,
+  type LogLine,
+  type ToneKey,
+} from "@/components/ui";
+import { payoutFailureLine, payoutReason } from "@/lib/payout-failure";
+import { eventSentence } from "@/app/contracts/[id]/activity/sentence";
 import { ResolveForm } from "./resolve-form";
+import { SimulatePayoutFailure } from "./simulate-failure";
 
 export const dynamic = "force-dynamic";
 
@@ -33,12 +51,25 @@ function age(from: Date, now: Date): string {
 
 const hms = (d: Date) => auditTime(d, true);
 
-/** One audit row as a log line, in its event's tone (lib/events) like every other list of events; plain when neutral. */
-function trailLine(e: { event: string; actor: string; detail: unknown; createdAt: Date }): LogLine {
-  const d = obj(e.detail);
+/** Who did it, by name: people from the seed, the system actors in words. */
+const NAMES: Record<string, string> = {
+  ...ACTOR_NAMES,
+  paypal: "PayPal",
+  policy: "Policy",
+  verifier: "Verifier",
+  system: "System",
+  worker: "Worker",
+};
+const nameOf = (id: string) => NAMES[id] ?? id;
+
+/** One audit row as a log line: the event, what happened in words, who. In its event's tone; plain when neutral. */
+function trailLine(e: { event: string; actor: string; detail: unknown; createdAt: Date }, currency: string): LogLine {
   const tone = eventTone(e.event);
-  const why = str(d.reason) ?? str(d.note);
-  return { at: hms(e.createdAt), text: `${e.event}  ${e.actor}${why ? `  · ${why}` : ""}`, tone: tone === "neutral" || tone === "verifying" ? undefined : tone };
+  return {
+    at: hms(e.createdAt),
+    text: `${e.event}  ${eventSentence(e.event, e.detail, NAMES, currency)} · ${nameOf(e.actor)}`,
+    tone: tone === "neutral" || tone === "verifying" ? undefined : tone,
+  };
 }
 
 /**
@@ -59,13 +90,49 @@ export default async function OpsPage() {
   const [ms, ops, trail] = ids.length
     ? await Promise.all([
         db.select().from(milestones).where(inArray(milestones.id, ids)),
-        db.select().from(paypalOps).where(and(inArray(paypalOps.key, ids), inArray(paypalOps.kind, ["payout", "refund"]))).orderBy(asc(paypalOps.createdAt)),
+        db
+          .select()
+          .from(paypalOps)
+          .where(and(inArray(paypalOps.key, ids), inArray(paypalOps.kind, ["payout", "refund"])))
+          .orderBy(asc(paypalOps.createdAt)),
         db.select().from(auditLog).where(inArray(auditLog.milestoneId, ids)).orderBy(asc(auditLog.createdAt)),
       ])
     : [[], [], []];
-  const cs = ms.length ? await db.select().from(contracts).where(inArray(contracts.id, [...new Set(ms.map((m) => m.contractId))])) : [];
+  const cs = ms.length
+    ? await db
+        .select()
+        .from(contracts)
+        .where(inArray(contracts.id, [...new Set(ms.map((m) => m.contractId))]))
+    : [];
   const msById = new Map(ms.map((m) => [m.id, m]));
   const csById = new Map(cs.map((c) => [c.id, c]));
+
+  // Simulated PayPal only: milestones whose payout is still ahead, to arm a failure against.
+  const waiting = simulated
+    ? await db
+        .select({
+          id: milestones.id,
+          seq: milestones.seq,
+          title: milestones.title,
+          contractId: milestones.contractId,
+        })
+        .from(milestones)
+        .where(inArray(milestones.status, ["funded", "verifying", "review", "needs_client"]))
+    : [];
+  const waitingContracts = waiting.length
+    ? await db
+        .select({ id: contracts.id, title: contracts.title })
+        .from(contracts)
+        .where(inArray(contracts.id, [...new Set(waiting.map((m) => m.contractId))]))
+    : [];
+  const titleOf = new Map(waitingContracts.map((c) => [c.id, c.title]));
+  const candidates = waiting
+    .sort((a, b) => a.contractId.localeCompare(b.contractId) || a.seq - b.seq)
+    .map((m) => ({
+      milestoneId: m.id,
+      label: `${titleOf.get(m.contractId) ?? m.contractId} · ${m.seq}. ${m.title}`,
+    }));
+  const armed = simulated ? armedSimulatedFailures() : [];
 
   const now = new Date();
   const stopped = new Map<string, number>();
@@ -89,7 +156,13 @@ export default async function OpsPage() {
         aside={
           <>
             <Stat label="Open cases" tone={open.length > 0 ? "danger" : "released"} value={open.length} />
-            <Stat label="Money stopped" tone={stoppedMinor > 0 ? "held" : undefined} minor={stoppedMinor} currency={mainCurrency} hint={stopped.size > 1 ? `${mainCurrency} only` : undefined} />
+            <Stat
+              label="Money stopped"
+              tone={stoppedMinor > 0 ? "held" : undefined}
+              minor={stoppedMinor}
+              currency={mainCurrency}
+              hint={stopped.size > 1 ? `${mainCurrency} only` : undefined}
+            />
           </>
         }
       />
@@ -141,7 +214,7 @@ export default async function OpsPage() {
                           {m ? <StatePill state={m.status} /> : null}
                           <span>flagged {hms(f.createdAt)} UTC</span>
                           <span>· {age(f.createdAt, now)} ago</span>
-                          <span>· by {f.actor}</span>
+                          <span>· by {nameOf(f.actor)}</span>
                         </div>
                         <h2 className="type-display-s mt-2 text-fg">
                           {m ? (
@@ -170,10 +243,13 @@ export default async function OpsPage() {
                       </div>
                     </header>
 
-                    {str(d.reason) ? (
-                      <p data-tone={failed ? "danger" : "held"} className="flex gap-3 border-b border-hairline bg-tone-wash px-5 py-3 text-[13px] text-fg sm:px-6">
+                    {payoutFailureLine(d) ? (
+                      <p
+                        data-tone={failed ? "danger" : "held"}
+                        className="flex gap-3 border-b border-hairline bg-tone-wash px-5 py-3 text-[13px] text-fg sm:px-6"
+                      >
                         <span className="type-label shrink-0 pt-[3px] text-tone">Reason</span>
-                        <span className="min-w-0">{str(d.reason)}</span>
+                        <span className="min-w-0">{payoutFailureLine(d)}</span>
                       </p>
                     ) : null}
 
@@ -198,38 +274,47 @@ export default async function OpsPage() {
                         ) : (
                           <ul className="mt-2 divide-y divide-hairline">
                             {myOps.map((o) => {
-                              const pill = OP_PILL[o.status] ?? { state: o.status, label: o.status };
+                              const pill = OP_PILL[o.status] ?? {
+                                state: o.status,
+                                label: o.status,
+                              };
                               return (
-                                <li key={o.id} className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 py-2.5 sm:grid-cols-[4.5rem_6.5rem_minmax(0,1fr)_auto]">
+                                <li
+                                  key={o.id}
+                                  className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 py-2.5 sm:grid-cols-[4.5rem_6.5rem_minmax(0,1fr)_auto]"
+                                >
                                   <span className="font-mono text-[12px] text-fg uppercase tracking-[0.08em]">{o.kind}</span>
                                   <StatePill state={pill.state} label={pill.label} className="justify-self-start" />
                                   <span className="col-span-2 flex min-w-0 flex-wrap gap-1.5 sm:col-span-1">
-                                    {o.paypalId ? <Hash value={o.paypalId} label="id" /> : <span className="font-mono text-[11px] text-fg-faint">no paypal id</span>}
+                                    {o.paypalId ? (
+                                      <Hash value={o.paypalId} label="id" />
+                                    ) : (
+                                      <span className="font-mono text-[11px] text-fg-faint">no paypal id</span>
+                                    )}
                                     <Hash value={o.requestId} label="req" />
                                   </span>
-                                  <span className="col-span-2 font-mono text-[11px] text-fg-faint tabular sm:col-span-1 sm:text-right">{hms(o.updatedAt ?? o.createdAt)}</span>
+                                  <span className="col-span-2 font-mono text-[11px] text-fg-faint tabular sm:col-span-1 sm:text-right">
+                                    {hms(o.updatedAt ?? o.createdAt)}
+                                  </span>
                                 </li>
                               );
                             })}
                           </ul>
                         )}
                         {myTrail.length > 0 ? (
-                          <LogStream className="mt-4" title={`audit trail · ${f.milestoneId}`} lines={myTrail.map(trailLine)} maxHeight={180} />
+                          <LogStream
+                            className="mt-4"
+                            title={`audit trail · ${f.milestoneId}`}
+                            lines={myTrail.map((e) => trailLine(e, currency))}
+                            maxHeight={960}
+                          />
                         ) : null}
                       </div>
                     </div>
 
                     {/* Resolve */}
-                    <footer className="flex flex-col gap-4 border-t border-hairline bg-surface-sunken/60 px-5 py-4 sm:px-6 md:flex-row md:items-end md:justify-between">
+                    <footer className="border-t border-hairline bg-surface-sunken/60 px-5 py-4 sm:px-6">
                       <ResolveForm milestoneId={f.milestoneId!} disabled={!canAct} />
-                      {simulated ? (
-                        <form action="/api/dev/paypal/fail" method="post" className="shrink-0">
-                          <input type="hidden" name="sender_item_id" value={`${f.milestoneId}:freelancer`} />
-                          <Button type="submit" variant="ghost" size="sm">
-                            Arm next payout failure
-                          </Button>
-                        </form>
-                      ) : null}
                     </footer>
                   </Panel>
                 </Reveal>
@@ -238,6 +323,19 @@ export default async function OpsPage() {
           </ol>
         )}
       </section>
+
+      {simulated ? (
+        <section className="mt-12" aria-label="Simulated PayPal">
+          <Panel variant="outline">
+            <SectionTitle eyebrow="Simulated PayPal" title="Fail the next payout" />
+            <p className="mb-5 max-w-[64ch] text-[13px] leading-relaxed text-fg-muted">
+              Plays PayPal refusing a payout item: the next payout to this payee comes back failed, once. The release job holds the milestone and it arrives in
+              this queue, as a real failure would.
+            </p>
+            <SimulatePayoutFailure options={candidates} armed={armed} />
+          </Panel>
+        </section>
+      ) : null}
     </main>
   );
 }
@@ -251,7 +349,9 @@ function OperatorLedger({ d, currency }: { d: Record<string, unknown>; currency:
   const refunded = d.refunded && typeof d.refunded === "object" ? obj(d.refunded) : null;
   const none = <span className="text-fg-faint">none</span>;
   const entries = (o: Record<string, unknown>, render: (party: string, v: unknown) => ReactNode) =>
-    Object.keys(o).length === 0 ? none : (
+    Object.keys(o).length === 0 ? (
+      none
+    ) : (
       <span className="flex flex-col items-end gap-0.5">
         {Object.entries(o).map(([party, v]) => (
           <span key={party} className="flex flex-wrap items-baseline justify-end gap-x-2">
@@ -261,9 +361,34 @@ function OperatorLedger({ d, currency }: { d: Record<string, unknown>; currency:
         ))}
       </span>
     );
-  const rows: { label: string; tone: ToneKey; lit: boolean; value: ReactNode }[] = [
-    { label: "Paid", tone: "released", lit: Object.keys(paid).length > 0, value: entries(paid, (_, v) => (num(v) !== null ? <Money minor={num(v)!} currency={currency} tone="released" /> : "?")) },
-    { label: "Failed", tone: "danger", lit: Object.keys(failed).length > 0, value: entries(failed, (_, v) => <span className="basis-full text-right text-tone sm:basis-auto">{humanize(String(v))}</span>) },
+  const rows: {
+    label: string;
+    tone: ToneKey;
+    lit: boolean;
+    value: ReactNode;
+    note?: ReactNode;
+  }[] = [
+    {
+      label: "Paid",
+      tone: "released",
+      lit: Object.keys(paid).length > 0,
+      value: entries(paid, (_, v) => (num(v) !== null ? <Money minor={num(v)!} currency={currency} tone="released" /> : "?")),
+    },
+    {
+      label: "Failed",
+      tone: "danger",
+      lit: Object.keys(failed).length > 0,
+      // The party on the ruled line; why it failed on its own line underneath, so the leader is never squeezed.
+      value: entries(failed, () => null),
+      note: Object.keys(failed).length
+        ? Object.entries(failed).map(([party, v]) => (
+            <span key={party} className="block">
+              {Object.keys(failed).length > 1 ? `${party}: ` : ""}
+              {payoutReason(String(v)) ?? humanize(String(v))}
+            </span>
+          ))
+        : null,
+    },
     {
       label: "Reversed",
       tone: "held",
@@ -278,7 +403,12 @@ function OperatorLedger({ d, currency }: { d: Record<string, unknown>; currency:
         );
       }),
     },
-    { label: "Pending", tone: "funded", lit: pending.length > 0, value: pending.length ? <span className="text-tone">{pending.join(", ")}</span> : none },
+    {
+      label: "Pending",
+      tone: "funded",
+      lit: pending.length > 0,
+      value: pending.length ? <span className="text-tone">{pending.join(", ")}</span> : none,
+    },
     {
       label: "Refunded",
       tone: "partial",
@@ -303,13 +433,18 @@ function OperatorLedger({ d, currency }: { d: Record<string, unknown>; currency:
   return (
     <dl className="mt-3 font-mono text-[12.5px] tabular">
       {rows.map((r) => (
-        <div key={r.label} data-tone={r.lit ? r.tone : "neutral"} className="flex items-baseline gap-3 border-b border-dashed border-hairline py-2.5 last:border-b-0">
+        <div
+          key={r.label}
+          data-tone={r.lit ? r.tone : "neutral"}
+          className="flex flex-wrap items-baseline gap-x-3 border-b border-dashed border-hairline py-2.5 last:border-b-0"
+        >
           <dt className={cx("flex w-20 shrink-0 items-center gap-2 uppercase tracking-[0.1em] text-[11px]", r.lit ? "text-tone" : "text-fg-faint")}>
             <span aria-hidden className={cx("size-1.5 rounded-full", r.lit ? "bg-tone" : "border border-hairline-strong")} />
             {r.label}
           </dt>
           <span aria-hidden className="leader" />
           <dd className="min-w-0 text-right text-fg">{r.value}</dd>
+          {r.note ? <dd className="mt-1.5 basis-full pl-[14px] font-sans text-[13px] leading-snug text-tone">{r.note}</dd> : null}
         </div>
       ))}
     </dl>

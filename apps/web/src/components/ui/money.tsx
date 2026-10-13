@@ -9,7 +9,8 @@ export interface MoneyProps {
   currency: string;
   /** s 14px (inline), m 20px (row totals), l 32px (stats), xl 48px (instrument panel). */
   size?: "s" | "m" | "l" | "xl";
-  /** Count the whole units up on first mount. */
+  /** Count the whole units from the old figure to the new one when the amount changes while the page is open. The first
+   *  paint always shows the final amount (Review 3, item 8). */
   animate?: boolean;
   /** Colours the integer part in a state's colour. */
   tone?: ToneKey;
@@ -28,7 +29,10 @@ export function Money({ minor, currency, size = "s", animate = false, tone, sign
   const p = formatMoneyParts(minor, currency);
   const whole = Math.trunc(Math.abs(minor) / 10 ** minorDigits(currency));
   const sign = p.sign || (signed && minor > 0 ? "+" : "");
-  const symbol = <span className="text-fg-faint text-[0.78em]">{p.symbol}</span>;
+  // Inline amounts (14px, often smaller in grids, sometimes dimmed by a row) keep the symbol and decimals at muted ink so
+  // they stay readable (Review 3, item 17); m and up keep them faint so the eye lands on the whole units.
+  const quiet = size === "s" ? "text-fg-muted" : "text-fg-faint";
+  const symbol = <span className={cx(quiet, "text-[0.78em]")}>{p.symbol}</span>;
   return (
     <span data-tone={tone} className={cx("inline-flex items-baseline whitespace-nowrap", SIZE[size], className)}>
       <span className="sr-only">{`${sign === "+" ? "+" : ""}${formatMoney(minor, currency)}`}</span>
@@ -36,7 +40,7 @@ export function Money({ minor, currency, size = "s", animate = false, tone, sign
         {sign ? <span className={tone ? "text-tone" : "text-fg"}>{sign === "-" ? "−" : sign}</span> : null}
         {p.symbolAfter ? null : <span className="mr-[0.12em]">{symbol}</span>}
         <span className={tone ? "text-tone" : "text-fg"}>{animate ? <CountUp value={whole} /> : p.integer}</span>
-        <span className="text-fg-faint">{p.fraction}</span>
+        <span className={quiet}>{p.fraction}</span>
         {p.symbolAfter ? <span className="ml-[0.3em]">{symbol}</span> : null}
       </span>
     </span>

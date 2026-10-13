@@ -34,6 +34,11 @@ export interface UploadStageInput {
   criteria: CriterionSpec[];
   /** Directories stripped from evidence summaries (scrubEvidence); default [uploadRoot()]. */
   roots?: string[];
+  /**
+   * Called with each evidence item as soon as it is known (each delivered file's inspection, then each criterion), in
+   * output order, already scrubbed. Awaited; a throw fails the stage. The returned `evidence` is unchanged by it.
+   */
+  onEvidence?: (item: EvidenceSummary) => void | Promise<void>;
 }
 
 export interface FileInspection {
@@ -518,21 +523,26 @@ export function evaluateUploadCriterion(c: CriterionSpec, inspections: FileInspe
 export async function runUploadStage(input: UploadStageInput): Promise<UploadStageOutput> {
   const inspections: FileInspection[] = [];
   const evidence: EvidenceSummary[] = [];
+  const roots = input.roots ?? [uploadRoot()];
+  const record = async (item: EvidenceSummary) => {
+    evidence.push(item);
+    if (input.onEvidence) await input.onEvidence(scrubEvidence([item], roots)[0]!);
+  };
   for (const [n, f] of input.files.entries()) {
     const ins = inspect(await fileBytes(f), f, fileEvidenceId(n));
     inspections.push(ins);
-    evidence.push({ id: ins.evidenceId, kind: "file", summary: describe(ins), uri: f.name, ...(f.sha256 ? { sha256: f.sha256 } : {}) });
+    await record({ id: ins.evidenceId, kind: "file", summary: describe(ins), uri: f.name, ...(f.sha256 ? { sha256: f.sha256 } : {}) });
   }
   for (const c of input.criteria) {
-    if (c.kind === "upload") evidence.push(evaluateUploadCriterion(c, inspections));
+    if (c.kind === "upload") await record(evaluateUploadCriterion(c, inspections));
     else if (c.kind === "file") {
       // On a file delivery, a file criterion means "a file with this name was delivered".
       const path = String(c.spec.path ?? "");
       const hit = inspections.find((i) => i.name === path || i.name === path.split("/").pop());
-      evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "file", status: hit ? "pass" : "fail", summary: `${path} ${hit ? `delivered (${hit.evidenceId})` : "not among the delivered files"}` });
+      await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "file", status: hit ? "pass" : "fail", summary: `${path} ${hit ? `delivered (${hit.evidenceId})` : "not among the delivered files"}` });
     } else if (c.kind === "test" || c.kind === "build") {
-      evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "note", status: "unclear", summary: `${c.kind} criterion cannot run on a file delivery (no repository)` });
+      await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "note", status: "unclear", summary: `${c.kind} criterion cannot run on a file delivery (no repository)` });
     }
   }
-  return { evidence: scrubEvidence(evidence, input.roots ?? [uploadRoot()]), inspections };
+  return { evidence: scrubEvidence(evidence, roots), inspections };
 }

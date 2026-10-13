@@ -18,29 +18,51 @@ const base: MilestoneSnapshot = {
   pendingOp: null,
 };
 
+const crit = [
+  { id: "crt_t", kind: "test", description: "The test suite passes" },
+  { id: "crt_j", kind: "judgment", description: "Matches the brief" },
+];
+
 describe("verifierLines", () => {
   it("prints events while the stage runs, without the delivery line the head already has", () => {
-    expect(verifierLines(base)).toEqual([{ at: "14:00:01", text: "milestone.verifying", tone: undefined }]);
+    expect(verifierLines(base, crit)).toEqual([{ at: "14:00:01", text: "agent picked it up · clean checkout, no secrets in the environment", tone: undefined }]);
   });
 
-  it("appends evidence at the time it was stored, before the events that followed, so lines only ever append", () => {
-    const before = verifierLines(base);
-    const after = verifierLines({
-      ...base,
-      delivery: { ...base.delivery!, verifiedAt: "2026-10-08T14:00:40.000Z", result: "pass", evidenceCount: 2 },
-      evidence: [
-        { id: "ev_1", kind: "log", status: "pass", summary: "npm test: 14 passed" },
-        { id: "ev_2", kind: "diff", status: null, summary: "+212 -18 across 6 files" },
-      ],
-      events: [...base.events, { id: "a3", at: "2026-10-08T14:00:40.100Z", event: "verdict.stored" }, { id: "a4", at: "2026-10-08T14:00:40.200Z", event: "milestone.review" }],
-    });
-    expect(after.slice(0, before.length)).toEqual(before);
-    expect(after.slice(before.length)).toEqual([
-      { at: "14:00:40", text: "pass    log    npm test: 14 passed", tone: "ok" },
-      { at: "14:00:40", text: "seen    diff   +212 -18 across 6 files", tone: undefined },
-      { at: "14:00:40", text: "verdict.stored", tone: undefined },
-      { at: "14:00:40", text: "milestone.review", tone: "review" },
+  it("appends each check as its evidence lands, then judgment and the decision, so lines only ever append", () => {
+    const first = verifierLines(base, crit);
+    const tamper = { id: "evd_tamper_check", kind: "diff", status: "pass", summary: "tamper check: 2 file(s) changed against the first parent abc only", criterionId: null };
+    const test = { id: "evd_crt_t", kind: "log", status: "pass", summary: "npm test exited 0; last lines:", criterionId: "crt_t" };
+    const mid = verifierLines({ ...base, delivery: { ...base.delivery!, evidenceCount: 1 }, evidence: [tamper] }, crit);
+    expect(mid.slice(0, first.length)).toEqual(first);
+    expect(mid.at(-1)).toEqual({ text: "tamper  clean · 2 files changed, no test, script, lockfile or CI edits", tone: "ok" });
+    const done = verifierLines(
+      {
+        ...base,
+        delivery: { ...base.delivery!, verifiedAt: "2026-10-08T14:00:03.000Z", result: "partial", evidenceCount: 2, model: "deterministic-only", judged: [{ criterionId: "crt_t", status: "pass", confidence: 1 }, { criterionId: "crt_j", status: "unclear", confidence: 0 }] },
+        evidence: [tamper, test],
+        events: [...base.events, { id: "a3", at: "2026-10-08T14:00:03.100Z", event: "verdict.stored" }, { id: "a4", at: "2026-10-08T14:00:03.200Z", event: "milestone.needs_client" }],
+      },
+      crit,
+    );
+    expect(done.slice(0, mid.length)).toEqual(mid);
+    expect(done.slice(mid.length).map((l) => l.text)).toEqual([
+      "install dependencies installed · lifecycle scripts off",
+      "pass    test     The test suite passes · npm test exited 0",
+      "client  judgment Matches the brief · judgment goes to the client",
+      "verdict stored on the delivery",
+      "→ waiting on the client",
     ]);
+    expect(done.find((l) => l.criterionId === "crt_j")).toMatchObject({ status: "client", tone: "needs" });
+  });
+
+  it("prints a model's judgment with its confidence", () => {
+    const lines = verifierLines({ ...base, delivery: { ...base.delivery!, verifiedAt: "2026-10-08T14:00:03.000Z", result: "pass", model: "qwen3:14b", judged: [{ criterionId: "crt_j", status: "pass", confidence: 0.86 }] } }, crit);
+    expect(lines.at(-1)).toMatchObject({ text: "pass    judgment Matches the brief · 86% confident", status: "pass" });
+  });
+
+  it("says which change made a pass untrustworthy", () => {
+    const lines = verifierLines({ ...base, evidence: [{ id: "evd_tamper_check", kind: "diff", status: "unclear", summary: "tamper check against the x baseline: the delivery changes what the test/build commands run: test/pricing.test.js modified (existing test); package.json scripts changed", criterionId: null }] });
+    expect(lines.at(-1)).toEqual({ text: "tamper  not trusted · test/pricing.test.js modified (existing test)", tone: "err" });
   });
 });
 

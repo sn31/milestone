@@ -50,6 +50,13 @@ export interface DeterministicInput {
   baselineSource?: string;
   /** The pull request title and body, or a manual delivery's title and note (untrusted); recorded with the commit message as evd_commit. */
   pullRequest?: { title?: string; body?: string };
+  /**
+   * Called with each evidence item as soon as its check finishes (tamper check, context, each test/build/file
+   * criterion), in the order they appear in the output, already scrubbed of the workdir. The stage awaits it, so a
+   * caller can persist progress before the next check runs; a throw here fails the stage, so callers that only report
+   * progress should catch their own errors. The returned `evidence` is unchanged by it.
+   */
+  onEvidence?: (item: EvidenceSummary) => void | Promise<void>;
 }
 
 export interface DeterministicOutput {
@@ -417,6 +424,13 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
   const env = { ...CLEAN_ENV, HOME: workdir };
   const logs: Record<string, string> = {};
   const evidence: EvidenceSummary[] = [];
+  /** Records one item and reports it (scrubbed) to onEvidence before the next check runs. */
+  const record = async (...items: EvidenceSummary[]) => {
+    for (const item of items) {
+      evidence.push(item);
+      if (input.onEvidence) await input.onEvidence(scrubEvidence([item], roots)[0]!);
+    }
+  };
   try {
     if (!COMMIT_ID.test(input.sha)) throw new Error(`delivered sha ${JSON.stringify(input.sha.slice(0, 80))} is not a commit id`);
     await run(["git", "init", "-q"], workdir, env, 30_000);
@@ -435,7 +449,7 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       tampering = t.findings;
       baseline = t.base;
       diffFrom = { from: t.from, against: t.against };
-      evidence.push({
+      await record({
         id: TAMPER_EVIDENCE_ID,
         kind: "diff",
         status: tampering.length ? "unclear" : "pass",
@@ -447,9 +461,9 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       const msg = (e as Error).message;
       tampering = [e instanceof TamperCheckError ? msg : `could not run the tamper diff (${msg})`];
       if (e instanceof TamperCheckError) baseline = e.base;
-      evidence.push({ id: TAMPER_EVIDENCE_ID, kind: "diff", status: "unclear", summary: `tamper check: ${tampering[0]}` });
+      await record({ id: TAMPER_EVIDENCE_ID, kind: "diff", status: "unclear", summary: `tamper check: ${tampering[0]}` });
     }
-    evidence.push(...(await contextEvidence(workdir, head, env, diffFrom, input.pullRequest)));
+    await record(...(await contextEvidence(workdir, head, env, diffFrom, input.pullRequest)));
 
     // Whatever the diff says, committed dependencies never run: npm run puts node_modules/.bin first on PATH.
     const removed = await removeCommittedDependencies(workdir);
@@ -469,14 +483,14 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
         const status = r.timedOut ? "unclear" : r.code === 0 ? "pass" : "fail";
         if (status === "pass" && tampering.length) {
           // The delivery controls what this command ran, so its pass proves nothing.
-          evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status: "unclear", summary: `tamper check: ${ran}, but the result is not trusted: ${tampering.join("; ")}`, sha256: sha256(r.output) });
+          await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status: "unclear", summary: `tamper check: ${ran}, but the result is not trusted: ${tampering.join("; ")}`, sha256: sha256(r.output) });
         } else {
-          evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status, summary: `${ran}; last lines:\n${tail(r.output)}`, sha256: sha256(r.output) });
+          await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status, summary: `${ran}; last lines:\n${tail(r.output)}`, sha256: sha256(r.output) });
         }
       } else if (c.kind === "file") {
         const path = String(c.spec.path ?? "");
         const exists = await access(join(workdir, path)).then(() => true, () => false);
-        evidence.push({ id: `evd_${c.id}`, criterion_id: c.id, kind: "file", status: exists ? "pass" : "fail", summary: `${path} ${exists ? "present" : "missing"}` });
+        await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "file", status: exists ? "pass" : "fail", summary: `${path} ${exists ? "present" : "missing"}` });
       }
     }
     return {

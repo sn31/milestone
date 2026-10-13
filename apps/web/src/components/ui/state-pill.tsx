@@ -60,7 +60,8 @@ export interface StatePillProps {
 }
 
 /**
- * A status, typeset like an instrument tag: mono caps, the state's glyph, its colour on a 10% wash with a 1px edge.
+ * A status, typeset like an instrument tag: mono caps, the state's glyph, its colour on a 10% wash with a 1px edge. The text
+ * uses the state's ink (--tone-ink), one step darker on paper so 10px caps clear 4.5:1 on the wash.
  * Verifying shimmers and its dot breathes; nothing else moves.
  */
 export function StatePill({ state, size = "sm", label, tone, className }: StatePillProps) {
@@ -71,7 +72,7 @@ export function StatePill({ state, size = "sm", label, tone, className }: StateP
     <span
       data-tone={t}
       className={cx(
-        "relative inline-flex shrink-0 items-center overflow-hidden rounded-chip border border-tone bg-tone-soft font-mono uppercase text-tone",
+        "relative inline-flex shrink-0 items-center overflow-hidden rounded-chip border border-tone bg-tone-soft font-mono uppercase text-tone-ink",
         size === "md" ? "h-6 gap-2 px-2 text-[11px] tracking-[0.12em]" : "h-5 gap-1.5 px-1.5 text-[10px] tracking-[0.1em]",
         className,
       )}

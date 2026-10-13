@@ -35,6 +35,10 @@ export interface StationProps {
   connect?: boolean;
   /** Expanded content under the title: LogStream, CountdownRing, receipts. */
   children?: ReactNode;
+  /** Drawn over this station's connector, e.g. <ConnectorFill> as a release lands. */
+  connectorOverlay?: ReactNode;
+  /** Anchor id, so a return from checkout or a link can land on the station (e.g. "mst_3"). */
+  id?: string;
   className?: string;
 }
 
@@ -78,10 +82,10 @@ const CONNECTOR: Record<Phase, string> = {
  * The connector colour encodes the money: solid when it has passed, a fade from the state colour when it is here, dashed
  * when it has not arrived.
  */
-export function Station({ tone, phase = "upcoming", title, meta, aside, marker, glyph = "check", branch = false, connect = !branch, transit, children, className }: StationProps) {
+export function Station({ tone, phase = "upcoming", title, meta, aside, marker, glyph = "check", branch = false, connect = !branch, transit, children, connectorOverlay, id, className }: StationProps) {
   const live = tone === "verifying" && phase === "current";
   return (
-    <li data-tone={tone} className={cx("group/station relative pb-8 last:pb-0", branch && "pl-7", className)}>
+    <li id={id} data-tone={tone} className={cx("group/station relative scroll-mt-24 pb-8 last:pb-0", branch && "pl-7", className)}>
       {branch ? (
         <>
           {/* The main line passes by; the elbow leads into the side track. */}
@@ -95,6 +99,7 @@ export function Station({ tone, phase = "upcoming", title, meta, aside, marker, 
         <div className="relative flex justify-center pt-[3px]">
           <Node phase={phase} marker={marker} glyph={glyph} live={live} />
           {connect ? <span aria-hidden className={cx("absolute top-[28px] -bottom-8 left-1/2 -translate-x-1/2 group-last/station:hidden", CONNECTOR[phase])} /> : null}
+          {connect ? connectorOverlay : null}
           {transit ? <Transit {...transit} /> : null}
         </div>
         <div className="min-w-0">

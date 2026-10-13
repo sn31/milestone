@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import {
   AUDIT_EVENTS,
@@ -81,10 +81,37 @@ export function tamperBaseline(milestoneBaselineSha: string | null, payload: Pic
   return null;
 }
 
+type OnEvidence = (item: EvidenceSummary) => Promise<void>;
+
+/**
+ * Progress while the stage runs: each evidence item is appended to deliveries.evidence as its check finishes, so the
+ * contract page's poller shows the checks land one by one. Only while the delivery has no verdict: the verdict write
+ * replaces the column with the final list (the same items, in the same order), so its meaning once verified is
+ * unchanged. A failed progress write is logged and never fails the verification.
+ */
+export function evidenceProgress(db: Db, deliveryId: string): { reset(): Promise<void>; append: OnEvidence } {
+  return {
+    async reset() {
+      // A retried job starts its progress over instead of appending to the last attempt's.
+      await db.update(deliveries).set({ evidence: [] }).where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)));
+    },
+    async append(item) {
+      try {
+        await db
+          .update(deliveries)
+          .set({ evidence: sql`coalesce(${deliveries.evidence}, '[]'::jsonb) || jsonb_build_array(${JSON.stringify(item)}::jsonb)` })
+          .where(and(eq(deliveries.id, deliveryId), isNull(deliveries.verdict)));
+      } catch (e) {
+        console.warn(`[verify] ${deliveryId}: could not record progress for ${item.id}:`, (e as Error).message);
+      }
+    },
+  };
+}
+
 /** Deterministic stage; a delivery whose dependencies do not install becomes failing evidence instead of a retry loop. */
-async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
+async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null, onEvidence?: OnEvidence): Promise<DeterministicOutput | { evidence: EvidenceSummary[]; workdir: null; baseline: null }> {
   try {
-    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, pullRequest: { title: payload.title, body: payload.body }, ...tamperBaseline(baselineSha, payload) });
+    return await runDeterministicStage({ repoUrl: payload.clone_url, sha: payload.sha, criteria, setup: SETUP, pullRequest: { title: payload.title, body: payload.body }, ...tamperBaseline(baselineSha, payload), ...(onEvidence ? { onEvidence } : {}) });
   } catch (e) {
     const msg = (e as Error).message;
     if (!msg.startsWith("setup failed")) throw e; // clone/fetch problems are retried by pg-boss
@@ -116,8 +143,8 @@ async function conclude(deliveryId: string, milestone: Milestone, criteria: Crit
   return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
 }
 
-async function produceVerdict(deliveryId: string, milestone: Milestone, payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null) {
-  const stage = await deterministic(payload, criteria, baselineSha);
+async function produceVerdict(deliveryId: string, milestone: Milestone, payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null, onEvidence?: OnEvidence) {
+  const stage = await deterministic(payload, criteria, baselineSha, onEvidence);
   try {
     const commitMessage = stage.workdir ? await git(stage.workdir, ["log", "-1", "--format=%B", payload.sha]).catch(() => "") : "";
     const deliveryTexts = [
@@ -142,10 +169,10 @@ const EXCERPT = 4_000;
  * File delivery: the upload stage (format, size, dimensions, pages, words, required strings), then the judge with
  * view_file. No repository, so no tamper check: nothing in an upload controls what the checks run.
  */
-async function produceUploadVerdict(deliveryId: string, milestone: Milestone, payload: UploadPayload, criteria: CriterionSpec[]) {
+async function produceUploadVerdict(deliveryId: string, milestone: Milestone, payload: UploadPayload, criteria: CriterionSpec[], onEvidence?: OnEvidence) {
   const root = uploadRoot();
   const files = await Promise.all(payload.files.map(async (f) => ({ ...f, absPath: await safePath(root, f.path) })));
-  const stage = await runUploadStage({ files, criteria });
+  const stage = await runUploadStage({ files, criteria, ...(onEvidence ? { onEvidence } : {}) });
   const texts = stage.inspections.filter((i) => i.text?.trim()).map((i) => ({ source: `file ${i.name}`, text: i.text! }));
   const full = detectInjection(texts);
   const deliveryTexts = [
@@ -175,7 +202,12 @@ async function ensureVerdict(db: Db, ctx: DeliveryContext): Promise<{ verdict: V
       return null;
     }
     const context: Milestone = { title: milestone.title, scope: contract.scopeText };
-    const v = source.kind === "upload" ? await produceUploadVerdict(deliveryId, context, source.payload, criteria) : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha);
+    const progress = evidenceProgress(db, deliveryId);
+    await progress.reset();
+    const v =
+      source.kind === "upload"
+        ? await produceUploadVerdict(deliveryId, context, source.payload, criteria, progress.append)
+        : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha, progress.append);
     const written = await db
       .update(deliveries)
       .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })

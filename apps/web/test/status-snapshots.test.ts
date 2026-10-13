@@ -60,10 +60,10 @@ describe.skipIf(!e2e)("milestone status snapshots against Postgres", () => {
 
   it("reports the latest delivery, its evidence trimmed, and the events since it came in", async () => {
     const s = await getOne(a);
-    expect(s.delivery).toEqual({ id: `dlv_s_${tag}_new`, receivedAt: at(10).toISOString(), verifiedAt: at(20).toISOString(), result: "pass", evidenceCount: 53 });
+    expect(s.delivery).toMatchObject({ id: `dlv_s_${tag}_new`, receivedAt: at(10).toISOString(), verifiedAt: at(20).toISOString(), result: "pass", evidenceCount: 53 });
     expect(s.evidence).toHaveLength(40);
-    expect(s.evidence[0]).toEqual({ id: "ev_x", kind: "log", status: "pass", summary: `npm test: ${"y".repeat(229)}…` });
-    expect(s.evidence[1]).toEqual({ id: "ev_1", kind: "note", status: null, summary: "" });
+    expect(s.evidence[0]).toEqual({ id: "ev_x", kind: "log", status: "pass", summary: `npm test: ${"y".repeat(229)}…`, criterionId: null });
+    expect(s.evidence[1]).toEqual({ id: "ev_1", kind: "note", status: null, summary: "", criterionId: null });
     expect(s.events.map((e) => e.event)).toEqual(["milestone.verifying", "verdict.stored"]);
     expect(s.auditId).toBe(`aud_s_${tag}_3`);
     expect(s.live).toBe(true);

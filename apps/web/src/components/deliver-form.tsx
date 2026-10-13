@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Field, inputClass, cx } from "@/components/ui";
 import { postJson, thrownText } from "@/lib/api-client";
@@ -30,6 +30,10 @@ export function DeliverForm(props: {
   resubmit?: boolean;
   /** The latest delivery when it has no verdict yet. */
   pending?: PendingDelivery | null;
+  /** The release conditions (a bare CriteriaList), folded behind the header's "checks" toggle. */
+  conditions?: ReactNode;
+  /** "3 checks · 2 required", printed on that toggle. */
+  conditionsSummary?: string;
 }) {
   const router = useRouter();
   const uid = useId();
@@ -124,19 +128,41 @@ export function DeliverForm(props: {
     void send("repo", `/api/milestones/${props.milestoneId}/deliver`, { repoUrl, ref });
   }
 
+  const header = (
+    <>
+      <p className="type-label text-fg">{props.resubmit ? "Resubmit for verification" : "Deliver"}</p>
+      {props.conditions ? (
+        <span className="ml-auto flex items-center gap-2 font-mono text-[11px] text-fg-muted tabular">
+          <span className="max-sm:hidden">Checks this delivery must pass</span>
+          <span className="text-fg-faint">{props.conditionsSummary}</span>
+          <svg aria-hidden viewBox="0 0 10 10" className="size-2.5 shrink-0 text-fg-faint transition-transform duration-200 ease-glide group-open/deliver:rotate-90" fill="none" stroke="currentColor" strokeWidth={1.5}>
+            <path d="M3.5 1.8 L6.8 5 L3.5 8.2" />
+          </svg>
+        </span>
+      ) : (
+        <p className="text-[13px] text-fg-muted">The agent checks every condition above; the money stays in escrow meanwhile.</p>
+      )}
+    </>
+  );
   return (
     <section data-tone="verifying" aria-label="Deliver this milestone" className="overflow-hidden rounded-panel border border-dashed border-hairline-strong">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-dashed border-hairline-strong px-4 py-3 sm:px-5">
-        <p className="type-label text-fg">{props.resubmit ? "Resubmit for verification" : "Deliver"}</p>
-        <p className="text-[13px] text-fg-muted">The agent checks every condition above; the money stays in escrow meanwhile.</p>
-      </div>
+      {props.conditions ? (
+        <details className="group/deliver border-b border-dashed border-hairline-strong">
+          <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 transition-colors duration-200 hover:bg-surface-raised sm:px-5 [&::-webkit-details-marker]:hidden">
+            {header}
+          </summary>
+          <div className="border-t border-dashed border-hairline bg-surface-sunken">{props.conditions}</div>
+        </details>
+      ) : (
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-dashed border-hairline-strong px-4 py-3 sm:px-5">{header}</div>
+      )}
       <div className="grid gap-5 px-4 py-4 sm:px-5 sm:py-5">
         {props.files ? (
           <form onSubmit={uploadFiles} className="grid gap-3">
             <Field
               label="Files"
               htmlFor={`${uid}-files`}
-              hint={`Up to ${MAX_FILES} files, ${MAX_MB} MB each${props.accept ? ` · ${props.accept}` : ""}`}
+              hint={`Up to ${MAX_FILES} files, ${MAX_MB} MB each${props.accept ? ` · ${acceptLabel(props.accept)}` : ""}`}
             >
               <input
                 id={`${uid}-files`}
@@ -177,20 +203,21 @@ export function DeliverForm(props: {
           </p>
         ) : null}
         {props.repo ? (
-          <form onSubmit={deliverRepo} className="grid gap-3">
-            <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1fr)_200px]">
-              <Field label="Repository" htmlFor={`${uid}-repo`} hint="https URL or a local path">
+          <form onSubmit={deliverRepo} className="grid items-end gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1fr)_160px]">
+              <Field label="Repository" htmlFor={`${uid}-repo`}>
                 <input
                   id={`${uid}-repo`}
                   className={cx(inputClass, "font-mono text-[13px]")}
                   value={repoUrl}
                   onChange={(e) => setRepoUrl(e.target.value)}
+                  // scripts/demo/beats.mjs finds this field by its placeholder: keep the two in step.
                   placeholder="https://github.com/you/repo.git"
                   required
                   disabled={busy !== null}
                 />
               </Field>
-              <Field label="Branch, tag or commit" htmlFor={`${uid}-ref`}>
+              <Field label="Branch or commit" htmlFor={`${uid}-ref`}>
                 <input
                   id={`${uid}-ref`}
                   className={cx(inputClass, "font-mono text-[13px]")}
@@ -222,4 +249,14 @@ export function DeliverForm(props: {
       </div>
     </section>
   );
+}
+
+/** The criteria's file patterns ("*.{svg,png}, *.pdf") as words a person reads: "SVG, PNG or PDF". */
+function acceptLabel(accept: string): string {
+  const exts = [...accept.matchAll(/\*\.(\{[^}]+\}|\w+)/g)]
+    .flatMap((m) => m[1]!.replace(/[{}]/g, "").split(","))
+    .map((e) => e.trim().toUpperCase())
+    .filter((e, i, all) => e && all.indexOf(e) === i);
+  if (exts.length === 0) return accept;
+  return exts.length === 1 ? exts[0]! : `${exts.slice(0, -1).join(", ")} or ${exts.at(-1)}`;
 }

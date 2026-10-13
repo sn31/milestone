@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, DUR, EASE, Field, StateGlyph, cx, inputClass } from "@/components/ui";
 import { postJson } from "@/lib/api-client";
@@ -17,10 +17,16 @@ export function ResolveForm({ milestoneId, disabled }: { milestoneId: string; di
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (busy || note.trim() === "") return;
+    if (busy) return;
+    if (note.trim() === "") {
+      setErr("Write down what you did first: the note is the record.");
+      inputRef.current?.focus();
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -48,13 +54,17 @@ export function ResolveForm({ milestoneId, disabled }: { milestoneId: string; di
         <div className="flex flex-col gap-2 sm:flex-row">
           <input
             id={id}
+            ref={inputRef}
             value={note}
-            onChange={(e) => setNote(e.target.value)}
+            onChange={(e) => {
+              setNote(e.target.value);
+              if (err) setErr(null);
+            }}
             placeholder="Paid the freelancer by hand, batch 7Q4…"
             disabled={disabled || busy || done}
             className={cx(inputClass, "h-10 font-mono text-[13px]")}
           />
-          <Button type="submit" variant="secondary" disabled={disabled || busy || done || note.trim() === ""} className="shrink-0">
+          <Button type="submit" variant="secondary" disabled={disabled || busy || done} className="shrink-0">
             {busy ? "Resolving" : "Mark resolved"}
           </Button>
         </div>

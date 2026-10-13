@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evidenceLines, toSnapshot } from "./snapshot";
+import { evidenceLines, judgedLines, toSnapshot } from "./snapshot";
 
 const m = { id: "mst_1", status: "verifying" as const, decidedAt: null, reviewEndsAt: null };
 const at = (s: number) => new Date(Date.UTC(2026, 9, 8, 14, 0, s));
@@ -9,7 +9,10 @@ describe("toSnapshot", () => {
     expect(toSnapshot(m, null, [], null, null).live).toBe(true);
     expect(toSnapshot({ ...m, status: "review" }, null, [], null, null).live).toBe(true);
     expect(toSnapshot({ ...m, status: "needs_client" }, null, [], null, null).live).toBe(true);
-    expect(toSnapshot({ ...m, status: "held" }, null, [], null, null).live).toBe(false);
+    // funded and held wait on a delivery from the other party: watched (slowly) so it shows up on an open page
+    expect(toSnapshot({ ...m, status: "held" }, null, [], null, null).live).toBe(true);
+    expect(toSnapshot({ ...m, status: "funded" }, null, [], null, null).live).toBe(true);
+    expect(toSnapshot({ ...m, status: "draft" }, null, [], null, null).live).toBe(false);
     expect(toSnapshot({ ...m, status: "released" }, null, [], null, null).live).toBe(false);
     expect(toSnapshot({ ...m, status: "funded" }, null, [], null, { kind: "payout", status: "sent" }).live).toBe(true);
   });
@@ -19,8 +22,8 @@ describe("toSnapshot", () => {
     const now = at(10).getTime();
     expect(toSnapshot({ ...m, status: "funded" }, fresh, [], null, null, now).live).toBe(true);
     expect(toSnapshot({ ...m, status: "held" }, fresh, [], null, null, now).live).toBe(true);
-    expect(toSnapshot({ ...m, status: "funded" }, { ...fresh, result: "pass" as const, verifiedAt: at(5) }, [], null, null, now).live).toBe(false);
-    expect(toSnapshot({ ...m, status: "funded" }, fresh, [], null, null, now + 31 * 60_000).live).toBe(false);
+    expect(toSnapshot({ ...m, status: "released" }, { ...fresh, result: "pass" as const, verifiedAt: at(5) }, [], null, null, now).live).toBe(false);
+    expect(toSnapshot({ ...m, status: "released" }, fresh, [], null, null, now + 31 * 60_000).live).toBe(false);
   });
 
   it("reports the latest delivery's verification and evidence, and events oldest first", () => {
@@ -36,14 +39,23 @@ describe("toSnapshot", () => {
       { id: "aud_2", createdAt: at(1), event: "milestone.verifying" },
     ];
     const s = toSnapshot(m, delivery, events, events[0]!, null);
-    expect(s.delivery).toEqual({ id: "dlv_1", receivedAt: at(0).toISOString(), verifiedAt: at(30).toISOString(), result: "pass", evidenceCount: 3 });
+    expect(s.delivery).toEqual({ id: "dlv_1", receivedAt: at(0).toISOString(), verifiedAt: at(30).toISOString(), result: "pass", evidenceCount: 3, model: null, judged: [] });
     expect(s.evidence).toEqual([
-      { id: "ev_1", kind: "log", status: "pass", summary: "npm test: 14 passed" },
+      { id: "ev_1", kind: "log", status: "pass", summary: "npm test: 14 passed", criterionId: "crt_1" },
       // no id of its own: numbered by position among the kept items
-      { id: "ev_1", kind: "diff", status: null, summary: "" },
+      { id: "ev_1", kind: "diff", status: null, summary: "", criterionId: null },
     ]);
     expect(s.events.map((e) => e.event)).toEqual(["milestone.verifying", "verdict.stored"]);
     expect(s.auditId).toBe("aud_3");
+  });
+});
+
+describe("judgedLines", () => {
+  it("reads a stored verdict or the loader's trimmed list, skipping junk", () => {
+    const want = [{ criterionId: "crt_1", status: "pass", confidence: 0.9 }, { criterionId: "crt_2", status: "unclear", confidence: null }];
+    expect(judgedLines({ criteria: [{ criterion_id: "crt_1", status: "pass", confidence: 0.9, rationale: "x" }, { criterion_id: "crt_2", status: "unclear" }, "junk", { status: "pass" }] })).toEqual(want);
+    expect(judgedLines([{ criterion_id: "crt_1", status: "pass", confidence: 0.9 }, { criterion_id: "crt_2", status: "unclear", confidence: null }])).toEqual(want);
+    expect(judgedLines(null)).toEqual([]);
   });
 });
 

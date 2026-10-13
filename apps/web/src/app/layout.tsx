@@ -4,7 +4,10 @@ import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import { RoleSwitcher } from "@/components/role-switcher";
 import { MotionProvider, NavLink } from "@/components/ui";
 import { getActor } from "@/lib/session";
+import { INTRO_KEY } from "./_home/intro-key";
 import "./globals.css";
+
+const INTRO_SCRIPT = `try{if(localStorage.getItem(${JSON.stringify(INTRO_KEY)})==="hidden")document.documentElement.dataset.intro="hidden"}catch(e){}`;
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
@@ -45,8 +48,8 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
-        {/* Marks JS as available before first paint so count-ups can hide their final value until they animate. */}
-        <script dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }} />
+        {/* Before first paint: hide the home page's first-run band for a viewer who dismissed it (see app/_home/first-run.tsx). */}
+        <script dangerouslySetInnerHTML={{ __html: INTRO_SCRIPT }} />
       </head>
       <body className="flex min-h-full flex-col">
         <MotionProvider>
