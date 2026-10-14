@@ -31,6 +31,8 @@ interface Expected {
   removed: string[];
   manifests: string[];
   gaming: string[];
+  /** Delivery-added or re-pointed dependencies (finding 4), as "name@spec reason[/source]". */
+  dependencies?: string[];
   removedCommitted: boolean;
   result: VerdictResult;
   action: PolicyAction;
@@ -58,6 +60,7 @@ interface Row {
   removed: string[];
   manifests: string[];
   gaming: string[];
+  dependencies: string[];
   /** The delivery's own tests (informational pass): exit code, or null when it did not run. */
   deliveredExit: number | null;
   untrusted: string | null;
@@ -90,7 +93,7 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
   afterAll(() => {
     if (!rows.length) return;
     writeFileSync(join(DIR, "results.json"), `${JSON.stringify({ ranAt: new Date().toISOString(), node: process.version, rows }, null, 2)}\n`);
-    console.log(rows.map((r) => [r.pair.padEnd(30), `${String(r.stageMs).padStart(6)}ms`, `exit ${r.testExit}`, (r.testStatus ?? "-").padEnd(7), r.result.padEnd(7), `${r.action} ${r.rule}`.padEnd(16), [...r.restored.map((x) => `restored ${x}`), ...r.removed.map((x) => `removed ${x}`), ...r.manifests, ...r.gaming.map((x) => `gaming ${x}`)].join("; ") || "-", `own tests exit ${r.deliveredExit ?? "-"}`, r.matchesExpected ? "" : `MISMATCH: ${r.mismatches.join(" | ")}`].join("  ")).join("\n"));
+    console.log(rows.map((r) => [r.pair.padEnd(30), `${String(r.stageMs).padStart(6)}ms`, `exit ${r.testExit}`, (r.testStatus ?? "-").padEnd(7), r.result.padEnd(7), `${r.action} ${r.rule}`.padEnd(16), [...r.restored.map((x) => `restored ${x}`), ...r.removed.map((x) => `removed ${x}`), ...r.manifests, ...r.gaming.map((x) => `gaming ${x}`), ...r.dependencies.map((x) => `dependency ${x}`)].join("; ") || "-", `own tests exit ${r.deliveredExit ?? "-"}`, r.matchesExpected ? "" : `MISMATCH: ${r.mismatches.join(" | ")}`].join("  ")).join("\n"));
   });
 
   it.each(pairs)("%s", { timeout: 600_000 }, async (pair, repo, d) => {
@@ -115,9 +118,10 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
     const exit = /exited (\d+|null)/.exec(tests?.summary ?? "")?.[1];
     const testExit = exit === undefined || exit === "null" ? null : Number(exit);
     const removedCommitted = (out.logs["setup:remove-committed-node_modules"] ?? "").split("\n").filter(Boolean);
-    const overlay = out.overlay ?? { restored: [], removed: [], manifests: [], lockfilesDropped: [] };
+    const overlay = out.overlay ?? { restored: [], removed: [], manifests: [], lockfilesDropped: [], newDependencies: [] };
     const manifests = overlay.manifests.map((m) => `${m.path}: ${m.keys.join(", ")}`);
     const gaming = out.gaming.map((h) => `${h.file}:${h.line} ${h.rule}`);
+    const dependencies = overlay.newDependencies.map((dep) => `${dep.name}@${dep.spec} ${dep.reason}${dep.source ? `/${dep.source}` : ""}`);
     const deliveredRaw = /exited (\d+)/.exec(out.evidence.find((x) => x.id === "evd_tests_delivered")?.summary ?? "")?.[1];
     const deliveredExit = deliveredRaw === undefined ? null : Number(deliveredRaw);
 
@@ -141,6 +145,7 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
       ["removed", JSON.stringify(overlay.removed) === JSON.stringify(e.removed), overlay.removed, e.removed],
       ["manifests", JSON.stringify(manifests) === JSON.stringify(e.manifests), manifests, e.manifests],
       ["gaming", JSON.stringify(gaming) === JSON.stringify(e.gaming), gaming, e.gaming],
+      ["dependencies", JSON.stringify(dependencies) === JSON.stringify(e.dependencies ?? []), dependencies, e.dependencies ?? []],
       ["removedCommitted", removedCommitted.length > 0 === e.removedCommitted, removedCommitted, e.removedCommitted],
       ["fileStatus", file?.status === "pass", file?.status, "pass"],
       ["result", result === e.result, result, e.result],
@@ -150,7 +155,7 @@ describe.skipIf(!ENABLED)("deterministic verifier on real public repositories (n
     ];
     const mismatches = checks.filter(([, ok]) => !ok).map(([k, , got, want]) => `${k}: got ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);
     rows.push({
-      pair, kind: d.kind, sha, stageMs, testExit, testStatus: tests?.status, restored: overlay.restored, removed: overlay.removed, manifests, gaming, deliveredExit, untrusted: out.untrusted, removedCommitted,
+      pair, kind: d.kind, sha, stageMs, testExit, testStatus: tests?.status, restored: overlay.restored, removed: overlay.removed, manifests, gaming, dependencies, deliveredExit, untrusted: out.untrusted, removedCommitted,
       fileStatus: file?.status, result, action: decision.action, rule: decision.ruleIds.join(","),
       actionIfJudgmentPasses: decisionIfPassed.action, ruleIfJudgmentPasses: decisionIfPassed.ruleIds.join(","),
       matchesExpected: mismatches.length === 0, mismatches,

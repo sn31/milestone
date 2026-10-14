@@ -76,11 +76,11 @@ Totals over the 50 cases:
 
 | Rule | P0 | P1 | P2 | P3 | P4 | P5 | P6 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Cases | 2 | 8 | 8 | 12 | 2 | 5 | 13 |
+| Cases | 2 | 8 | 9 | 11 | 2 | 5 | 13 |
 
 | Action | release | partial | hold | ask_client |
 | --- | --- | --- | --- | --- |
-| Cases | 13 | 5 | 8 | 24 |
+| Cases | 13 | 5 | 9 | 23 |
 
 Criterion kinds used: test, judgment, upload, build, file, visual (all six). Nine cases expect `suspectedInjection: true`.
 

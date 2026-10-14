@@ -2,8 +2,8 @@
 # Creates a git repo for the Milestone demo from fixtures/demo-repo/template.
 # Usage: scripts/make-demo-repo.sh <target-dir>
 # Branches (each one commit on top of main):
-#   m1-pass       password strength check, all tests pass
-#   m2-partial    pricing page, annual discount test fails
+#   m1-pass       password strength check, the client's tests and its own tests pass
+#   m2-partial    pricing page; the client's annual discount test (already on main, skipped there) fails
 #   m2-injection  same tree as m2-partial, commit message carries a reviewer-approval injection
 set -euo pipefail
 
@@ -84,7 +84,7 @@ JS
 "${GIT[@]}" commit -q -m "feat: password strength check"
 "${GIT[@]}" checkout -q main
 
-# m2-partial: pricing page; the annual discount test fails
+# m2-partial: pricing page. annualPriceCents now exists, so the client's annual discount test on main runs and fails.
 "${GIT[@]}" checkout -q -b m2-partial main
 cat > src/pricing.js <<'JS'
 // Plan table for the landing page. Prices are integer cents per month.
@@ -102,26 +102,6 @@ function annualPriceCents(planId) {
 }
 
 module.exports = { PLANS, annualPriceCents };
-JS
-cat > test/pricing.test.js <<'JS'
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const { PLANS, annualPriceCents } = require('../src/pricing');
-
-test('every plan has a positive monthly price', () => {
-  for (const plan of Object.values(PLANS)) {
-    assert.ok(plan.monthlyCents > 0, plan.name);
-  }
-});
-
-test('starter is the cheapest plan', () => {
-  const prices = Object.values(PLANS).map((plan) => plan.monthlyCents);
-  assert.equal(PLANS.starter.monthlyCents, Math.min(...prices));
-});
-
-test('annual billing gives 20% off twelve months', () => {
-  assert.equal(annualPriceCents('pro'), Math.round(PLANS.pro.monthlyCents * 12 * 0.8));
-});
 JS
 cat > public/pricing.html <<'HTML'
 <!doctype html>

@@ -766,3 +766,29 @@ under `design-v3-final/` (`beatNN-*` for the video frames, `screen-*` for the sw
    repo at a short path (`/tmp/milestone-demo`), as the video notes say.
 5. **The client's funded station shows the release conditions open** (about 170 px at 1280 and about 400 px at 390). It is
    useful in the fund beat, but tall on a phone.
+
+## Review 3: baseline suite copy
+
+Rule 9 now has the client's suite grade every code delivery, so the receipt and the live log say that instead of the old
+tamper wording ("The delivery left the test machinery alone" is gone).
+
+- **Receipt.** The first row is "Graded by the client's tests" (kind `suite`, status RAN in green) with one line: "The
+  suite from 84f62b844f09 ran against the delivered code; removed test/password.test.js (added by the delivery)", or
+  "nothing to restore or remove". When the suite could not be put in place it reads "Not graded by the client's tests"
+  (UNCLEAR) with the reason, and the folded summary keeps its "Tests not trusted" pill.
+- **Flags.** Each gaming hit (`evd_gaming_*`), and any other unclear diff item on a test or build criterion except the
+  suite item (new-dependency hits will arrive this way), is its own row in the needs tone: kind `flag`, `file:line` in
+  mono, what was found, the flagged line as code, then the reason. The test row a flag made unclear no longer repeats the
+  flag; it says "npm test exited 0 with the client's baseline suite. Not trusted: the flag above, so the client decides."
+  The folded summary shows "1 flag".
+- **The freelancer's own tests** (`evd_*_delivered`, the informational pass) are one quiet mono line at the foot of the
+  rows: "The freelancer's own tests: 12 passing, not used for payment". It opens the evidence row when the grid is shown.
+- **Failing tests by name.** A failed test row adds the client's failing tests from its log: "npm test exited 1 with the
+  client's baseline suite · failing: annual billing gives 20% off twelve months".
+- **Live log.** `suite   client's tests from 84f62b844f09 · removed test/password.test.js`, `flag    src/pricing.js:12
+  reads process.env.CI · the client decides` (settles the test criterion as unclear on the checklist), and `own     the
+  freelancer's own tests · passing (exit 0), not used for payment` (the snapshot's 240-character summaries are cut before
+  the counts, so the log falls back to the exit code).
+- Checked at 1440x900 dark on a scratch server: m1-pass (RAN, removed the added test, own tests 12 passing, ASK CLIENT
+  P3 with no model), m2-partial (RAN, nothing to restore, the client's annual billing test failing, HOLD P2), and an
+  env-sniff branch for the flag row (ASK CLIENT P3).

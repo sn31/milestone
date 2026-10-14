@@ -312,7 +312,7 @@ paths:
       description: |
         The contract's freelancer only, while the milestone is funded or held. The ref (default HEAD) is resolved to a
         commit with git ls-remote, a delivery with source `manual` is stored in the GitHub webhook's payload shape
-        (the baseline for the tamper check is the milestone's funding-time sha), and a verify job is queued. The same
+        (the baseline for the client's test suite is the milestone's funding-time sha), and a verify job is queued. The same
         milestone and commit give the same delivery id, so a repeat returns `duplicate: true`.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
@@ -351,7 +351,7 @@ paths:
         multipart field `files`, optional text field `note`. Files are stored under UPLOAD_DIR/<deliveryId>/ (default
         var/uploads) with their sha256, a delivery with source `upload` is recorded, and a verify job runs the upload
         checks (format by magic bytes, size, image dimensions, PDF page count, word count, required strings) and the
-        judgment stage. There is no tamper check for uploads. Delivered files are untrusted evidence.
+        judgment stage. There is no baseline suite or gaming scan for uploads. Delivered files are untrusted evidence.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_brand_1 }
       requestBody:

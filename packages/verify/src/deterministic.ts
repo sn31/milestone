@@ -93,6 +93,8 @@ export interface OverlayReport {
   manifests: Array<{ path: string; keys: string[] }>;
   /** npm lockfiles dropped because the delivery's dependencies no longer match the baseline's. */
   lockfilesDropped: string[];
+  /** Dependencies the delivery adds or re-points at a non-registry source (finding 4); each is unclear evidence on the test criterion. */
+  newDependencies: NewDependency[];
 }
 
 export interface DeterministicOutput {
@@ -203,6 +205,16 @@ function parseObject(text: string | null | undefined): Record<string, unknown> |
   }
 }
 
+/** A dependency the delivery introduces that will install and run unreviewed code with the client's tests. */
+export interface NewDependency {
+  name: string;
+  spec: string;
+  /** "new" (a name absent from every baseline dependency field) or "source" (an existing name re-pointed at a non-registry source). */
+  reason: "new" | "source";
+  /** The source kind for a re-pointed or non-registry spec (file/link/git/url/tarball/alias), or null for a plain registry spec. */
+  source: string | null;
+}
+
 export interface ManifestMerge {
   /** The text to write, or null when the delivered manifest already has the baseline's values. */
   text: string | null;
@@ -210,6 +222,23 @@ export interface ManifestMerge {
   keys: string[];
   /** The merged manifest's dependencies differ from the baseline's (the baseline lockfile no longer matches). */
   dependencyChange: boolean;
+  /** Dependencies the delivery adds, or re-points at a non-registry source, that will run with the client's tests. */
+  newDependencies: NewDependency[];
+}
+
+/**
+ * Classifies a dependency version spec by where its code comes from. A plain semver range from the default registry is
+ * "registry" (null source); everything else names an untrusted source: a local folder (file:/link:), a git repository,
+ * a URL or tarball, or a registry alias that points at a *different* package name (npm:other@...).
+ */
+export function depSource(spec: string): string | null {
+  const s = String(spec).trim();
+  if (/^(file|link|portal):/i.test(s)) return s.slice(0, s.indexOf(":")).toLowerCase();
+  if (/^(git\+|git:|ssh:)/i.test(s) || /^(github|gitlab|bitbucket|gist):/i.test(s)) return "git";
+  if (/^https?:\/\//i.test(s)) return /\.(tgz|tar\.gz)(\?|#|$)/i.test(s) ? "tarball" : "url";
+  if (/^npm:/i.test(s)) return "alias";
+  if (/^workspace:/i.test(s)) return "workspace";
+  return null;
 }
 
 /**
@@ -221,7 +250,7 @@ export interface ManifestMerge {
 export function mergeManifest(baselineText: string, deliveredText: string): ManifestMerge {
   const b = parseObject(baselineText);
   const d = parseObject(deliveredText);
-  if (!b || !d) return { text: baselineText === deliveredText ? null : baselineText, keys: baselineText === deliveredText ? [] : ["whole file (unparseable)"], dependencyChange: false };
+  if (!b || !d) return { text: baselineText === deliveredText ? null : baselineText, keys: baselineText === deliveredText ? [] : ["whole file (unparseable)"], dependencyChange: false, newDependencies: [] };
   const guarded = new Set<string>(MANIFEST_KEYS);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(d)) {
@@ -245,9 +274,27 @@ export function mergeManifest(baselineText: string, deliveredText: string): Mani
     }
   }
   const dependencyChange = canonical(out.dependencies) !== canonical(b.dependencies);
-  if (canonical(out) === canonical(d)) return { text: null, keys: [], dependencyChange };
+  // Finding 4 (a policy rule, not detection): the merged dependencies are what npm will install and run with the
+  // client's tests. Flag a name absent from every baseline dependency field, or an existing name re-pointed at a
+  // non-registry source. A version bump within the same registry name is not flagged.
+  const newDependencies: NewDependency[] = [];
+  const outDeps = (out.dependencies ?? {}) as Record<string, unknown>;
+  if (out.dependencies && typeof out.dependencies === "object" && !Array.isArray(out.dependencies)) {
+    const baseDeps = (b.dependencies ?? {}) as Record<string, unknown>;
+    const baseAllNames = new Set(["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap((k) => Object.keys((b[k] ?? {}) as Record<string, unknown>)));
+    for (const [name, specV] of Object.entries(outDeps)) {
+      const spec = String(specV);
+      if (!baseAllNames.has(name)) {
+        newDependencies.push({ name, spec, reason: "new", source: depSource(spec) });
+      } else if (name in baseDeps && canonical(baseDeps[name]) !== canonical(specV)) {
+        const src = depSource(spec);
+        if (src !== null) newDependencies.push({ name, spec, reason: "source", source: src });
+      }
+    }
+  }
+  if (canonical(out) === canonical(d)) return { text: null, keys: [], dependencyChange, newDependencies };
   const indent = /^\{\s*\n([ \t]+)"/.exec(deliveredText)?.[1] ?? "  ";
-  return { text: `${JSON.stringify(out, null, indent)}\n`, keys, dependencyChange };
+  return { text: `${JSON.stringify(out, null, indent)}\n`, keys, dependencyChange, newDependencies };
 }
 
 /**
@@ -740,13 +787,15 @@ export interface OverlayPlan {
   manifests: Array<{ path: string; text: string; keys: string[] }>;
   /** The merged dependencies differ from the baseline's: drop the root npm lockfiles instead of restoring them. */
   dropLockfiles: boolean;
+  /** Dependencies the delivery adds or re-points at a non-registry source (finding 4), with the manifest they came from. */
+  newDependencies: Array<{ path: string; dep: NewDependency }>;
 }
 
 const ROOT_NPM_LOCKS = ["package-lock.json", "npm-shrinkwrap.json"];
 
 /** What the overlay does, from the delivery's changes against the baseline. Committed dependencies are left to removeCommittedDependencies. */
 export function planOverlay(changes: FileChange[], isInfra: (path: string) => boolean, manifestTexts: (path: string) => { baseline: string | null; delivered: string | null }): OverlayPlan {
-  const plan: OverlayPlan = { restore: [], restoreDeleted: [], remove: [], manifests: [], dropLockfiles: false };
+  const plan: OverlayPlan = { restore: [], restoreDeleted: [], remove: [], manifests: [], dropLockfiles: false, newDependencies: [] };
   for (const c of changes) {
     if (COMMITTED_DEPS.test(c.path)) continue;
     if (isManifest(c.path)) {
@@ -761,6 +810,7 @@ export function planOverlay(changes: FileChange[], isInfra: (path: string) => bo
       const merged = mergeManifest(t.baseline, t.delivered ?? "");
       if (merged.text !== null) plan.manifests.push({ path: c.path, text: merged.text, keys: merged.keys });
       if (merged.dependencyChange) plan.dropLockfiles = true;
+      for (const dep of merged.newDependencies) plan.newDependencies.push({ path: c.path, dep });
       continue;
     }
     if (!isInfra(c.path)) continue;
@@ -787,6 +837,7 @@ export function overlaySummary(against: string, changed: number, o: OverlayRepor
   if (o.removed.length) parts.push(`removed ${capList(o.removed)}`);
   for (const m of o.manifests) parts.push(`${m.path}: kept the baseline ${m.keys.join(", ")}`);
   if (o.lockfilesDropped.length) parts.push(`dropped ${o.lockfilesDropped.join(", ")} (the delivery changes dependencies, so setup installs from package.json)`);
+  if (o.newDependencies.length) parts.push(`the client decides on ${o.newDependencies.map((d) => `${d.name}@${d.spec}`).join(", ")} (delivery-added, unreviewed)`);
   if (parts.length === 1) parts.push("the delivery leaves the tests, runner config, scripts and dev dependencies as they were");
   return parts.join("; ");
 }
@@ -855,7 +906,7 @@ interface Overlay extends OverlayReport {
 }
 
 const commandOf = (c: CriterionSpec) => String(c.spec.command ?? (c.kind === "test" ? "npm test" : "npm run build"));
-const touched = (o: OverlayReport) => o.restored.length + o.removed.length + o.manifests.length + o.lockfilesDropped.length > 0;
+const touched = (o: OverlayReport) => o.restored.length + o.removed.length + o.manifests.length + o.lockfilesDropped.length + o.newDependencies.length > 0;
 
 /** Resolves the baseline, then makes the checkout run the client's suite (see the header). Throws BaselineError. */
 async function applyBaselineOverlay(workdir: string, head: string, env: Record<string, string>, input: DeterministicInput): Promise<Overlay> {
@@ -941,6 +992,7 @@ async function applyBaselineOverlay(workdir: string, head: string, env: Record<s
     removed: plan.remove,
     manifests: plan.manifests.map((m) => ({ path: m.path, keys: m.keys })),
     lockfilesDropped,
+    newDependencies: plan.newDependencies.map((x) => x.dep),
     infra,
   };
 }
@@ -1094,6 +1146,34 @@ export function gamingEvidence(criterionId: string, hits: GamingHit[]): Evidence
   });
 }
 
+/** One sentence per added/re-pointed dependency, describing why it is unreviewed. */
+export function describeDependency(d: NewDependency): string {
+  if (d.reason === "new") {
+    const via = d.source ? ` (a ${d.source} source)` : "";
+    return `new dependency ${d.name}@${d.spec}${via}: its code runs with the client's tests and is not reviewed; the client decides`;
+  }
+  return `dependency ${d.name} now resolves to ${d.spec} (a ${d.source} source) instead of the registry: its code runs with the client's tests and is not reviewed; the client decides`;
+}
+
+/**
+ * Evidence items for finding 4 (a policy rule, not detection): a dependency the delivery adds, or re-points at a
+ * non-registry source, installs and runs unreviewed code with the client's tests. Each is unclear on the test
+ * criterion, so a passing suite is sent to the client (P3) rather than trusted. Capped like the gaming hits.
+ */
+export function dependencyEvidence(criterionId: string, deps: NewDependency[]): EvidenceSummary[] {
+  const shown = deps.slice(0, GAMING_MAX_ITEMS);
+  return shown.map((d, i) => {
+    const more = i === shown.length - 1 && deps.length > shown.length ? ` (and ${deps.length - shown.length} more)` : "";
+    return {
+      id: `evd_dependency_${criterionId}_${i + 1}`,
+      criterion_id: criterionId,
+      kind: "diff" as const,
+      status: "unclear" as const,
+      summary: `delivery-added dependency: ${describeDependency(d)}${more}`,
+    };
+  });
+}
+
 export async function runDeterministicStage(input: DeterministicInput): Promise<DeterministicOutput> {
   const workdir = await mkdtemp(join(tmpdir(), "milestone-verify-"));
   // The realpath is taken now: the error path below removes the workdir before scrubbing.
@@ -1146,10 +1226,11 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
         untrusted = `the gaming scan could not read the diff (${(e as Error).message})`;
       }
     }
+    const newDeps = overlay?.newDependencies ?? [];
     await record(...(await contextEvidence(workdir, head, env, diffFrom, input.pullRequest)));
     // With no test or build criterion there is no pass to distrust; the hits are still shown.
-    if (gaming.length && !input.criteria.some((c) => c.kind === "test" || c.kind === "build")) {
-      await record(...gamingEvidence("delivery", gaming).map(({ criterion_id: _, ...e }) => e));
+    if ((gaming.length || newDeps.length) && !input.criteria.some((c) => c.kind === "test" || c.kind === "build")) {
+      await record(...[...gamingEvidence("delivery", gaming), ...dependencyEvidence("delivery", newDeps)].map(({ criterion_id: _, ...e }) => e));
     }
 
     // Whatever the diff says, committed dependencies never run: npm run puts node_modules/.bin first on PATH.
@@ -1187,8 +1268,8 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
           continue;
         }
         const item: EvidenceSummary = { id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status, summary: `${ran} with the client's baseline suite; last lines:\n${tail(r.output)}`, sha256: sha256(r.output) };
-        const hits = gamingTargets.has(c.id) ? gamingEvidence(c.id, gaming) : [];
-        // enforce() keeps the last item with a status per criterion: a gaming hit overrules a pass, never a fail.
+        const hits = gamingTargets.has(c.id) ? [...gamingEvidence(c.id, gaming), ...dependencyEvidence(c.id, newDeps)] : [];
+        // enforce() keeps the last item with a status per criterion: a gaming hit or an unreviewed dependency overrules a pass, never a fail.
         if (status === "fail") await record(...hits, item);
         else await record(item, ...hits);
       } else if (c.kind === "file") {
@@ -1221,7 +1302,7 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       evidence: scrubEvidence(evidence, roots),
       logs: Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, scrub(v)])),
       workdir,
-      overlay: overlay ? { restored: overlay.restored, removed: overlay.removed, manifests: overlay.manifests, lockfilesDropped: overlay.lockfilesDropped } : null,
+      overlay: overlay ? { restored: overlay.restored, removed: overlay.removed, manifests: overlay.manifests, lockfilesDropped: overlay.lockfilesDropped, newDependencies: overlay.newDependencies } : null,
       untrusted: untrusted === null ? null : scrub(untrusted),
       gaming,
       baseline,

@@ -7,6 +7,9 @@ import type { CriterionSpec } from "@milestone/core";
 import {
   COMMIT_EVIDENCE_ID,
   commitSummary,
+  dependencyEvidence,
+  depSource,
+  describeDependency,
   DIFF_EVIDENCE_ID,
   DIFF_EXCERPT_CHARS,
   diffSummary,
@@ -108,6 +111,8 @@ describe("mergeManifest: baseline values of the test keys, the delivery's everyt
     expect(out).toEqual({ name: "x", version: "1.1.0", description: "new", main: "index.js", scripts: { test: "mocha", build: "node bin/build" }, dependencies: { leftpad: "1.0.0" }, devDependencies: { mocha: "10.0.0" }, engines: { node: ">=8" } });
     expect(m.keys).toEqual(["scripts", "devDependencies", "overrides", "engines", "main", "type"]);
     expect(m.dependencyChange).toBe(true);
+    // leftpad is absent from every baseline dependency field, so it is a new (unreviewed) dependency; registry source.
+    expect(m.newDependencies).toEqual([{ name: "leftpad", spec: "1.0.0", reason: "new", source: null }]);
     expect(m.text).toMatch(/^\{\n {4}"name"/); // the delivery's indentation
   });
   it("puts back a dependencies entry that would replace a baseline dev dependency", () => {
@@ -115,11 +120,41 @@ describe("mergeManifest: baseline values of the test keys, the delivery's everyt
     const m = mergeManifest(before, pkg({ test: "mocha" }, { devDependencies: { mocha: "10.0.0" }, dependencies: { mocha: "file:./fake", ok: "1.0.0" } }));
     expect(JSON.parse(m.text!).dependencies).toEqual({ ok: "1.0.0" });
     expect(m.keys).toEqual(["dependencies (mocha: a baseline dev dependency)"]);
+    // mocha was reverted to the baseline value, so only the genuinely new `ok` is reported.
+    expect(m.newDependencies).toEqual([{ name: "ok", spec: "1.0.0", reason: "new", source: null }]);
   });
   it("leaves a manifest that only changed other fields alone, compares independent of key order, and restores unparseable text", () => {
     expect(mergeManifest(pkg({ test: "mocha" }), pkg({ test: "mocha" }, { description: "x" })).text).toBeNull();
     expect(mergeManifest('{"scripts":{"a":"1","b":"2"}}', '{"scripts":{"b":"2","a":"1"}}').text).toBeNull();
-    expect(mergeManifest('{"scripts":{}}', "{not json")).toEqual({ text: '{"scripts":{}}', keys: ["whole file (unparseable)"], dependencyChange: false });
+    expect(mergeManifest('{"scripts":{}}', "{not json")).toEqual({ text: '{"scripts":{}}', keys: ["whole file (unparseable)"], dependencyChange: false, newDependencies: [] });
+  });
+});
+
+describe("new/re-pointed dependencies (finding 4, a policy rule)", () => {
+  it("classifies a version spec by where its code comes from", () => {
+    expect(depSource("^1.2.3")).toBeNull();
+    expect(depSource("1.0.0")).toBeNull();
+    expect(depSource("file:./vendor/x")).toBe("file");
+    expect(depSource("link:../x")).toBe("link");
+    expect(depSource("git+https://host/x.git")).toBe("git");
+    expect(depSource("github:owner/x")).toBe("git");
+    expect(depSource("https://host/x/-/x-1.0.0.tgz")).toBe("tarball");
+    expect(depSource("https://host/x")).toBe("url");
+    expect(depSource("npm:other@^1.0.0")).toBe("alias");
+  });
+  it("flags a NEW name (positive) but not a version bump within the same registry name (negative)", () => {
+    const before = pkg({ test: "mocha" }, { dependencies: { lib: "^1.0.0" } });
+    // positive: a name absent from the baseline, from a local folder.
+    const added = mergeManifest(before, pkg({ test: "mocha" }, { dependencies: { lib: "^1.0.0", helper: "file:./vendor/helper" } }));
+    expect(added.newDependencies).toEqual([{ name: "helper", spec: "file:./vendor/helper", reason: "new", source: "file" }]);
+    // negative: bumping an existing registry dependency does not trigger the rule.
+    const bumped = mergeManifest(before, pkg({ test: "mocha" }, { dependencies: { lib: "^2.0.0" } }));
+    expect(bumped.newDependencies).toEqual([]);
+  });
+  it("flags re-pointing an existing name at a non-registry source (file:, git, tarball, alias)", () => {
+    const before = pkg({ test: "mocha" }, { dependencies: { lib: "^1.0.0" } });
+    const repointed = mergeManifest(before, pkg({ test: "mocha" }, { dependencies: { lib: "file:./evil" } }));
+    expect(repointed.newDependencies).toEqual([{ name: "lib", spec: "file:./evil", reason: "source", source: "file" }]);
   });
 });
 
@@ -186,10 +221,10 @@ describe("namedTestPaths: what the baseline's test/build scripts and test config
   });
 
   it("says what was restored and removed", () => {
-    expect(overlaySummary("the funding baseline abc", 3, { restored: ["test/slugify.js"], removed: ["test/00-setup.js"], manifests: [{ path: "package.json", keys: ["scripts"] }], lockfilesDropped: [] })).toBe(
+    expect(overlaySummary("the funding baseline abc", 3, { restored: ["test/slugify.js"], removed: ["test/00-setup.js"], manifests: [{ path: "package.json", keys: ["scripts"] }], lockfilesDropped: [], newDependencies: [] })).toBe(
       "baseline suite: ran the baseline suite from the funding baseline abc (3 file(s) changed); restored test/slugify.js; removed test/00-setup.js; package.json: kept the baseline scripts",
     );
-    expect(overlaySummary("x", 1, { restored: [], removed: [], manifests: [], lockfilesDropped: [] })).toMatch(/leaves the tests, runner config, scripts and dev dependencies as they were$/);
+    expect(overlaySummary("x", 1, { restored: [], removed: [], manifests: [], lockfilesDropped: [], newDependencies: [] })).toMatch(/leaves the tests, runner config, scripts and dev dependencies as they were$/);
   });
 
   it("caps gaming evidence per criterion", () => {
@@ -273,7 +308,7 @@ describe("runDeterministicStage: the client's suite grades the delivery (local g
       // the workdir shows the delivery again for the judge's read_file
       expect(await readFile(join(wd, "test", "b.test.js"), "utf8")).toMatch(/'b'/);
     });
-    expect(out.overlay).toEqual({ restored: [], removed: ["test/b.test.js"], manifests: [], lockfilesDropped: [] });
+    expect(out.overlay).toEqual({ restored: [], removed: ["test/b.test.js"], manifests: [], lockfilesDropped: [], newDependencies: [] });
     expect(out.untrusted).toBeNull();
     expect(out.gaming).toEqual([]);
     expect(tamper).toMatchObject({ status: "pass" });
@@ -431,20 +466,21 @@ describe("demo repo branches under the baseline suite", () => {
 
   it("m1-pass passes the client's suite, as a branch and as a merge; its own new test runs as information", { timeout: 60_000 }, async () => {
     for (const sha of [shas["m1-pass"]!, shas.m1Merge!]) {
-      expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: ["test/password.test.js"], manifests: [], lockfilesDropped: [] }, tests: "pass", delivered: "0" });
+      expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: ["test/password.test.js"], manifests: [], lockfilesDropped: [], newDependencies: [] }, tests: "pass", delivered: "0" });
     }
   });
 
-  it("m2-partial and m2-injection: the client's pricing test is restored and passes; the delivery's own annual-discount test fails, shown but not graded", { timeout: 60_000 }, async () => {
-    // The annual-discount test lives only in the delivery (the template's main has no such test), so under rule 9 it
-    // cannot decide: the demo's "held" beat needs that test in the funded baseline.
+  it("m2-partial and m2-injection: the client's annual-billing test is on main, nothing is restored, and the partial delivery fails it", { timeout: 60_000 }, async () => {
+    // The annual-discount test lives on the template's main (the client's test, skipped until annualPriceCents exists),
+    // and m2 touches no test file, so the overlay changes nothing, there is no informational pass, and the graded run fails.
     for (const sha of [shas["m2-partial"]!, shas["m2-injection"]!]) {
-      expect(await stage(sha)).toEqual({ overlay: { restored: ["test/pricing.test.js"], removed: [], manifests: [], lockfilesDropped: [] }, tests: "pass", delivered: "1" });
+      expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: [], manifests: [], lockfilesDropped: [], newDependencies: [] }, tests: "fail", delivered: undefined });
     }
+    // The merge of m1 then m2 still carries m1's added test file, which is removed for the graded run.
     const merged = await stage(shas.m2Merge!);
-    expect(merged.overlay!.restored).toEqual(["test/pricing.test.js"]);
-    expect(merged.tests).toBe("pass");
-    expect(merged.delivered).toBe("1");
+    expect(merged.overlay!.restored).toEqual([]);
+    expect(merged.overlay!.removed).toEqual(["test/password.test.js"]);
+    expect(merged.tests).toBe("fail");
   });
 });
 
@@ -512,12 +548,12 @@ describe("demo repo m1-pass: citable evidence and no worker paths", () => {
     const g = (...a: string[]) => execFileSync("git", a, { cwd: demo }).toString().trim();
     const out = await runDeterministicStage({ repoUrl: `file://${demo}`, sha: g("rev-parse", "m2-partial"), criteria, baselineSha: g("rev-parse", "main") });
     try {
-      // The delivery's own failing annual-discount test runs in the informational pass.
-      const delivered = out.evidence.find((e) => e.id === "evd_tests_delivered")!;
-      expect(delivered.summary).toMatch(/exited 1/);
-      expect(delivered.summary).not.toMatch(/milestone-verify-/);
-      expect(out.logs["tests:delivered"]).not.toMatch(/milestone-verify-/);
-      expect(out.logs["tests:delivered"]).toMatch(/test\/pricing\.test\.js/);
+      // The client's annual-discount test (on main) fails in the graded run.
+      const tests = out.evidence.find((e) => e.id === "evd_tests")!;
+      expect(tests.summary).toMatch(/exited 1/);
+      expect(tests.summary).not.toMatch(/milestone-verify-/);
+      expect(out.logs["tests"]).not.toMatch(/milestone-verify-/);
+      expect(out.logs["tests"]).toMatch(/test\/pricing\.test\.js/);
     } finally {
       await rm(out.workdir, { recursive: true, force: true });
     }

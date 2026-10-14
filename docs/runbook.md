@@ -134,3 +134,5 @@ MILESTONE_E2E=1 pnpm test
 ```
 
 They are `apps/worker/src/lib/verify.e2e.test.ts` (verify against a throwaway git repo, and upload deliveries), `apps/worker/test/money-path.e2e.test.ts` (review, release and settle with PayPal faked at the HTTP layer), `release-settle.e2e.test.ts` and `advance.e2e.test.ts`. They use `DATABASE_URL`, tag every row they create and remove it afterwards, and mock the job queue. Run them against a development database, not one you are about to demo from.
+
+The baseline-suite and gaming-scan behaviour (CLAUDE.md rule 9) is exercised against real repositories by an opt-in test that needs network and `npm install`: `MILESTONE_REAL_REPOS=1 MILESTONE_REAL_REPOS_DIR=<scratch dir> pnpm --filter @milestone/verify exec vitest run test/real-repos.test.ts`. See `fixtures/real-repos/README.md`. It uses no database and no model.

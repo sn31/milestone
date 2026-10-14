@@ -7,6 +7,7 @@ import { EvidencePanel, toEvidenceItems, type EvidenceItem } from "@/components/
 import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, verdictTone, type CriterionStatus } from "@/components/ui";
 import { toggled } from "@/components/ui/detail-grid";
 import { formatDateTime, formatMoney } from "@/lib/format";
+import { BASELINE_EVIDENCE_ID, failingTests, firstLine, isFlag, isOwnTests, ownTestsText, parseBaseline, parseFlag } from "@/app/api/milestones/[id]/status/lines";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
 
@@ -51,18 +52,25 @@ function uploadCount(ref: string): string {
 /** Without a model the policy's "Could not verify: X" means the client judges X; say that instead of sounding broken. */
 const policyReason = (reason: string, checksOnly: boolean) => (checksOnly ? reason.replace(/^Could not verify:\s*/, "Left to the client: ") : reason);
 
-/** The tamper check as a receipt row: clean, or what the delivery changed that makes a passing result untrustworthy. */
-function tamperRow(ev: EvidenceItem | undefined): { clean: boolean; label: string; detail: string } | null {
+const sentence = (text: string) => {
+  const t = text.trim();
+  return t ? `${t[0]!.toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? "" : "."}` : "";
+};
+
+/**
+ * The baseline suite as a receipt row (CLAUDE.md rule 9): the client's tests graded the delivery, and what the overlay
+ * restored or removed to make that so, in one line; or why they could not, so a pass is not trusted.
+ */
+function baselineRow(ev: EvidenceItem | undefined): { inPlace: boolean; label: string; detail: string } | null {
   if (!ev) return null;
-  const body = ev.summary.replace(/^tamper check:?\s*/i, "");
-  if (ev.status === "pass") {
-    const n = /(\d+) file\(s\) changed against (.+?);/.exec(body);
-    return { clean: true, label: "The delivery left the test machinery alone", detail: n ? `${n[1]} file${n[1] === "1" ? "" : "s"} changed against ${n[2]}; no existing test, script, dependency, lockfile or CI change.` : body };
+  const b = parseBaseline(ev.status, ev.summary);
+  if (!b.inPlace) {
+    return { inPlace: false, label: "Not graded by the client's tests", detail: `${sentence(b.reason ?? "the client's suite could not be put in place")} The delivery's own tests ran instead, so a pass is not trusted.` };
   }
-  const findings = (body.split(/commands run:\s*/)[1] ?? body).split(";").map((f) => f.trim()).filter(Boolean);
-  const first = findings[0] ?? body;
-  const what = /existing test/.test(first) ? "Existing test changed" : /scripts|dependencies|changed$/.test(first) ? "Test setup changed" : "Not checked";
-  return { clean: false, label: `${what}: ${first.replace(/\s*\((existing test|lockfile|CI config|test runner or package manager config|committed node_modules)\)$/, "")}`, detail: `Results not trusted. ${findings.length > 1 ? `Also: ${findings.slice(1).join("; ")}.` : ""}`.trim() };
+  const from = b.sha ? `The suite from ${b.sha}${b.firstParent ? " (the delivered commit's parent; no baseline was recorded)" : ""}` : "The client's suite";
+  // What the delivery added at test locations was set aside for the graded run (its own tests run separately, below).
+  const changes = [b.restored && `restored ${b.restored}`, b.removed && `removed ${b.removed} (added by the delivery)`, ...b.other].filter(Boolean).join("; ");
+  return { inPlace: true, label: "Graded by the client's tests", detail: `${from} ran against the delivered code; ${changes || "nothing to restore or remove"}.` };
 }
 
 /** The verifier's overall result as a pill: pass reads as released green, partial as partial, fail as danger. */
@@ -138,7 +146,7 @@ export function VerdictView({
 
   if (!delivery) return <p className="mt-4 font-mono text-[12px] text-fg-faint">No delivery yet.</p>;
 
-  // In the contract's criterion order (descriptions is built from it), so the test row sits under the tamper row.
+  // In the contract's criterion order (descriptions is built from it), so the test row sits under the suite and flag rows.
   const order = Object.keys(descriptions);
   const rank = (id: string) => (order.indexOf(id) < 0 ? order.length : order.indexOf(id));
   const rows = rowsOf(delivery.verdict)
@@ -156,7 +164,11 @@ export function VerdictView({
   const passed = rows.filter((r) => r.status === "pass").length;
   const checked = rows.length - clientRows;
   const evidenceShown = showEvidence && items.length > 0;
-  const tamper = tamperRow(byId.get("evd_tamper_check"));
+  const suite = baselineRow(byId.get(BASELINE_EVIDENCE_ID));
+  // Gaming hits and other flags on the test criterion: each one is a reason the client decides.
+  const flags = items.filter((it) => isFlag({ ...it, criterionId: it.criterion }, (id) => kinds[id]));
+  // The informational pass: the freelancer's own tests as delivered, shown but never used for payment.
+  const ownTests = items.filter(isOwnTests);
   const resultWord = neutral ? (
     <span className="rounded-chip border border-hairline-strong px-1.5 py-[3px] font-mono text-[10.5px] leading-none tracking-[0.1em] text-fg-muted uppercase tabular">
       {passed} of {checked} passed
@@ -179,6 +191,24 @@ export function VerdictView({
         ) : null}
       </span>
     ) : null;
+
+  /** A failed test row names the client's tests that failed, from its log evidence. */
+  const withFailing = (detail: string, ids: string[]) => {
+    const names = ids.flatMap((id) => (byId.get(id)?.status === "fail" && byId.get(id)?.kind === "log" ? failingTests(byId.get(id)!.summary) : []));
+    if (!names.length) return detail;
+    const shown = names.slice(0, 3).join("; ");
+    return `${detail} · failing: ${shown}${names.length > 3 ? ` and ${names.length - 3} more` : ""}`;
+  };
+
+  /** A test row a flag made unclear: the client's suite result, then the flags above it (not the flag's text again). */
+  const flagIds = new Set(flags.map((f) => f.id));
+  const testDetail = (r: CriterionRow) => {
+    const n = (r.evidence_ids ?? []).filter((id) => flagIds.has(id)).length;
+    if (!n) return null;
+    const log = items.find((ev) => ev.criterion === r.criterion_id && ev.kind === "log");
+    const ran = log ? `${firstLine(log.summary)}. ` : "";
+    return `${ran}Not trusted: ${n === 1 ? "the flag above" : `the ${n} flags above`}, so the client decides.`;
+  };
 
   const toggleRow = (id: string) => setOpenRows((prev) => toggled(prev, id));
 
@@ -243,19 +273,41 @@ export function VerdictView({
             {result === "verifying" ? "The agent is checking the delivery. Criteria appear here as they are judged." : "The verifier returned no criteria."}
           </p>
         ) : null}
-        {tamper ? (
-          <ReceiptRow
-            kind="tamper"
-            label={tamper.label}
-            status={tamper.clean ? "pass" : "fail"}
-            statusLabel={tamper.clean ? "clean" : "flagged"}
-            detail={tamper.detail}
-          >
-            <span onClickCapture={(e) => reveal(e, "evd_tamper_check")} className="inline-flex">
-              <EvidenceChip kind="diff" id="evd_tamper_check" status={tamper.clean ? "pass" : "fail"} href={evidenceShown ? "#evidence-evd_tamper_check" : undefined} />
+        {suite ? (
+          <ReceiptRow kind="suite" label={suite.label} status={suite.inPlace ? "pass" : "unclear"} statusLabel={suite.inPlace ? "ran" : undefined} detail={suite.detail}>
+            <span onClickCapture={(e) => reveal(e, BASELINE_EVIDENCE_ID)} className="inline-flex">
+              <EvidenceChip kind="diff" id={BASELINE_EVIDENCE_ID} status={suite.inPlace ? "pass" : "unclear"} href={evidenceShown ? `#evidence-${BASELINE_EVIDENCE_ID}` : undefined} />
             </span>
           </ReceiptRow>
         ) : null}
+        {flags.map((ev) => {
+          const f = parseFlag(ev.summary);
+          return (
+            <ReceiptRow
+              key={ev.id}
+              kind="flag"
+              label={
+                <>
+                  {f.where ? <span className="mr-2 font-mono text-[12.5px] tabular">{f.where}</span> : null}
+                  {f.what}
+                </>
+              }
+              status="unclear"
+              statusLabel="flag"
+              tone="needs"
+              detail={
+                <>
+                  {f.code ? <code className="mr-2 rounded-chip bg-surface-sunken px-1 py-px font-mono text-[12px] text-fg">{f.code}</code> : null}
+                  {sentence(f.reason ?? "the client decides")}
+                </>
+              }
+            >
+              <span onClickCapture={(e) => reveal(e, ev.id)} className="inline-flex">
+                <EvidenceChip kind={ev.kind} id={ev.id} status="unclear" title={ev.summary} href={evidenceShown ? `#evidence-${ev.id}` : undefined} />
+              </span>
+            </ReceiptRow>
+          );
+        })}
         {rows.map((r) => {
           const status = asStatus(r.status);
           const client = forClient(r);
@@ -272,7 +324,7 @@ export function VerdictView({
               detail={
                 client
                   ? "The agent ran the checks only, so this criterion is the client's to judge."
-                  : (r.evidence_ids ?? []).map((id) => measuredDetail(byId.get(id)?.summary)).find(Boolean) ?? cleanDetail(r.rationale)
+                  : (r.evidence_ids ?? []).map((id) => measuredDetail(byId.get(id)?.summary)).find(Boolean) ?? testDetail(r) ?? withFailing(cleanDetail(r.rationale), r.evidence_ids ?? [])
               }
             >
               {r.evidence_ids?.length
@@ -293,6 +345,22 @@ export function VerdictView({
                   })
                 : null}
             </ReceiptRow>
+          );
+        })}
+        {ownTests.map((ev) => {
+          const crit = ev.id.slice(4, -"_delivered".length);
+          const which = ownTests.length > 1 ? ` (${descriptions[crit] ?? crit})` : "";
+          const text = `The freelancer's own tests${which}: ${ownTestsText(ev.summary)}, not used for payment`;
+          return (
+            <p key={ev.id} className="py-3 pl-7 font-mono text-[11.5px] text-fg-faint">
+              {evidenceShown ? (
+                <a href={`#evidence-${ev.id}`} onClick={(e) => reveal(e, ev.id)} title={ev.summary} className="underline-offset-2 hover:text-fg-muted hover:underline">
+                  {text}
+                </a>
+              ) : (
+                <span title={ev.summary}>{text}</span>
+              )}
+            </p>
           );
         })}
       </Receipt>
@@ -353,7 +421,8 @@ export function VerdictView({
         <span className="type-label text-fg-muted">Receipt</span>
         {resultWord ?? <StatePill state={pill.state} label={pill.label} />}
         {tally}
-        {tamper && !tamper.clean ? <StatePill state="failed" label="Tests not trusted" /> : null}
+        {suite && !suite.inPlace ? <StatePill state="failed" label="Tests not trusted" /> : null}
+        {flags.length ? <StatePill state="needs_client" label={`${flags.length} flag${flags.length === 1 ? "" : "s"}`} /> : null}
         {delivery.suspectedInjection ? <StatePill state="failed" label="Suspected injection" /> : null}
         {stamp ? (
           <span className="ml-auto flex items-center gap-2.5">

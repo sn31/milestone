@@ -104,3 +104,73 @@ describe("gaming scan: added source lines that game a test run", () => {
     expect(rules(deleted)).toEqual([]);
   });
 });
+
+// Each new rule below has a positive example (flagged) and a negative example (not flagged), per the task.
+describe("test-detect: a non-env signal matched against a test runner name (finding 1)", () => {
+  it("flags process.argv compared with a runner name; a plain CLI argv read is not flagged", () => {
+    // positive: the value of process.argv is matched against a runner name (mocha).
+    expect(rules(diff("index.js", ["var underTest = process.argv.join(' ').indexOf('mocha') !== -1;"]))).toEqual(["index.js:1 test-detect"]);
+    // negative: a CLI legitimately reads process.argv with no runner name in sight.
+    expect(rules(diff("bin/cli.js", ["const args = process.argv.slice(2);", "const file = args[0];"]))).toEqual([]);
+  });
+  it("flags require.main / process.mainModule / a stack trace matched against a runner name; require.main === module is not flagged", () => {
+    // positive: require.main.filename is tested against a runner name.
+    expect(rules(diff("index.js", ["if (require.main && /_mocha/.test(require.main.filename)) ready = true;"]))).toEqual(["index.js:1 test-detect"]);
+    // positive: process.mainModule path checked for a runner.
+    expect(rules(diff("index.js", ["if (process.mainModule && process.mainModule.path.includes('mocha')) ok();"]))).toEqual(["index.js:1 test-detect"]);
+    // positive: a saved stack trace, matched against a runner name on a later line.
+    expect(rules(diff("index.js", ["const s = new Error().stack || '';", "if (s.includes('node_modules/mocha')) correct();"]))).toEqual(["index.js:2 test-detect"]);
+    // negative: the ordinary "am I the entry point" CLI idiom has no runner name.
+    expect(rules(diff("index.js", ["if (require.main === module) main();"]))).toEqual([]);
+  });
+  it("flags module.parent used to branch; storing a value on module.exports is not flagged", () => {
+    // positive: branching on module.parent to tell a test runner from direct use.
+    expect(rules(diff("index.js", ["if (module.parent) correct(); else broken();"]))).toEqual(["index.js:1 test-detect"]);
+    // negative: assigning module.exports is ordinary and not a signal read.
+    expect(rules(diff("index.js", ["module.exports.parent = createParent();"]))).toEqual([]);
+  });
+});
+
+describe("assert-patch: writing to an assertion library in every listed form (finding 2)", () => {
+  it("flags an inline require(lib).prototype write; calling an assertion is not flagged", () => {
+    // positive: patching a non-'assert' assertion library inline.
+    expect(rules(diff("index.js", ["require('expect.js').Assertion.prototype.assert = function () { return this; };"]))).toEqual(["index.js:1 assert-patch"]);
+    // negative: using chai's expect to make an assertion.
+    expect(rules(diff("index.js", ["require('chai').expect(value).to.equal(2);"]))).toEqual([]);
+  });
+  it("flags an aliased assert whose property is later overwritten; just holding the alias is not flagged", () => {
+    // positive: const a = require('assert'); then a.equal / a[k] overwritten.
+    expect(rules(diff("index.js", ["const a = require('assert');", "a.equal = function () {};", "a['deepEqual'] = function () {};"]))).toEqual(["index.js:2 assert-patch", "index.js:3 assert-patch"]);
+    // negative: aliasing assert and only calling it.
+    expect(rules(diff("index.js", ["const a = require('assert');", "a.equal(actual, expected);"]))).toEqual([]);
+  });
+  it("flags Object.prototype writes and defineProperty on it; a plain object property write is not flagged", () => {
+    // positive: prototype pollution via Object.defineProperty and via direct assignment.
+    expect(rules(diff("index.js", ["Object.defineProperty(Object.prototype, 'eql', { value: () => true });"]))).toEqual(["index.js:1 assert-patch"]);
+    expect(rules(diff("index.js", ["Object.prototype.eql = () => true;"]))).toEqual(["index.js:1 assert-patch"]);
+    // negative: defining a property on an ordinary object.
+    expect(rules(diff("index.js", ["Object.defineProperty(target, 'eql', { value: 1 });"]))).toEqual([]);
+  });
+  it("flags Reflect.defineProperty on an assertion module; on an ordinary object it is not flagged", () => {
+    // positive: redefining an assertion method through Reflect.
+    expect(rules(diff("index.js", ["Reflect.defineProperty(require('assert'), 'equal', { value: () => {} });"]))).toEqual(["index.js:1 assert-patch"]);
+    // negative: Reflect.defineProperty on some other object.
+    expect(rules(diff("index.js", ["Reflect.defineProperty(cfg, 'equal', { value: 1 });"]))).toEqual([]);
+  });
+  it("flags a computed-key assignment to global/globalThis/process; a computed read is not flagged", () => {
+    // positive: installing a fake global assertion through a computed key.
+    expect(rules(diff("index.js", ["global['ex' + 'pect'] = () => ({ to: { equal: () => {} } });"]))).toEqual(["index.js:1 assert-patch"]);
+    // negative: reading a computed global key.
+    expect(rules(diff("index.js", ["const fn = global[name];"]))).toEqual([]);
+  });
+});
+
+describe("exit: an obfuscated computed process call (finding 3)", () => {
+  it("flags process[k](0) and process['ex'+'it'](0); a computed env read is not flagged", () => {
+    // positive: calling a computed process method (hidden process.exit).
+    expect(rules(diff("index.js", ["process['ex' + 'it'](0);"]))).toEqual(["index.js:1 exit"]);
+    expect(rules(diff("index.js", ["var k = 'exit'; process[k](0);"]))).toEqual(["index.js:1 exit"]);
+    // negative: reading a computed process.env key (that is env-sniff territory, not an exit, and NODE_ENV!==prod is honest).
+    expect(rules(diff("index.js", ["const home = process.env['HOME'];"]))).toEqual([]);
+  });
+});
