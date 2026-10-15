@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
-import { UploadPayload, decisionDeliveryId, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
-import { paypalMode } from "@milestone/money";
+import { UploadPayload, advances, decisionDeliveryId, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { advanceRepayment, paypalMode } from "@milestone/money";
+import { and, eq, inArray } from "drizzle-orm";
+import { getDb } from "@/lib/db";
 import { isContractClient, isContractFreelancer, type Actor } from "@/lib/session";
 import { auditTime } from "@/lib/events";
 import { formatMoney, humanize, truncateMiddle } from "@/lib/format";
@@ -234,6 +236,7 @@ export function MilestoneActions({
       currency={contract.currency}
       required={required}
       countersign={receiptDecision ? countersign : null}
+      clientApproved={(status === "released" || status === "partial_released") && (milestone.clientResponse === "approve" || milestone.clientResponse === "confirm_partial")}
       showEvidence
     />
   );
@@ -370,7 +373,10 @@ export function MilestoneActions({
     case "released":
     case "partial_released": {
       const paid = status === "partial_released" ? (decision?.amountMinor ?? 0) : milestone.amountMinor;
-      const legs: ReleaseLeg[] = release?.legs.length ? release.legs : [{ to: names.freelancer, minor: paid, tone: status === "released" ? "released" : "partial" }];
+      const booked: ReleaseLeg[] = release?.legs.length ? release.legs : [{ to: names.freelancer, minor: paid, tone: status === "released" ? "released" : "partial" }];
+      const legs: ReleaseLeg[] = booked.map((leg) =>
+        leg.note && !leg.detail ? { ...leg, detail: <AdvanceRepaid milestone={milestone} repaidMinor={leg.minor} currency={contract.currency} /> } : leg,
+      );
       body = (
         <>
           <ReleaseBand
@@ -399,4 +405,29 @@ export function MilestoneActions({
       {body}
     </div>
   );
+}
+
+/**
+ * What the partner's leg of a release is: the advance principal and its fee, printed under the leg ("advance $58.33 +
+ * fee $0.81 repaid"). Loads the milestone's advance here; the page passes only the booked legs.
+ */
+async function AdvanceRepaid({ milestone, repaidMinor, currency }: { milestone: MilestoneRow; repaidMinor: number; currency: string }) {
+  let text = "advance repaid";
+  try {
+    const db = getDb();
+    const [adv] = await db
+      .select({ principalMinor: advances.principalMinor, feeBpsPerDay: advances.feeBpsPerDay, offer: advances.offer, fundedAt: advances.fundedAt })
+      .from(advances)
+      .where(and(eq(advances.milestoneId, milestone.id), inArray(advances.status, ["funded", "repaid", "shortfall"])))
+      .limit(1);
+    if (adv) {
+      const r = advanceRepayment(adv, milestone.decidedAt);
+      const fee = r.repaymentMinor === repaidMinor ? r.feeMinor : Math.max(0, repaidMinor - r.principalMinor);
+      const principal = Math.min(r.principalMinor, repaidMinor);
+      text = fee > 0 ? `advance ${formatMoney(principal, currency)} + fee ${formatMoney(fee, currency)} repaid` : `advance ${formatMoney(principal, currency)} repaid`;
+    }
+  } catch {
+    // no database (tests, previews): the plain note stands
+  }
+  return <>{text}</>;
 }

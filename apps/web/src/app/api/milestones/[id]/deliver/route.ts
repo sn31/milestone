@@ -3,7 +3,7 @@ import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
-import { normaliseRepoUrl, resolveRef, validRef } from "./resolve";
+import { checkRepoUrl, resolveRef, validRef } from "./resolve";
 
 /**
  * Manual repository delivery by the contract's freelancer: { repoUrl, ref, title?, note? }. The ref is resolved to a
@@ -21,8 +21,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!DELIVERABLE_STATUSES.has(m.status)) return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
 
   const body = (await req.json().catch(() => null)) as { repoUrl?: unknown; ref?: unknown; title?: unknown; note?: unknown } | null;
-  const repoUrl = typeof body?.repoUrl === "string" ? normaliseRepoUrl(body.repoUrl) : null;
-  if (!repoUrl) return jsonError("repoUrl must be an https URL, a file:// URL or an absolute local path", 400);
+  // Local repositories (file://, absolute paths) only where localReposAllowed says so; see resolve.ts.
+  const checked = checkRepoUrl(typeof body?.repoUrl === "string" ? body.repoUrl : "");
+  if (!checked.ok) return jsonError(checked.reason, 400);
+  const repoUrl = checked.url;
   const ref = typeof body?.ref === "string" && body.ref.trim() ? body.ref.trim() : "HEAD";
   if (!validRef(ref)) return jsonError("ref must be a branch, tag, HEAD or a 40-character commit id", 400);
 

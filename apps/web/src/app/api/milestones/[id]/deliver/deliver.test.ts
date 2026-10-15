@@ -19,7 +19,7 @@ vi.mock("@milestone/core", async (orig) => ({
   enqueue: async (...args: unknown[]) => { state.enqueued.push(args); return "job"; },
 }));
 
-import { commitDeliveryId, normaliseRepoUrl, pickSha, resolveRef, validRef } from "./resolve";
+import { LOCAL_REPO_REFUSED, checkRepoUrl, commitDeliveryId, localReposAllowed, normaliseRepoUrl, pickSha, resolveRef, validRef } from "./resolve";
 
 let repo: string;
 let main: string;
@@ -47,6 +47,29 @@ describe("manual delivery ref resolution", () => {
     expect(normaliseRepoUrl("file:///tmp/repo")).toBe("file:///tmp/repo");
     for (const bad of ["ext::sh -c touch% /tmp/x", "git@github.com:a/b.git", "ssh://h/r", "http://h/r", "relative/path", "-uhelp", "https://user:pw@h/r"]) {
       expect(normaliseRepoUrl(bad)).toBeNull();
+    }
+  });
+  it("allows local repositories only with MILESTONE_ALLOW_LOCAL_REPOS=1 or simulated PayPal outside production", () => {
+    expect(localReposAllowed({ MILESTONE_ALLOW_LOCAL_REPOS: "1", NODE_ENV: "production", PAYPAL_MODE: "sandbox" })).toBe(true);
+    expect(localReposAllowed({ NODE_ENV: "development", PAYPAL_MODE: "simulated" })).toBe(true);
+    expect(localReposAllowed({ NODE_ENV: "test", PAYPAL_CLIENT_ID: "" })).toBe(true); // simulated by default without credentials
+    expect(localReposAllowed({ NODE_ENV: "production", PAYPAL_MODE: "simulated" })).toBe(false);
+    expect(localReposAllowed({ NODE_ENV: "development", PAYPAL_MODE: "sandbox" })).toBe(false);
+    expect(localReposAllowed({ NODE_ENV: "production", PAYPAL_CLIENT_ID: "x" })).toBe(false);
+    expect(localReposAllowed({ MILESTONE_ALLOW_LOCAL_REPOS: "0", NODE_ENV: "development", PAYPAL_MODE: "sandbox" })).toBe(false);
+  });
+  it("gates file:// and absolute paths, never https", () => {
+    const closed: NodeJS.ProcessEnv = { NODE_ENV: "production", PAYPAL_MODE: "sandbox" };
+    const open: NodeJS.ProcessEnv = { NODE_ENV: "production", MILESTONE_ALLOW_LOCAL_REPOS: "1" };
+    expect(checkRepoUrl("https://github.com/a/b.git", closed)).toEqual({ ok: true, url: "https://github.com/a/b.git" });
+    expect(checkRepoUrl("/tmp/repo", closed)).toEqual({ ok: false, reason: LOCAL_REPO_REFUSED });
+    expect(checkRepoUrl("file:///tmp/repo", closed)).toEqual({ ok: false, reason: LOCAL_REPO_REFUSED });
+    expect(checkRepoUrl("/tmp/repo", open)).toEqual({ ok: true, url: "file:///tmp/repo" });
+    expect(checkRepoUrl("file:///tmp/repo", open)).toEqual({ ok: true, url: "file:///tmp/repo" });
+    for (const bad of ["ext::sh -c touch% /tmp/x", "git@github.com:a/b.git", "ssh://h/r", "https://user:pw@h/r", ""]) {
+      const r = checkRepoUrl(bad, open);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).not.toBe(LOCAL_REPO_REFUSED);
     }
   });
   it("validates refs", () => {
@@ -77,6 +100,8 @@ const e2e = process.env.MILESTONE_E2E === "1";
 try { process.loadEnvFile(new URL("../../../../../../../../.env", import.meta.url).pathname); } catch { /* env already set */ }
 
 describe.skipIf(!e2e)("POST /api/milestones/[id]/deliver against Postgres", async () => {
+  // The route is exercised with a local repository, which the gate refuses unless this flag (or simulated PayPal) is set.
+  process.env.MILESTONE_ALLOW_LOCAL_REPOS = "1";
   const core = await import("@milestone/core");
   const { eq, inArray } = await import("drizzle-orm");
   const db = core.createDb();
@@ -104,6 +129,14 @@ describe.skipIf(!e2e)("POST /api/milestones/[id]/deliver against Postgres", asyn
     expect((await call({ repoUrl: repo, ref: "main" })).status).toBe(403);
     state.actor = { userId: "usr_freelancer", role: "freelancer" };
     expect((await call({ repoUrl: "ext::sh", ref: "main" })).status).toBe(400);
+    const savedMode = process.env.PAYPAL_MODE;
+    process.env.MILESTONE_ALLOW_LOCAL_REPOS = "0";
+    process.env.PAYPAL_MODE = "sandbox";
+    const refused = await call({ repoUrl: repo, ref: "main" });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toBe("local repositories are not accepted");
+    process.env.MILESTONE_ALLOW_LOCAL_REPOS = "1";
+    if (savedMode === undefined) delete process.env.PAYPAL_MODE; else process.env.PAYPAL_MODE = savedMode;
     expect((await call({ repoUrl: repo, ref: "missing" })).status).toBe(422);
 
     const res = await call({ repoUrl: repo, ref: "m1-feature" });

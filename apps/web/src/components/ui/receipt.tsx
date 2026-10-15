@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { policyRule } from "@/lib/policy-rules";
 import { cx } from "./cx";
 import { StateGlyph } from "./state-pill";
 import { VERDICT_GLYPH, verdictTone, type GlyphKey, type ToneKey } from "./states";
@@ -126,7 +127,7 @@ export function EvidenceChip({ kind, id, status, href, title }: EvidenceChipProp
 }
 
 export interface StampProps {
-  /** The policy action: release, partial, hold, ask_client. */
+  /** The policy action: release, partial, hold, ask_client; client_approved once the client approved an ask_client decision and the payout landed. */
   action: string;
   /** Rule ids, e.g. ["P6"]. */
   ruleIds?: string[];
@@ -139,8 +140,38 @@ export interface StampProps {
   className?: string;
 }
 
-const ACTION_TONE: Record<string, ToneKey> = { release: "released", partial: "partial", hold: "held", ask_client: "needs" };
-const ACTION_LABEL: Record<string, string> = { release: "Release", partial: "Partial", hold: "Hold", ask_client: "Ask client" };
+const ACTION_TONE: Record<string, ToneKey> = { release: "released", partial: "partial", hold: "held", ask_client: "needs", client_approved: "released" };
+const ACTION_LABEL: Record<string, string> = { release: "Release", partial: "Partial", hold: "Hold", ask_client: "Ask client", client_approved: "Client approved" };
+
+/**
+ * A rule id on the stamp with its one-sentence meaning: the sentence is the title, and a small "?" shows it on hover or
+ * keyboard focus (CSS only). Inside a folded receipt's summary button the "?" is not focusable (no nested controls).
+ */
+export function RuleChip({ id, focusable = true, className }: { id: string; focusable?: boolean; className?: string }) {
+  const sentence = policyRule(id);
+  if (!sentence) return <span className={className}>{id}</span>;
+  return (
+    <span className={cx("group/rule relative inline-flex items-center gap-1 whitespace-nowrap", className)} title={`${id}: ${sentence}`}>
+      {id}
+      <span
+        tabIndex={focusable ? 0 : undefined}
+        aria-label={`What rule ${id} means`}
+        className="grid size-[13px] cursor-help place-items-center rounded-full border border-current text-[8.5px] leading-none tracking-normal opacity-70 outline-none group-hover/rule:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-current"
+      >
+        ?
+      </span>
+      <span
+        role="tooltip"
+        className={cx(
+          "pointer-events-none absolute right-0 bottom-full z-20 mb-1.5 hidden w-[30ch] max-w-[80vw] rounded-chip border border-hairline-strong bg-paper px-2.5 py-2 text-left font-mono text-[10.5px] leading-snug tracking-normal normal-case text-fg shadow-md",
+          "group-hover/rule:block group-focus-within/rule:block",
+        )}
+      >
+        <span className="text-tone-ink">{id}</span> {sentence}
+      </span>
+    </span>
+  );
+}
 
 /** The policy decision, inked like a rubber stamp: double-ruled, tilted 4 degrees, pressed in once on mount. */
 export function Stamp({ action, ruleIds, note, size = "md", countersign, className }: StampProps) {
@@ -153,7 +184,16 @@ export function Stamp({ action, ruleIds, note, size = "md", countersign, classNa
       >
         <span className="flex items-center gap-2 rounded-[2px] border border-[color:var(--tone)] px-2 py-[3px] font-mono text-[10.5px] leading-none tracking-[0.16em] whitespace-nowrap text-tone-ink uppercase tabular">
           <span className="text-[11.5px] tracking-[0.2em]">{ACTION_LABEL[action] ?? action}</span>
-          {ruleIds?.length ? <span>{ruleIds.join(" · ")}</span> : null}
+          {ruleIds?.length ? (
+            <span className="inline-flex items-center gap-1.5">
+              {ruleIds.map((id, i) => (
+                <span key={id} className="inline-flex items-center gap-1.5">
+                  {i > 0 ? <span aria-hidden>·</span> : null}
+                  <RuleChip id={id} focusable={false} />
+                </span>
+              ))}
+            </span>
+          ) : null}
           {/* The amount is on the station already; on a phone the stamp keeps to the action and rule. */}
           {note ? <span className="max-sm:hidden">{note}</span> : null}
         </span>
@@ -166,7 +206,17 @@ export function Stamp({ action, ruleIds, note, size = "md", countersign, classNa
         <p className="font-mono text-[15px] leading-none tracking-[0.22em] uppercase">{ACTION_LABEL[action] ?? action}</p>
         {ruleIds?.length || note ? (
           <p className="mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] tracking-[0.12em] uppercase text-tone-ink">
-            {ruleIds?.length ? <span>rule {ruleIds.join(" · ")}</span> : null}
+            {ruleIds?.length ? (
+              <span className="inline-flex items-center gap-1.5">
+                rule
+                {ruleIds.map((id, i) => (
+                  <span key={id} className="inline-flex items-center gap-1.5">
+                    {i > 0 ? <span aria-hidden>·</span> : null}
+                    <RuleChip id={id} />
+                  </span>
+                ))}
+              </span>
+            ) : null}
             {note ? <span>{note}</span> : null}
           </p>
         ) : null}

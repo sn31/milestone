@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
+import { paypalMode } from "@milestone/core";
 import { run } from "@milestone/verify";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -24,6 +25,31 @@ export function normaliseRepoUrl(input: string): string | null {
   if (u.protocol === "file:") return u.href;
   if (u.protocol === "https:" && !u.username && !u.password && u.hostname) return u.href;
   return null;
+}
+
+export const LOCAL_REPO_REFUSED = "local repositories are not accepted";
+
+/**
+ * Whether this process may clone local repositories (file:// URLs and absolute paths) on a freelancer's say-so.
+ * A local path makes the worker clone any repository on the host, so it is only allowed when MILESTONE_ALLOW_LOCAL_REPOS
+ * is "1", or outside production while PayPal is simulated (the demo and the recorder deliver from a local checkout).
+ */
+export function localReposAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.MILESTONE_ALLOW_LOCAL_REPOS?.trim() === "1") return true;
+  return env.NODE_ENV !== "production" && paypalMode(env) === "simulated";
+}
+
+export type RepoUrlCheck = { ok: true; url: string } | { ok: false; reason: string };
+
+/**
+ * normaliseRepoUrl plus the local-repository gate: https always passes; file:// and absolute paths only when
+ * localReposAllowed(env). The reason is the 400 message the route returns.
+ */
+export function checkRepoUrl(input: string, env: NodeJS.ProcessEnv = process.env): RepoUrlCheck {
+  const url = normaliseRepoUrl(input);
+  if (!url) return { ok: false, reason: "repoUrl must be an https URL, a file:// URL or an absolute local path" };
+  if (url.startsWith("file:") && !localReposAllowed(env)) return { ok: false, reason: LOCAL_REPO_REFUSED };
+  return { ok: true, url };
 }
 
 export function validRef(ref: string): boolean {

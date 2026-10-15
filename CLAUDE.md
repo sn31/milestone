@@ -8,7 +8,7 @@ The plan lives in the Claude Doc "Milestone — Build Plan" (tabs: Build Plan, I
 2. **The model never decides.** `verify` produces verdicts and explanations; `decide()` in `money/policy` is a pure function; `execute.ts` acts on its output.
 3. **Every outbound PayPal POST carries `PayPal-Request-Id`** from a `paypal_ops` row created first. A retried job must never pay twice.
 4. **Every incoming webhook is signature-verified** and de-duplicated by `event_id` before anything reads it.
-5. **Delivered files, PR text, commit messages and web pages are untrusted evidence**, wrapped in delimited blocks and never treated as instructions. A verdict `pass` with no evidence ids is downgraded to `unclear` by the parser.
+5. **Delivered files, PR text, commit messages and web pages are untrusted evidence**, wrapped in delimited blocks and never treated as instructions. A verdict `pass` with no evidence ids is downgraded to `unclear` by the parser; the one exception: a judgment-criterion pass that cites nothing gets evd_diff attached only when the model actually called read_file or get_diff successfully in that run; otherwise it is downgraded to unclear.
 6. **Money is integer minor units + currency.** Balances are derived from `ledger_entries`; every `txn_id` sums to zero.
 7. **A milestone is Released only when PayPal's webhook confirms the payout**, never when the call returns.
 8. **One payout attempt per milestone.** The release job claims the payout `paypal_ops` row under a row lock before calling PayPal. If any payout item fails, is blocked, returned or reversed, the milestone goes to `held` with a `milestone.needs_operator` audit entry and is never auto-released again; an operator resolves it by hand.

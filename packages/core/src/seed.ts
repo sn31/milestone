@@ -32,6 +32,7 @@ if (process.argv.includes("--reset")) {
 
 const userRows = [
   { id: "usr_client", role: "client" as const, name: "Casey Client", email: "client@milestone.test" },
+  { id: "usr_client2", role: "client" as const, name: "Dana Client", email: "client2@milestone.test" },
   { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: process.env.PAYPAL_FREELANCER_EMAIL ?? process.env.SPIKE_FREELANCER_EMAIL ?? (simulated ? "freelancer@milestone.test" : null) },
   { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: process.env.PAYPAL_PARTNER_EMAIL ?? (simulated ? "partner@milestone.test" : null) },
   { id: "usr_platform", role: "platform" as const, name: "Milestone Platform", email: "platform@milestone.test" },
@@ -109,6 +110,41 @@ for (const c of criteriaRows.slice(-5)) {
   await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
 }
 
+// A second client's small contract, so the lender's book has more than one client and the concentration stat is unremarkable.
+const dash = {
+  id: "ctr_dash",
+  clientId: "usr_client2",
+  freelancerId: "usr_freelancer",
+  title: "Analytics dashboard",
+  scopeText: "A small analytics dashboard for a newsletter: usage charts delivered as screenshots, then a CSV export of the underlying numbers.",
+  currency: "USD",
+  totalMinor: 8000,
+  repoFullName: null,
+  status: "active" as const,
+  clientApprovedAt: now,
+  freelancerApprovedAt: now,
+};
+const { id: _did, ...dashSet } = dash;
+await db.insert(contracts).values(dash).onConflictDoUpdate({ target: contracts.id, set: dashSet });
+
+const dashMilestones = [
+  { id: "mst_dash_1", contractId: "ctr_dash", seq: 1, title: "Usage charts", amountMinor: 5000, status: "draft" as const, advanceEligible: true },
+  { id: "mst_dash_2", contractId: "ctr_dash", seq: 2, title: "CSV export", amountMinor: 3000, status: "draft" as const, advanceEligible: true },
+];
+for (const m of dashMilestones) {
+  const { id: _mid, ...mSet } = m;
+  await db.insert(milestones).values(m).onConflictDoUpdate({ target: milestones.id, set: mSet });
+}
+criteriaRows.push(
+  { id: "crt_dash_1_shot", milestoneId: "mst_dash_1", kind: "upload", description: "Dashboard screenshot as a PNG at least 1280 px wide", spec: { pattern: "*.png", minWidth: 1280 }, required: true },
+  { id: "crt_dash_1_judge", milestoneId: "mst_dash_1", kind: "judgment", description: "The charts show opens, clicks and unsubscribes per issue with readable axes", spec: {}, required: false },
+  { id: "crt_dash_2_csv", milestoneId: "mst_dash_2", kind: "upload", description: "CSV export with an issue, opens, clicks and unsubscribes column", spec: { pattern: "*.csv", mustContain: ["issue", "opens", "clicks", "unsubscribes"] }, required: true },
+  { id: "crt_dash_2_judge", milestoneId: "mst_dash_2", kind: "judgment", description: "The export matches the numbers on the charts", spec: {}, required: false },
+);
+for (const c of criteriaRows.slice(-4)) {
+  await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
+}
+
 // Freelancer history: five past releases with a verified pass. Fixed ids keep reseeding a no-op.
 for (let i = 1; i <= 5; i++) {
   await db.insert(auditLog).values({
@@ -121,8 +157,8 @@ for (let i = 1; i <= 5; i++) {
 }
 
 // `pnpm db:seed -- --showcase` (combinable with --reset) puts the demo milestones into every state once, so each screen
-// has something to show without running the worker: funded, review (window open), released, needs_client (partial) and
-// held. Rows have fixed ids, so a rerun refreshes them in place. No PayPal simulator state is written: the showcase ids
+// has something to show without running the worker: funded, review (window open), released, needs_client (partial),
+// held after a failed payout (the operator case) and a second client's funded milestone with an open advance. Rows have fixed ids, so a rerun refreshes them in place. No PayPal simulator state is written: the showcase ids
 // are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator.
 let showcase = 0;
 if (process.argv.includes("--showcase")) {
@@ -136,19 +172,21 @@ if (process.argv.includes("--showcase")) {
   const min = (n: number) => new Date(now.getTime() + n * 60_000);
   const model = process.env.MILESTONE_MODEL ?? "showcase-model";
 
-  type Ms = { id: string; contractId: string; amountMinor: number; seq: number };
+  type Ms = { id: string; contractId: string; clientId: string; amountMinor: number; seq: number };
   const all: Ms[] = [
-    { id: "mst_1", contractId: "ctr_demo", amountMinor: 10000, seq: 1 },
-    { id: "mst_2", contractId: "ctr_demo", amountMinor: 10000, seq: 2 },
-    { id: "mst_3", contractId: "ctr_demo", amountMinor: 10000, seq: 3 },
-    { id: "mst_brand_1", contractId: "ctr_brand", amountMinor: 9000, seq: 1 },
-    { id: "mst_brand_2", contractId: "ctr_brand", amountMinor: 6000, seq: 2 },
+    { id: "mst_1", contractId: "ctr_demo", clientId: "usr_client", amountMinor: 10000, seq: 1 },
+    { id: "mst_2", contractId: "ctr_demo", clientId: "usr_client", amountMinor: 10000, seq: 2 },
+    { id: "mst_3", contractId: "ctr_demo", clientId: "usr_client", amountMinor: 10000, seq: 3 },
+    { id: "mst_brand_1", contractId: "ctr_brand", clientId: "usr_client", amountMinor: 9000, seq: 1 },
+    { id: "mst_brand_2", contractId: "ctr_brand", clientId: "usr_client", amountMinor: 6000, seq: 2 },
+    { id: "mst_dash_1", contractId: "ctr_dash", clientId: "usr_client2", amountMinor: 5000, seq: 1 },
+    { id: "mst_dash_2", contractId: "ctr_dash", clientId: "usr_client2", amountMinor: 3000, seq: 2 },
   ];
   const ids = all.map((m) => `'${m.id}'`).join(",");
   // Clear what a previous showcase (or a real run) left on these milestones, then rebuild it.
   await db.execute(sql.raw(`delete from audit_log where milestone_id in (${ids}) or id like 'aud_show_%'`));
   await db.execute(sql.raw(`delete from ledger_entries where id like 'led_show_%' or ref in (select paypal_capture_id from milestones where id in (${ids}) and paypal_capture_id is not null) or ref in (${all.flatMap((m) => [`'release:${m.id}'`, `'release:${m.id}:partner'`, `'refund:${m.id}'`]).join(",")})`));
-  await db.execute(sql.raw(`delete from paypal_ops where key in (${ids}, 'adv_show_repaid', 'adv_show_open')`));
+  await db.execute(sql.raw(`delete from paypal_ops where key in (${ids}, 'adv_show_repaid', 'adv_show_open', 'adv_show_open2')`));
   await db.execute(sql.raw(`delete from advances where milestone_id in (${ids})`));
   await db.execute(sql.raw(`delete from deliveries where milestone_id in (${ids})`));
 
@@ -196,10 +234,10 @@ if (process.argv.includes("--showcase")) {
     await op("order", m.id, orderId, min(-ago - 1), { id: orderId, status: "APPROVED" });
     await op("capture", m.id, captureId, at, { id: captureId, status: "COMPLETED", amount: { currency_code: "USD", value: (m.amountMinor / 100).toFixed(2) } });
     await post(`txn_show_fund_${m.id}`, captureId, at, [
-      { account: "client:usr_client", amountMinor: m.amountMinor, direction: "debit" },
+      { account: `client:${m.clientId}`, amountMinor: m.amountMinor, direction: "debit" },
       { account: `held:${m.id}`, amountMinor: m.amountMinor, direction: "credit" },
     ]);
-    await auditRow(m, "usr_client", "milestone.order_created", min(-ago - 1), { orderId, amountMinor: m.amountMinor, currency: "USD" });
+    await auditRow(m, m.clientId, "milestone.order_created", min(-ago - 1), { orderId, amountMinor: m.amountMinor, currency: "USD" });
     await auditRow(m, "paypal", "milestone.funded", at, { from: "draft", to: "funded", orderId, captureId, amountMinor: m.amountMinor, currency: "USD", baselineSha });
   };
 
@@ -236,7 +274,7 @@ if (process.argv.includes("--showcase")) {
   };
   const setStatus = (id: string, status: "review" | "released" | "held" | "needs_client", extra: Record<string, unknown> = {}) => db.update(milestones).set({ status, ...extra }).where(sql`id = ${id}`);
 
-  const [m1, m2, m3, b1, b2] = all as [Ms, Ms, Ms, Ms, Ms];
+  const [m1, m2, m3, b1, b2, h1] = all as [Ms, Ms, Ms, Ms, Ms, Ms, Ms];
   const repo = "https://github.com/milestone-demo/landing.git";
 
   // mst_1: funded, waiting for a delivery.
@@ -348,9 +386,12 @@ if (process.argv.includes("--showcase")) {
   await setStatus(b1.id, "needs_client");
   await auditRow(b1, "policy", "milestone.needs_client", db1.verified, { from: "verifying", to: "needs_client", deliveryId: "dlv_show_b1", action: "partial", ruleIds: ["P5"] });
 
-  // mst_brand_2: the copy is too short, a required criterion fails: held (P2).
+  // mst_brand_2: the copy passes every criterion: release (P6). The client approved early, the release job claimed the
+  // payout, and PayPal failed the freelancer item, so the job stopped and flagged it (release.ts flagNeedsOperator +
+  // operatorSummary). The operator case is "payout failed after a correct release"; /ops lists it until an ops.resolved
+  // follows. No release transaction is booked (settle never ran), so the held balance stays with the funding entry.
   await fund(b2, 118, 5);
-  const files2 = [{ name: "website-copy.md", size: 2_611, sha256: sha("website-copy.md"), path: "dlv_show_b2/website-copy.md", mime: "text/markdown" }];
+  const files2 = [{ name: "website-copy.md", size: 4_873, sha256: sha("website-copy.md"), path: "dlv_show_b2/website-copy.md", mime: "text/markdown" }];
   const db2 = await deliver(b2, {
     deliveryId: "dlv_show_b2",
     ago: 22,
@@ -358,29 +399,32 @@ if (process.argv.includes("--showcase")) {
     ref: "upload:1 file",
     payload: { files: files2 },
     evidence: [
-      { id: "ev_b2_words", criterion_id: "crt_brand_2_copy", kind: "file", status: "fail", summary: "website-copy.md: 412 words (minimum 600); \"About us\" section present", uri: "website-copy.md", sha256: files2[0]!.sha256 },
-      { id: "ev_b2_tone", criterion_id: "crt_brand_2_judge", kind: "note", summary: "Warm and specific (names the sourdough starter, opening hours), little filler" },
+      { id: "ev_b2_words", criterion_id: "crt_brand_2_copy", kind: "file", status: "pass", summary: "website-copy.md: 742 words (minimum 600); \"About us\" section present", uri: "website-copy.md", sha256: files2[0]!.sha256 },
+      { id: "ev_b2_tone", criterion_id: "crt_brand_2_judge", kind: "note", summary: "Warm and specific (names the sourdough starter, the baker, opening hours); no stock phrases found" },
     ],
     criteria: [
-      { criterion_id: "crt_brand_2_copy", status: "fail", confidence: 0.99, evidence_ids: ["ev_b2_words"], rationale: "The copy has 412 words against a minimum of 600." },
-      { criterion_id: "crt_brand_2_judge", status: "pass", confidence: 0.86, evidence_ids: ["ev_b2_tone"], rationale: "What is there is warm and specific to the bakery." },
+      { criterion_id: "crt_brand_2_copy", status: "pass", confidence: 0.99, evidence_ids: ["ev_b2_words"], rationale: "The copy has 742 words against a minimum of 600 and includes an About us section." },
+      { criterion_id: "crt_brand_2_judge", status: "pass", confidence: 0.9, evidence_ids: ["ev_b2_tone"], rationale: "The copy is warm, names real details of the bakery and has no filler." },
     ],
-    result: "fail",
-    decision: { action: "hold", amountMinor: 0, ruleIds: ["P2"], reason: "Required criteria failed: Website copy as .md or .docx, at least 600 words, with an About us section" },
+    result: "pass",
+    decision: { action: "release", amountMinor: 6000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
   });
-  await setStatus(b2.id, "held");
-  await auditRow(b2, "policy", "milestone.held", db2.verified, { from: "verifying", to: "held", deliveryId: "dlv_show_b2", action: "hold", ruleIds: ["P2"] });
+  const endsB2 = min(-20 + 48 * 60);
+  await setStatus(b2.id, "review", { reviewEndsAt: endsB2 });
+  await auditRow(b2, "policy", "milestone.review", db2.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_b2", action: "release", ruleIds: ["P6"], reviewEndsAt: endsB2.toISOString() });
+  await db.update(milestones).set({ clientResponse: "approve" }).where(sql`id = ${b2.id}`);
+  await auditRow(b2, "usr_client", "client.approve", min(-15), { status: "review", deliveryId: "dlv_show_b2" });
 
-  // Operator case on mst_brand_2: a payout was sent anyway and PayPal failed the freelancer item, so the release job
-  // stopped and flagged it (release.ts flagNeedsOperator + operatorSummary). /ops lists it until an ops.resolved follows.
+  // Operator case on mst_brand_2: the release job claimed the payout and PayPal failed the freelancer item.
   const failBatch = "SIM-BATCH-SHOWB2F7K";
   const failReason = "Receiver is unregistered";
-  const claim2 = { deliveryId: "dlv_show_b2", action: "release", ruleIds: ["P2"], reason: "Operator-approved release of the held copy milestone", releaseMinor: 6000, refundMinor: 0, currency: "USD", captureId: "SIM-CAP-SHOW5" + b2.seq + "0K2F", freelancerEmail: "freelancer@milestone.test", partnerEmail: null, shares: { partnerShareMinor: 0, freelancerShareMinor: 6000 }, jobId: "job_show_b2", claimedAt: min(-14).toISOString() };
+  const claim2 = { deliveryId: "dlv_show_b2", action: "release", ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold.", releaseMinor: 6000, refundMinor: 0, currency: "USD", captureId: "SIM-CAP-SHOW5" + b2.seq + "0K2F", freelancerEmail: "freelancer@milestone.test", partnerEmail: null, shares: { partnerShareMinor: 0, freelancerShareMinor: 6000 }, jobId: "job_show_b2", claimedAt: min(-14).toISOString() };
   await op("payout", b2.id, failBatch, min(-12), { batch_header: { payout_batch_id: failBatch, batch_status: "DENIED" }, items: { freelancer: { status: "failed", amountMinor: 6000, payoutItemId: "SIM-ITEM-SHOWB2F", eventId: "WH-SHOWB2F", reason: failReason } } }, { status: "failed", request: { claim: claim2 } });
   await auditRow(b2, "system", "release.claimed", min(-14), { deliveryId: "dlv_show_b2", action: "release", freelancerShareMinor: 6000, partnerShareMinor: 0, refundMinor: 0 });
   await auditRow(b2, "paypal", "paypal.payout", min(-13), { deliveryId: "dlv_show_b2", payoutBatchId: failBatch, amountMinor: 6000, currency: "USD" });
   await auditRow(b2, "paypal", "paypal.payout_failed", min(-12), { eventId: "WH-SHOWB2F", party: "freelancer", payoutBatchId: failBatch, amountMinor: 6000, reason: failReason, opStatus: "failed" });
-  await auditRow(b2, "paypal", "milestone.held", min(-11.9), { reason: "A payout item failed" });
+  await setStatus(b2.id, "held");
+  await auditRow(b2, "paypal", "milestone.held", min(-11.9), { from: "review", to: "held", reason: "A payout item failed" });
   await auditRow(b2, "paypal", "milestone.needs_operator", min(-11.8), {
     reason: "A payout item failed",
     status: "held",
@@ -397,10 +441,14 @@ if (process.argv.includes("--showcase")) {
     summary: { paid: 0, failed: 6000, reversed: 0, pending: 0, refunded: 0 },
   });
 
+  // mst_dash_1 (second client): funded with an open advance, so the book shows two clients. mst_dash_2 stays draft.
+  await fund(h1, 70, 6);
+  await advance(h1, { id: "adv_show_open2", principalMinor: 3000, feeBpsPerDay: 10, days: 7, pFail: 0.1, expectedLossMinor: 150, acceptedAgo: 40, fundedAgo: 39 });
+
   showcase = all.length;
 }
 
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
-console.log(`seed ok: ${userRows.length} users, 2 contracts, ${3 + brandMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held)` : ""}`);
+console.log(`seed ok: ${userRows.length} users, 3 contracts, ${3 + brandMilestones.length + dashMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held after a failed payout, second client funded, draft)` : ""}`);
 process.exit(0);

@@ -95,9 +95,9 @@ curl -X POST localhost:3000/api/dev/paypal/fail \
 
 Reseeding is idempotent, but the seed's user upsert does not update `paypal_email` on an existing user. Set both variables before the first `pnpm db:seed`; to change them later, update `users.paypal_email` directly or reseed a fresh database.
 
-## The model key
+## The model
 
-`ANTHROPIC_API_KEY` is required for judgment criteria to be judged (and for the contract compiler and model-phrased advance explanations). Without it the contract form builds a fixed three-milestone demo contract, and verification runs the deterministic or upload checks only: every judgment criterion is unclear, the model is recorded as `deterministic-only`, and a delivery that passes everything else goes to "needs client" under rule P3 instead of review. Set the key for the recording; `MILESTONE_MODEL` picks the model.
+Judgment criteria are judged by a local model through Ollama (qwen3:14b for text, qwen2.5vl:7b for images) by default; Claude through the Anthropic SDK when ANTHROPIC_API_KEY is set. The demo video uses the local model. A model is required for judgment criteria to be judged (and for the contract compiler and model-phrased advance explanations). With none available (no Ollama and no key) the contract form builds a fixed three-milestone demo contract, and verification runs the deterministic or upload checks only: every judgment criterion is unclear, the model is recorded as `deterministic-only`, and a delivery that passes everything else goes to "needs client" under rule P3 instead of review. Have Ollama running (next section) for the recording; `MILESTONE_MODEL` picks the model.
 
 ## Local models with Ollama
 
@@ -136,3 +136,7 @@ MILESTONE_E2E=1 pnpm test
 They are `apps/worker/src/lib/verify.e2e.test.ts` (verify against a throwaway git repo, and upload deliveries), `apps/worker/test/money-path.e2e.test.ts` (review, release and settle with PayPal faked at the HTTP layer), `release-settle.e2e.test.ts` and `advance.e2e.test.ts`. They use `DATABASE_URL`, tag every row they create and remove it afterwards, and mock the job queue. Run them against a development database, not one you are about to demo from.
 
 The baseline-suite and gaming-scan behaviour (CLAUDE.md rule 9) is exercised against real repositories by an opt-in test that needs network and `npm install`: `MILESTONE_REAL_REPOS=1 MILESTONE_REAL_REPOS_DIR=<scratch dir> pnpm --filter @milestone/verify exec vitest run test/real-repos.test.ts`. See `fixtures/real-repos/README.md`. It uses no database and no model.
+
+## Local repository paths
+
+`POST /api/milestones/{id}/deliver` accepts a `file://` URL or an absolute local path only when `MILESTONE_ALLOW_LOCAL_REPOS=1`, or when `NODE_ENV` is not `production` and PayPal is simulated (`PAYPAL_MODE=simulated`, which the demo and the recorder set); anywhere else it answers 400 with `local repositories are not accepted`, because a local path makes the worker clone any repository on the host. `https` URLs are always accepted; `ssh`, `git://`, `ext::` and URLs carrying credentials are always refused. Set the flag only on a machine you own, never on a shared or production host.

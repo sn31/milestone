@@ -112,6 +112,7 @@ export function VerdictView({
   attachments,
   kinds = {},
   countersign,
+  clientApproved = false,
 }: {
   delivery: VerdictDelivery | null;
   decision: StoredDecision | null;
@@ -134,6 +135,11 @@ export function VerdictView({
   kinds?: Record<string, string>;
   /** What happened after the decision (the client's approval or hold), inked under the stamp. */
   countersign?: string | null;
+  /**
+   * The client approved an ask_client decision and the payout landed: the stamp reads "Client approved" in the released
+   * tone (the rule id stays as small text under it) instead of the amber "Ask client".
+   */
+  clientApproved?: boolean;
 }) {
   const items = toEvidenceItems(delivery?.evidence ?? null);
   const byId = new Map<string, EvidenceItem>(items.map((it) => [it.id, it]));
@@ -143,6 +149,7 @@ export function VerdictView({
   const [focus, setFocus] = useState<{ id: string | null; n: number }>({ id: null, n: 0 });
   const [unfolded, setUnfolded] = useState(false);
   const foldId = useId();
+  const stampAction = decision && clientApproved && decision.action === "ask_client" ? "client_approved" : decision?.action;
 
   if (!delivery) return <p className="mt-4 font-mono text-[12px] text-fg-faint">No delivery yet.</p>;
 
@@ -236,7 +243,7 @@ export function VerdictView({
         <p className="mt-2 font-mono text-[11px] text-fg-faint">Decided by the policy rules, not the model.</p>
       </div>
       <Stamp
-        action={decision.action}
+        action={stampAction ?? decision.action}
         ruleIds={decision.ruleIds}
         note={currency && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, currency) : undefined}
         countersign={countersign ?? undefined}
@@ -400,7 +407,7 @@ export function VerdictView({
   if (!folded) return <div className="mt-4">{full}</div>;
 
   const stamp = decision ? (
-    <Stamp size="sm" action={decision.action} ruleIds={decision.ruleIds} note={currency && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, currency) : undefined} />
+    <Stamp size="sm" action={stampAction ?? decision.action} ruleIds={decision.ruleIds} note={currency && decision.amountMinor > 0 ? formatMoney(decision.amountMinor, currency) : undefined} />
   ) : null;
   return (
     <div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { animate, motion } from "motion/react";
-import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import { formatAmount, formatMoneyParts } from "@/lib/format";
 import { cx } from "./cx";
 import { DUR, EASE, prefersReducedMotion } from "./motion";
@@ -174,8 +174,29 @@ export interface ReleaseLeg {
   to: string;
   /** Mono note under the name, e.g. "advance repaid". */
   note?: string;
+  /**
+   * What the leg is, printed under the name in place of `note` once known (e.g. "advance $58.33 + fee $0.81 repaid");
+   * a server component may be passed here.
+   */
+  detail?: ReactNode;
   minor: number;
   tone: ToneKey;
+  /** Who the leg pays; derived when missing: a noted leg is the partner's, a draft-toned one a refund, else the freelancer's. */
+  role?: "partner" | "freelancer" | "refund";
+}
+
+/** Who a leg pays, for the band's order and weight. */
+export function legRole(leg: ReleaseLeg): NonNullable<ReleaseLeg["role"]> {
+  return leg.role ?? (leg.note || leg.detail ? "partner" : leg.tone === "draft" ? "refund" : "freelancer");
+}
+
+/**
+ * The band's order: the partner's repayment first, a refund next, the freelancer's share last, so the freelancer's
+ * figure is drawn after the partner's and lands last whatever the amounts.
+ */
+export function orderLegs(legs: ReleaseLeg[]): ReleaseLeg[] {
+  const rank = { partner: 0, refund: 1, freelancer: 2 } as const;
+  return [...legs].sort((a, b) => rank[legRole(a)] - rank[legRole(b)]);
 }
 
 export interface ReleaseBandProps {
@@ -204,13 +225,17 @@ const LEG_GAP = 0.25;
 
 /**
  * The release, as a full-width band on the station: escrow on the left draining as each leg crosses to its payee on
- * the right (the capital partner's repayment first, then the freelancer's share, matching the ledger), the contract's
+ * the right (the capital partner's repayment first, a refund next, the freelancer's share last and largest), the contract's
  * released total counting up, and the PayPal confirmation landing last. While the payout waits for PayPal's webhook
  * the bead waits at the middle of the track. Plays once when the release has just happened; otherwise rests at the
  * end state. Reduced motion shows the end state.
  */
-export function ReleaseBand({ milestoneId, playKey, currency, legs, phase, fresh = false, contractTotal, reference, confirmedLabel = "payout confirmed by PayPal", className }: ReleaseBandProps) {
+export function ReleaseBand({ milestoneId, playKey, currency, legs: givenLegs, phase, fresh = false, contractTotal, reference, confirmedLabel = "payout confirmed by PayPal", className }: ReleaseBandProps) {
+  const legs = orderLegs(givenLegs);
   const total = legs.reduce((s, l) => s + l.minor, 0);
+  const partnerMinor = legs.filter((l) => legRole(l) === "partner").reduce((s, l) => s + l.minor, 0);
+  // The freelancer's share before the advance came off it: the leg's amount plus the partner's repayment.
+  const freelancerFull = (leg: ReleaseLeg) => leg.minor + partnerMinor;
   const play = usePlayOnce(playKey ?? `release:${milestoneId}`, phase === "done" && fresh);
   const box = useRef<HTMLDivElement>(null);
   const escrow = useRef<HTMLSpanElement>(null);
@@ -302,6 +327,7 @@ export function ReleaseBand({ milestoneId, playKey, currency, legs, phase, fresh
         <ol className="grid min-w-0 content-center gap-4">
           {legs.map((leg, i) => {
             const start = startFrame || pending;
+            const role = legRole(leg);
             return (
               <li key={leg.to + i} data-tone={leg.tone} className="grid min-w-0 grid-cols-[minmax(2.5rem,1fr)_auto] items-end gap-4 sm:gap-6">
                 <div className="relative mb-[13px] h-[2px] rounded-full bg-hairline-strong" aria-hidden>
@@ -326,14 +352,22 @@ export function ReleaseBand({ milestoneId, playKey, currency, legs, phase, fresh
                 <div className="min-w-0 text-right">
                   <p className="type-label truncate text-fg-faint">
                     {leg.to}
-                    {leg.note || pending ? (
+                    {pending ? (
                       <span className="ml-2 font-mono text-[10.5px] tracking-normal text-fg-faint/80 normal-case tabular">
                         {/* While PayPal has not confirmed, each payee's figure is still 0: say what is on its way. */}
-                        {[leg.note, pending ? `due ${parts.symbolAfter ? "" : parts.symbol}${formatAmount(leg.minor, currency)}${parts.symbolAfter ? ` ${parts.symbol}` : ""}` : null].filter(Boolean).join(" · ")}
+                        {`due ${parts.symbolAfter ? "" : parts.symbol}${formatAmount(leg.minor, currency)}${parts.symbolAfter ? ` ${parts.symbol}` : ""}`}
                       </span>
                     ) : null}
                   </p>
-                  <p className={cx("mt-1.5 text-tone", i === legs.length - 1 || legs.length === 1 ? "type-num-l md:type-num-xl" : "type-num-l")}>
+                  {/* What the leg is: the partner's advance and fee; the freelancer's full share less the advance. */}
+                  {role === "partner" ? (
+                    <p className="mt-1 font-mono text-[10.5px] text-fg-faint/80 tabular">{leg.detail ?? leg.note ?? "advance repaid"}</p>
+                  ) : role === "freelancer" && partnerMinor > 0 ? (
+                    <p className="mt-1 font-mono text-[10.5px] text-fg-faint/80 tabular">{`${parts.symbolAfter ? "" : parts.symbol}${formatAmount(freelancerFull(leg), currency)}${parts.symbolAfter ? ` ${parts.symbol}` : ""} less the advance`}</p>
+                  ) : leg.note || leg.detail ? (
+                    <p className="mt-1 font-mono text-[10.5px] text-fg-faint/80 tabular">{leg.detail ?? leg.note}</p>
+                  ) : null}
+                  <p className={cx("mt-1.5 text-tone", role === "freelancer" || legs.length === 1 ? "type-num-l md:type-num-xl" : "type-num-m sm:type-num-l")}>
                     {figure((el) => {
                       (legRefs.current[i] ??= { fig: null, bead: null, fill: null }).fig = el;
                     }, formatAmount(start && !pending ? 0 : pending ? 0 : leg.minor, currency))}
