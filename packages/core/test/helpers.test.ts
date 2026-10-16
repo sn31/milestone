@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { asInt, asNumber, asRecord, asString } from "../src/json.ts";
 import { commitDeliveryId } from "../src/ids.ts";
 import { CommitPayload, StoredDecision, decisionDeliveryId, formatMinor, minorDigits, requiredNotPassed, toPayPalValue } from "../src/schemas.ts";
@@ -184,6 +184,10 @@ describe("statusForDecision", () => {
 });
 
 describe("reviewWindowSeconds", () => {
+  // The function reads REVIEW_WINDOW_SECONDS; a developer shell that loaded .env must not change these expectations.
+  const saved = process.env.REVIEW_WINDOW_SECONDS;
+  beforeEach(() => { delete process.env.REVIEW_WINDOW_SECONDS; });
+  afterEach(() => { if (saved === undefined) delete process.env.REVIEW_WINDOW_SECONDS; else process.env.REVIEW_WINDOW_SECONDS = saved; });
   it("uses the override when numeric, the contract's otherwise, never below the minimum", () => {
     expect(reviewWindowSeconds(172_800, undefined)).toBe(172_800);
     expect(reviewWindowSeconds(172_800, "")).toBe(172_800);
