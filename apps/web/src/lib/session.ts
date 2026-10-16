@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { userRole } from "@milestone/core";
+import { agentActor, authenticateAgent, bearerToken, userRole, type AgentMandate, type Executor } from "@milestone/core";
 
 /** The users.role enum: the three demo parties plus the platform operator. */
 export type Role = (typeof userRole.enumValues)[number];
@@ -26,6 +26,37 @@ export const ROLE_LABELS: Record<Role, string> = { client: "Client", freelancer:
 export async function getActor(): Promise<Actor> {
   const jar = await cookies();
   return ACTORS[jar.get(ACTOR_COOKIE)?.value ?? ""] ?? ACTORS.usr_client;
+}
+
+// ---------- Agents acting under a mandate ----------
+
+/** An agent acting as its mandate's user; `auditActor` is agentActor(mandate) for every audit row it causes. */
+export interface AgentActor extends Actor { mandate: AgentMandate; auditActor: string }
+
+export type AgentResolution =
+  | { agent: AgentActor }
+  | { refused: { status: 401 | 403; reason: "invalid_token" | "mandate_expired" | "mandate_revoked"; error: string } };
+
+/**
+ * Resolves "Authorization: Bearer <token>" to the agent and the user it acts as. Returns null when the request carries
+ * no Authorization header (a human: use getActor()). A header that is present but not a valid, live mandate token is
+ * refused and never falls back to the cookie identity.
+ */
+export async function resolveAgentActor(req: Request, db: Executor): Promise<AgentResolution | null> {
+  const header = req.headers.get("authorization");
+  if (header === null) return null;
+  const auth = await authenticateAgent(db, bearerToken(header));
+  if (!auth.ok) {
+    if (auth.code === "invalid_token") return { refused: { status: 401, reason: auth.code, error: "unknown or malformed agent token" } };
+    return { refused: { status: 403, reason: auth.code, error: auth.code === "mandate_revoked" ? "the mandate was revoked" : "the mandate has expired" } };
+  }
+  const { mandate, user } = auth;
+  return { agent: { userId: user.id, role: user.role, mandate, auditActor: agentActor(mandate) } };
+}
+
+/** Whether the actor is an agent acting under a mandate. */
+export function isAgent(actor: Actor): actor is AgentActor {
+  return "mandate" in actor && "auditActor" in actor;
 }
 
 // ---------- Who may act on a contract ----------

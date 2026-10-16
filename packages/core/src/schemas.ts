@@ -201,8 +201,14 @@ export function requiredNotPassed(verdict: unknown, criteria: ReadonlyArray<Pick
   return criteria.filter((c) => c.required && status.get(c.id) !== "pass").map((c) => c.description);
 }
 
+// ---------- Agent mandates ----------
+/** What a client may delegate to an agent (agent_mandates.actions). Money moves only through the routes a human uses. */
+export const MandateAction = z.enum(["read", "draft_contract", "fund", "deliver", "approve", "hold"]);
+export type MandateAction = z.infer<typeof MandateAction>;
+export const MANDATE_ACTIONS = MandateAction.options;
+
 // ---------- Jobs and events ----------
-export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute"]);
+export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute", "reconcile"]);
 export type JobName = z.infer<typeof JobName>;
 
 /** Confirmed against PayPal's webhook event reference on 2026-10-08. */

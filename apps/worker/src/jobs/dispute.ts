@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { Job } from "pg-boss";
 import { AUDIT_EVENTS, accounts, asString, audit, decisionDeliveryId, ledgerEntries, loadMilestone, type Db } from "@milestone/core";
-import { findOpenedDispute, getDispute, parseDispute } from "@milestone/money";
-import { compileEvidencePack, draftResponse, type EvidencePack, type EvidencePackInput } from "@milestone/verify";
+import { callPayPalTool, findOpenedDispute, getDispute, parseDispute, type DisputeEventInfo, type OpenPayPalMcpOptions } from "@milestone/money";
+import { compileEvidencePack, draftResponse, type EvidencePack, type EvidencePackInput, type PackDispute } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { paypal } from "../lib/paypal.ts";
@@ -46,6 +46,34 @@ export async function loadPackInput(db: Db, milestoneId: string, disputeInfo: Ev
   return { contract, milestone, criteria, delivery, auditRows, ledgerRows, dispute: disputeInfo };
 }
 
+/**
+ * PayPal's current view of the dispute: get_dispute through PayPal's MCP server (read-only, allowlisted), falling back
+ * to REST on any error, then to the webhook's copy. The path used (and why the MCP read was not) goes into the pack.
+ */
+export async function readDispute(disputeId: string, webhookCopy: PackDispute, mcp: OpenPayPalMcpOptions = {}): Promise<PackDispute> {
+  const merge = (live: DisputeEventInfo | null, readVia: NonNullable<PackDispute["readVia"]>, readFallback: string | null): PackDispute | null =>
+    live
+      ? { id: disputeId, reason: live.reason ?? webhookCopy.reason ?? null, amountMinor: live.amountMinor ?? webhookCopy.amountMinor ?? null, currency: live.currency ?? webhookCopy.currency ?? null, readVia, ...(readFallback ? { readFallback } : {}) }
+      : null;
+  let fallback: string;
+  try {
+    const res = await callPayPalTool("get_dispute", { dispute_id: disputeId }, mcp);
+    const got = merge(parseDispute(res.data), res.simulated ? "simulated_mcp" : "paypal_mcp", null);
+    if (got) return got;
+    fallback = "get_dispute returned no dispute";
+  } catch (e) {
+    fallback = `MCP get_dispute failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300);
+    console.warn(`[dispute] ${disputeId}: ${fallback}; trying REST`);
+  }
+  try {
+    const got = merge(parseDispute(await getDispute(paypal(), disputeId)), "rest", fallback);
+    if (got) return got;
+  } catch (e) {
+    console.warn(`[dispute] ${disputeId}: GET dispute failed, using the webhook's copy: ${e instanceof Error ? e.message : e}`);
+  }
+  return { ...webhookCopy, readVia: "webhook", readFallback: fallback };
+}
+
 export type DraftOutcome = { kind: "drafted"; pack: EvidencePack } | { kind: "already" } | { kind: "unknown" };
 
 export async function draftDispute(db: Db, disputeId: string): Promise<DraftOutcome> {
@@ -61,14 +89,8 @@ export async function draftDispute(db: Db, disputeId: string): Promise<DraftOutc
   if (already) return { kind: "already" };
 
   const detail = (opened.detail ?? {}) as { reason?: string | null; amountMinor?: number | null; currency?: string | null };
-  let info: EvidencePackInput["dispute"] = { id: disputeId, reason: detail.reason ?? null, amountMinor: detail.amountMinor ?? null, currency: detail.currency ?? null };
-  // PayPal's current view, when it answers; the webhook's copy is enough otherwise.
-  try {
-    const live = parseDispute(await getDispute(paypal(), disputeId));
-    if (live) info = { id: disputeId, reason: live.reason ?? info.reason ?? null, amountMinor: live.amountMinor ?? info.amountMinor ?? null, currency: live.currency ?? info.currency ?? null };
-  } catch (e) {
-    console.warn(`[dispute] ${disputeId}: GET dispute failed, using the webhook's copy: ${e instanceof Error ? e.message : e}`);
-  }
+  const webhookCopy: PackDispute = { id: disputeId, reason: detail.reason ?? null, amountMinor: detail.amountMinor ?? null, currency: detail.currency ?? null };
+  const info = await readDispute(disputeId, webhookCopy);
 
   const input = await loadPackInput(db, opened.milestoneId, info);
   if (!input) return { kind: "unknown" };

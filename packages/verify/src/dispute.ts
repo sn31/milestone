@@ -93,11 +93,18 @@ export interface PackLedgerRow {
   ref: string;
   createdAt: When;
 }
+/** How the dispute itself was read: PayPal's MCP server (get_dispute), the simulator behind it, REST, or the webhook's copy. */
+export type DisputeReadPath = "paypal_mcp" | "simulated_mcp" | "rest" | "webhook";
+
 export interface PackDispute {
   id: string;
   reason?: string | null;
   amountMinor?: number | null;
   currency?: string | null;
+  /** Recorded in the pack when given; a pack built without it hashes as before. */
+  readVia?: DisputeReadPath;
+  /** Why the MCP read was not used, when it fell back. */
+  readFallback?: string | null;
 }
 
 export interface EvidencePackInput {
@@ -170,7 +177,7 @@ export interface EvidencePack {
   version: 1;
   /** sha256 of the pack without this field, 16 hex characters. */
   hash: string;
-  dispute: { id: string; reason: string | null; amountMinor: number | null; currency: string | null } | null;
+  dispute: { id: string; reason: string | null; amountMinor: number | null; currency: string | null; readVia?: DisputeReadPath; readFallback?: string } | null;
   contract: PackContract;
   milestone: { id: string; seq: number; title: string; amountMinor: number; currency: string; status: string; captureId: string | null };
   delivery: { id: string; source: string; ref: string; title: string | null; sha: string | null; receivedAt: string; verifiedAt: string | null; result: string | null; suspectedInjection: boolean } | null;
@@ -454,7 +461,16 @@ export function compileEvidencePack(input: EvidencePackInput): EvidencePack {
 
   const body: Omit<EvidencePack, "hash"> = {
     version: 1,
-    dispute: input.dispute ? { id: input.dispute.id, reason: input.dispute.reason ?? null, amountMinor: input.dispute.amountMinor ?? null, currency: input.dispute.currency ?? null } : null,
+    dispute: input.dispute
+      ? {
+          id: input.dispute.id,
+          reason: input.dispute.reason ?? null,
+          amountMinor: input.dispute.amountMinor ?? null,
+          currency: input.dispute.currency ?? null,
+          ...(input.dispute.readVia ? { readVia: input.dispute.readVia } : {}),
+          ...(input.dispute.readFallback ? { readFallback: input.dispute.readFallback.slice(0, 300) } : {}),
+        }
+      : null,
     contract: { id: contract.id, title: contract.title, currency, clientId: contract.clientId, freelancerId: contract.freelancerId, ...(contract.clientName ? { clientName: contract.clientName } : {}) },
     milestone: { id: m.id, seq: m.seq, title: m.title, amountMinor: m.amountMinor, currency, status: m.status, captureId: m.paypalCaptureId ?? null },
     delivery: delivery

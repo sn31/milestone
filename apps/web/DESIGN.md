@@ -792,3 +792,39 @@ tamper wording ("The delivery left the test machinery alone" is gone).
 - Checked at 1440x900 dark on a scratch server: m1-pass (RAN, removed the added test, own tests 12 passing, ASK CLIENT
   P3 with no model), m2-partial (RAN, nothing to restore, the client's annual billing test failing, HOLD P2), and an
   env-sniff branch for the flag row (ASK CLIENT P3).
+
+## Agents
+
+`/agents` (mandates and their audit) and `/agents/console` (the client's agent in conversation). Built from the existing
+primitives; nothing new in `components/ui/`.
+
+- **Mandate terms** (`src/components/agent-console-mandate.tsx`, server-safe): `MandateCard` (the console's side card),
+  `ActionChips`, `CapFigure`, `MandatePill`. A mandate's status reuses `StatePill` with a label override: active in the
+  funded tone (`state="active"`: it holds delegated authority), revoked in held, expired in draft. Actions are mono chips
+  (`rounded-chip`, hairline-strong, `text-fg-muted`), never tone-coloured: an action is not a state. The cap is `<Money>`
+  (`size="l"` on the card, `s` in the ledger); a mandate without approve prints "No approvals" in faint mono.
+- **`/agents`**: `PageHeader`, then the create form (glass `Panel`) beside a sunken "An agent's approve counts only when"
+  list (the five conditions the review route checks, numbered in mono), then the Mandates ledger (serif agent name, id in
+  faint mono, chips, cap right-aligned, expiry and last used in mono with a relative line, status pill and a two-step
+  danger "Revoke"), then "What your agents did": audit rows whose actor is `agent:<name> for <user>`, in the same
+  time/glyph/tone vocabulary as the activity ledger (`src/lib/events.ts`); refusals read in danger with their reason.
+- **Token shown once**: after creating, the form becomes a funded-edged panel with the token in a sunken well (mono,
+  `break-all`), "Copy token", one primary "Open the console", and the line that Milestone keeps only its hash. The token
+  is also kept in this tab's `sessionStorage` (`milestone.agentToken.<id>`, try/catch) so the console can use it; the
+  server never stores it.
+- **Console frame** (fits 1440x900 with the header): a 612 px row at `lg`, conversation `Panel` (flexes) beside a 320 px
+  mandate `Panel`. The conversation has a mono strip on top (agent for client · provider · model, tool count), a scrolling
+  transcript, and the composer at the foot (sunken textarea, the one primary "Send"; "Stop" as ghost while a turn runs).
+  Turns are ledger rows: a mono label column ("You" / "Agent", 88 px) and the text; no chat bubbles, nothing centred.
+- **Tool chip** (`src/components/agent-console-chip.tsx`): one per MCP call, a sunken `rounded-chip` block in mono 12 px.
+  Line one: "Milestone MCP ·" or "PayPal MCP ·" (faint) + tool (fg) + arguments (faint, truncated). Line two: a
+  `StateGlyph` check (faint) or cross (danger) and the one-line result; when the result names a milestone status, that
+  status's `StatePill` sits at the right. A refused call gets a `border-tone` danger edge and `text-tone-ink`. A call in
+  flight shows a pulsing faint dot ("calling…"): the only animation, and only while live. Never violet: the agent at work
+  is not the verifier.
+- **Notices**: when a reply claims an action no successful tool call in that turn made (or calls a queued release paid),
+  a mono line in `--ink-needs` under the reply says so ("Not done: …"). The agent gets one correction turn first.
+- **PayPal approval link**: when a tool result carries one (fund_milestone's `approvalUrl`, or rel `approve` links), a
+  secondary "Approve in PayPal" button under the turn and at the foot of the mandate card, opening a new tab, with the
+  faint line "You approve the payment; the agent cannot." Only https PayPal hosts or this app's own paths are shown.
+- **Phones**: the two panels stack (conversation first), starters wrap, the eyebrow drops "Milestone MCP + PayPal MCP".

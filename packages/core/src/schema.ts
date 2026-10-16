@@ -1,6 +1,6 @@
 import { relations } from "drizzle-orm";
 import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import type { StoredDecision } from "./schemas.ts";
+import type { MandateAction, StoredDecision } from "./schemas.ts";
 
 export const userRole = pgEnum("user_role", ["client", "freelancer", "partner", "platform"]);
 export const contractStatus = pgEnum("contract_status", ["draft", "approved", "active", "closed"]);
@@ -167,6 +167,27 @@ export const auditLog = pgTable("audit_log", {
   index("audit_milestone_created").on(t.milestoneId, t.createdAt.desc()),
   index("audit_contract_created").on(t.contractId, t.createdAt.desc()),
   index("audit_event_milestone").on(t.event, t.milestoneId),
+]);
+
+/**
+ * A client's delegation to an agent (see mandates.ts). Only the sha256 of the bearer token is stored; the token itself
+ * is shown once, at creation. approve_cap_minor is in `currency`; null means the agent may not approve any release.
+ */
+export const agentMandates = pgTable("agent_mandates", {
+  id: id(),
+  userId: text("user_id").notNull().references(() => users.id),
+  agentName: text("agent_name").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  actions: jsonb("actions").$type<MandateAction[]>().notNull(),
+  approveCapMinor: bigint("approve_cap_minor", { mode: "number" }),
+  currency: text("currency").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: createdAt(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("agent_mandates_token_hash").on(t.tokenHash),
+  index("agent_mandates_user").on(t.userId),
 ]);
 
 // ---------- Relations (relational queries only: db.query.x.findFirst({ with: ... }); no schema change) ----------

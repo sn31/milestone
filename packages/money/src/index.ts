@@ -29,3 +29,6 @@ export { underwrite, loadRecords, loadUnderwriting, daysUntil, criteriaCounts, d
 export type { AdvanceTerms, UnderwriteInput, Underwriting, Records, UnderwritingContext, AdvanceKey, AdvanceLedgerRow, AdvanceBalance, AdvanceForRepayment } from "./policy/advance.ts";
 export { captureFunding, executeRelease, executePayout, executeRefund, moneyContextFor, fundAdvance, acceptDisputeClaim, disputeLedgerRef } from "./policy/execute.ts";
 export type { MoneyContext, ReleasePlan, ReleaseResult, PayoutRequest, RefundRequest, PayoutBatch } from "./policy/execute.ts";
+// PayPal's MCP server, read-only (reconciliation, dispute reads). An allowlist refuses every money-moving tool.
+export { openPayPalMcp, callPayPalTool, isAllowedPayPalTool, readToolResult, parseTransactions, simulatedTransactions, PayPalMcpRefused, PayPalMcpError, PAYPAL_MCP_ALLOWED_TOOLS, PAYPAL_MCP_DENIED_MONEY_TOOLS, PAYPAL_MCP_TOOL_GROUPS, SIM_EVENT_CODES } from "./paypal/mcp-client.ts";
+export type { PayPalMcpTool, PayPalToolResult, PayPalMcpSession, OpenPayPalMcpOptions, PayPalTransaction } from "./paypal/mcp-client.ts";

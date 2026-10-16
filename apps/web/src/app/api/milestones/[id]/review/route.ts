@@ -1,7 +1,8 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   OP_KINDS,
   RELEASABLE_STATUSES,
+  agentMandates,
   asRecord,
   asString,
   audit,
@@ -9,15 +10,17 @@ import {
   decisionDeliveryId,
   deliveries,
   enqueue,
+  mandateAllows,
   milestones,
   paypalOps,
   requiredNotPassed,
   transition,
+  type MandateAction,
   type MilestoneStatus,
 } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
-import { getActor, isContractClient } from "@/lib/session";
+import { getActor, isContractClient, resolveAgentActor, type Actor, type AgentActor } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
 
 const ACTIONS = ["approve", "veto", "confirm_partial", "hold"] as const;
@@ -30,6 +33,15 @@ const ALLOWED: Record<Action, ReadonlySet<MilestoneStatus>> = {
   confirm_partial: new Set(["needs_client"]),
   hold: new Set(["needs_client"]),
 };
+
+/**
+ * The mandate action an agent needs for each review action. confirm_partial has none: a partial release is a policy
+ * "partial"/"ask_client" outcome that only the human client can accept, so an agent is always refused it.
+ */
+const AGENT_NEEDS: Record<Action, MandateAction | null> = { approve: "approve", veto: "hold", hold: "hold", confirm_partial: null };
+
+/** The rule id of the policy's own release decision (decide(): every criterion passed at or above the threshold). */
+const POLICY_RELEASE_RULE = "P6";
 
 type Refusal = { error: string; status: number; extra?: Record<string, unknown> };
 type Outcome = { refused: Refusal } | { queued: string } | { held: boolean };
@@ -44,11 +56,23 @@ function claimDeliveryId(request: unknown): string | null {
  * release job (it re-derives the outcome from the DB under the same row lock); veto/hold move the milestone to held.
  * Everything is decided under SELECT ... FOR UPDATE on the milestone row, the lock the release job takes before it
  * claims the payout, so a veto/hold either lands before the payout is claimed or is refused.
+ *
+ * Agents: with "Authorization: Bearer <token>" the caller is the mandate's agent acting as the mandate's user (401
+ * invalid_token, 403 mandate_expired / mandate_revoked when the token is not live). An agent's approve is accepted
+ * only while the milestone is in review on the policy's release decision (P6) for the current delivery, with every
+ * required criterion passed and the amount within the mandate's cap (403 mandate_missing_action / mandate_cap_exceeded,
+ * 409 not_release_decision / required_criteria_not_passed otherwise); veto and hold need "hold" in the mandate;
+ * confirm_partial is never an agent's (409 not_release_decision). Accepted and refused agent actions are audited
+ * with actor agentActor(mandate). Humans (no Authorization header) are unchanged.
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const actor = await getActor();
   const db = getDb();
+  // An agent presents "Authorization: Bearer <token>" and acts as its mandate's user; humans keep the cookie identity.
+  const resolved = await resolveAgentActor(req, db);
+  if (resolved && "refused" in resolved) return jsonError(resolved.refused.error, resolved.refused.status, { reason: resolved.refused.reason });
+  const agent: AgentActor | null = resolved?.agent ?? null;
+  const actor: Actor = agent ?? (await getActor());
   const found = await loadMilestone(db, id);
   if (!found) return jsonError("milestone not found", 404);
   const { contract: c } = found;
@@ -63,7 +87,34 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     const refuse = (error: string, status = 409, extra?: Record<string, unknown>): Outcome => ({ refused: { error, status, ...(extra ? { extra } : {}) } });
     const [m] = await tx.select().from(milestones).where(eq(milestones.id, id)).for("update");
     if (!m) return refuse("milestone not found", 404);
+
+    if (agent) {
+      // An agent can only make a release the policy already decided happen sooner, never one it would not.
+      const needs = AGENT_NEEDS[action];
+      if (!needs) return refuse(`an agent cannot ${action}: only the client can accept a partial release`, 409, { reason: "not_release_decision" });
+      // Re-read the mandate under FOR SHARE: a concurrent revoke either lands first (refused here) or waits for this commit.
+      const [mandate] = await tx.select().from(agentMandates).where(eq(agentMandates.id, agent.mandate.id)).for("share");
+      if (!mandate) return refuse("the mandate no longer exists", 403, { reason: "mandate_revoked" });
+      const amount = needs === "approve" ? Math.max(m.amountMinor, m.decision?.amountMinor ?? 0) : undefined;
+      const allowed = mandateAllows(mandate, needs, amount, { currency: c.currency });
+      if ("refused" in allowed) {
+        const extra = allowed.refused === "mandate_cap_exceeded" ? { amountMinor: amount, capMinor: mandate.approveCapMinor, currency: c.currency, mandateCurrency: mandate.currency } : {};
+        return refuse(`the mandate does not cover ${action}`, 403, { reason: allowed.refused, ...extra });
+      }
+    }
+
     if (!ALLOWED[action].has(m.status)) return refuse(`cannot ${action} while milestone is ${m.status}`);
+
+    if (agent && action === "approve") {
+      // In review, on the policy's own release decision (P6), made for the milestone's current (latest) delivery.
+      const decision = m.decision;
+      const decided = decisionDeliveryId(decision);
+      const [latest] = await tx.select({ id: deliveries.id }).from(deliveries).where(eq(deliveries.milestoneId, m.id)).orderBy(desc(deliveries.receivedAt)).limit(1);
+      const isRelease = m.status === "review" && decision?.action === "release" && Array.isArray(decision.ruleIds) && decision.ruleIds.includes(POLICY_RELEASE_RULE);
+      if (!isRelease || !decided || decided !== latest?.id) {
+        return refuse("an agent may only approve the policy's release decision for the current delivery", 409, { reason: "not_release_decision" });
+      }
+    }
     if (action === "approve" && m.status === "needs_client" && m.decision?.action !== "ask_client") {
       return refuse("full approval is only offered when the agent asked the client");
     }
@@ -98,7 +149,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     }
 
     await tx.update(milestones).set({ clientResponse: action }).where(eq(milestones.id, m.id));
-    const entry = { actor: actor.userId, event: `client.${action}`, detail: { status: m.status, deliveryId } };
+    const via = agent ? { via: "agent", mandateId: agent.mandate.id, agentName: agent.mandate.agentName, onBehalfOf: agent.userId } : {};
+    const entry = { actor: agent ? agent.auditActor : actor.userId, event: `client.${action}`, detail: { status: m.status, deliveryId, ...via } };
     if (!stops) {
       await audit(tx, { ...entry, milestoneId: m.id, contractId: c.id });
       return { queued: deliveryId! };
@@ -106,7 +158,19 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return { held: await transition(tx, m.id, "held", entry) };
   });
 
-  if ("refused" in outcome) return jsonError(outcome.refused.error, outcome.refused.status, outcome.refused.extra);
+  if ("refused" in outcome) {
+    if (agent && outcome.refused.status !== 404) {
+      // Refused agent attempts are on the record too.
+      await audit(db, {
+        actor: agent.auditActor,
+        event: `agent.${action}_refused`,
+        milestoneId: id,
+        contractId: c.id,
+        detail: { mandateId: agent.mandate.id, reason: outcome.refused.extra?.reason ?? null, error: outcome.refused.error },
+      });
+    }
+    return jsonError(outcome.refused.error, outcome.refused.status, outcome.refused.extra);
+  }
   if ("queued" in outcome) {
     // After commit, so the job sees the client's answer. Release job data: { milestoneId, deliveryId }.
     await enqueue("release", id, { deliveryId: outcome.queued }, { dedupe: `client-${action}-${outcome.queued}` });

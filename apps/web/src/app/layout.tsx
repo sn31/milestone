@@ -44,6 +44,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
         { href: "/", label: "Contracts", exact: true },
         { href: "/contracts/new", label: "New contract" },
         { href: "/disputes", label: "Disputes" },
+        { href: "/agents", label: "Agents" },
       ];
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full antialiased`} suppressHydrationWarning>

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { and, asc, inArray } from "drizzle-orm";
+import { and, asc, desc, inArray } from "drizzle-orm";
 import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps } from "@milestone/core";
 import { armedSimulatedFailures, paypalMode } from "@milestone/money";
 import { getDb } from "@/lib/db";
@@ -27,6 +27,7 @@ import { payoutFailureLine, payoutReason } from "@/lib/payout-failure";
 import { eventSentence } from "@/app/contracts/[id]/activity/sentence";
 import { ResolveForm } from "./resolve-form";
 import { SimulatePayoutFailure } from "./simulate-failure";
+import { RECONCILE_EVENTS, ReconciliationCard } from "./reconciliation-card";
 
 export const dynamic = "force-dynamic";
 
@@ -83,6 +84,14 @@ export default async function OpsPage() {
   const canAct = isOperator(actor);
   const mode = paypalMode();
   const simulated = mode === "simulated";
+
+  // The latest reconciliation (PayPal's transactions read through PayPal's MCP server), its own card below the cases.
+  const [reconciliation] = await db
+    .select({ id: auditLog.id, event: auditLog.event, detail: auditLog.detail, createdAt: auditLog.createdAt })
+    .from(auditLog)
+    .where(inArray(auditLog.event, [RECONCILE_EVENTS.reconciled, RECONCILE_EVENTS.failed]))
+    .orderBy(desc(auditLog.createdAt))
+    .limit(1);
 
   // Oldest case first.
   const open = [...(await openOperatorFlags(db)).values()].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
@@ -322,6 +331,10 @@ export default async function OpsPage() {
             })}
           </ol>
         )}
+      </section>
+
+      <section className="mt-6" aria-label="Reconciliation">
+        <ReconciliationCard row={reconciliation ?? null} canAct={canAct} />
       </section>
 
       {simulated ? (
