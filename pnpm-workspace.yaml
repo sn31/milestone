@@ -5,3 +5,6 @@ packages:
 allowBuilds:
   esbuild: true
   unrs-resolver: true
+# @paypal/mcp pins @opentelemetry/api 1.9.0; one version keeps a single drizzle-orm instance across packages.
+overrides:
+  "@opentelemetry/api": "1.9.1"
