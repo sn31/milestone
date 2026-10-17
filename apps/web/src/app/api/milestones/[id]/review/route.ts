@@ -160,7 +160,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   if ("refused" in outcome) {
     if (agent && outcome.refused.status !== 404) {
-      // Refused agent attempts are on the record too.
+      // Refused agent attempts are on the record too. `audited: true` tells the MCP tool not to write a second row.
       await audit(db, {
         actor: agent.auditActor,
         event: `agent.${action}_refused`,
@@ -168,6 +168,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
         contractId: c.id,
         detail: { mandateId: agent.mandate.id, reason: outcome.refused.extra?.reason ?? null, error: outcome.refused.error },
       });
+      return jsonError(outcome.refused.error, outcome.refused.status, { ...outcome.refused.extra, audited: true });
     }
     return jsonError(outcome.refused.error, outcome.refused.status, outcome.refused.extra);
   }

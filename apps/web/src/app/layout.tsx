@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { DemoBanner } from "@/components/demo-banner";
 import { RoleSwitcher } from "@/components/role-switcher";
 import { MotionProvider, NavLink } from "@/components/ui";
 import { getActor } from "@/lib/session";
@@ -54,6 +55,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       <body className="flex min-h-full flex-col">
         <MotionProvider>
+          <DemoBanner />
           <header className="sticky top-0 z-40 border-b border-hairline bg-bg/80 backdrop-blur-md">
             <div className="mx-auto w-full max-w-content px-4 sm:px-6">
               <div className="flex h-14 items-center justify-between gap-3 sm:h-16 sm:gap-4">

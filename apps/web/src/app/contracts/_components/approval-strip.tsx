@@ -34,6 +34,7 @@ export function ApprovalStrip({
   freelancer,
   canApproveAs,
   isParty,
+  criteriaVersion,
 }: {
   contractId: string;
   client: Party;
@@ -41,6 +42,8 @@ export function ApprovalStrip({
   /** The acting role when they are a party who has not signed yet. */
   canApproveAs: string | null;
   isParty: boolean;
+  /** Fingerprint of the checks on screen; the approve route records nothing if they changed since (criteriaVersion in core). */
+  criteriaVersion?: string;
 }) {
   const both = Boolean(client.at && freelancer.at);
   return (
@@ -63,6 +66,7 @@ export function ApprovalStrip({
             <>
               <p className="text-[13px] text-fg-muted">Approving accepts the milestones and their checks.</p>
               <form action={`/api/contracts/${contractId}/approve`} method="post">
+                {criteriaVersion ? <input type="hidden" name="criteriaVersion" value={criteriaVersion} /> : null}
                 <Button type="submit" variant="primary" size="sm">
                   Approve as {canApproveAs}
                 </Button>

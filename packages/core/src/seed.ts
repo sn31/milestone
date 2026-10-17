@@ -14,6 +14,16 @@ loadRootEnv(); // no .env: rely on process.env
 const db = createDb();
 const simulated = paypalMode() === "simulated";
 
+// `--if-empty` (Render's pre-deploy runs `seed --showcase --if-empty` on every deploy) seeds only a database whose users
+// table is empty, so the first deploy gets the demo and later deploys leave whatever the demo has become alone.
+if (process.argv.includes("--if-empty")) {
+  const [existing] = (await db.execute(sql`select count(*)::int as n from users`)).rows as { n: number }[];
+  if ((existing?.n ?? 0) > 0) {
+    console.log(`seed skipped: --if-empty and the users table has ${existing!.n} rows`);
+    process.exit(0);
+  }
+}
+
 // `pnpm db:seed -- --reset` wipes every table before seeding (`--reset-files` also clears var/ simulator state and uploads), so a demo
 // never starts with stale payout rows that would send a milestone to needs_operator.
 if (process.argv.includes("--reset")) {
@@ -231,7 +241,10 @@ if (process.argv.includes("--showcase")) {
     const at = min(-ago);
     const orderId = `SIM-ORD-SHOW${n}${m.seq}0A7Q`;
     const captureId = `SIM-CAP-SHOW${n}${m.seq}0K2F`;
-    const baselineSha = m.contractId === "ctr_demo" ? sha(`baseline-${m.id}`).slice(0, 40) : null;
+    // No baseline: a made-up commit id would not exist in whatever repository a visitor delivers from, so the worker
+    // could not fetch it and every pass would read "not trusted". With none recorded (as when funding finds no default
+    // branch head), the worker runs the suite of the delivered commit's first parent, and says so on the log.
+    const baselineSha = null;
     await db.update(milestones).set({ status: "funded", paypalOrderId: orderId, paypalCaptureId: captureId, baselineSha, decision: null, decidedAt: null, reviewEndsAt: null, clientResponse: null }).where(sql`id = ${m.id}`);
     await op("order", m.id, orderId, min(-ago - 1), { id: orderId, status: "APPROVED" });
     await op("capture", m.id, captureId, at, { id: captureId, status: "COMPLETED", amount: { currency_code: "USD", value: (m.amountMinor / 100).toFixed(2) } });

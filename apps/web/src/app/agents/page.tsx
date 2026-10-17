@@ -35,7 +35,17 @@ function detailLine(r: AgentAuditRow): string {
     return [reason, error].filter(Boolean).join(": ") || "refused";
   }
   const status = typeof d.status === "string" ? d.status.replace(/_/g, " ") : null;
+  // Reads (MCP read tools) changed nothing; say what was read rather than "accepted".
+  if (r.event === "agent.get_milestone") return status ? `read · milestone in ${status}` : "read";
+  if (r.event === "agent.get_ledger") return typeof d.transactions === "number" ? `read · ${d.transactions} ledger transactions` : "read";
+  if (r.event === "agent.list_contracts") return typeof d.count === "number" ? `read · ${d.count} contracts` : "read";
   return status ? `accepted · was ${status}` : "accepted";
+}
+
+/** The milestone an audit row is about: its column, or for a read (kept off the contract's activity) its detail. */
+function milestoneOf(r: AgentAuditRow): string | null {
+  if (r.milestoneId) return r.milestoneId;
+  return typeof r.detail.milestoneId === "string" ? r.detail.milestoneId : null;
 }
 
 /**
@@ -47,7 +57,7 @@ export default async function AgentsPage() {
   const actor = await getActor();
   const now = new Date().getTime();
   const [mandates, audit] = await Promise.all([loadMandates(db, actor.userId), loadAgentAudit(db, actor.userId)]);
-  const milestoneIds = [...new Set(audit.map((a) => a.milestoneId).filter((x): x is string => Boolean(x)))];
+  const milestoneIds = [...new Set(audit.map(milestoneOf).filter((x): x is string => Boolean(x)))];
   const titles = milestoneIds.length
     ? new Map((await db.select({ id: milestones.id, seq: milestones.seq, title: milestones.title }).from(milestones).where(inArray(milestones.id, milestoneIds))).map((m) => [m.id, `${String(m.seq).padStart(2, "0")} ${m.title}`]))
     : new Map<string, string>();
@@ -166,7 +176,11 @@ export default async function AgentsPage() {
                       <p className="min-w-0 truncate text-[12.5px] text-fg-muted">
                         <span className="text-fg">{agentNameOf(a.actor)}</span>
                         <span className="text-fg-faint"> · </span>
-                        {a.milestoneId ? (titles.get(a.milestoneId) ?? a.milestoneId) : "contract"}
+                        {(() => {
+                          const mid = milestoneOf(a);
+                          if (mid) return titles.get(mid) ?? mid;
+                          return a.event === "agent.list_contracts" ? "all contracts" : "contract";
+                        })()}
                       </p>
                       <p className={tone === "danger" ? "min-w-0 text-[12.5px] text-tone" : "min-w-0 text-[12.5px] text-fg-muted"}>{detailLine(a)}</p>
                     </div>

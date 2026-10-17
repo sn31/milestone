@@ -468,6 +468,11 @@ describe.skipIf(!e2e)("MCP server: agents under a mandate", () => {
     const again = await call(full, "respond_to_review", { milestoneId: toHold.id, action: "hold" });
     expect(again.isError).toBe(true);
     expect(again.body.status).toBe(409);
+    expect(again.body.audited).toBeUndefined();
+    // The milestone is held now, so the tool asked for "hold". The review route audited the refusal; the tool must not
+    // write a second row for it.
+    const refusedRows = await db.select().from(core.auditLog).where(and(eq(core.auditLog.milestoneId, toHold.id), eq(core.auditLog.event, "agent.hold_refused")));
+    expect(refusedRows).toHaveLength(1);
     const bad = await call(full, "respond_to_review", { milestoneId: toHold.id, action: "confirm_partial" });
     expect(bad.body.reason).toBe("invalid_arguments");
   });

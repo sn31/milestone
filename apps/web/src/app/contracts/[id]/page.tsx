@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
-import { AUDIT_EVENTS, OP_KINDS, RELEASABLE_STATUSES, advances, asRecord, asString, auditLog, decisionDeliveryId, deliveries, ledgerEntries, paypalOps, reviewWindowSeconds } from "@milestone/core";
+import { AUDIT_EVENTS, OP_KINDS, criteriaLock, criteriaVersion, RELEASABLE_STATUSES, advances, asRecord, asString, auditLog, decisionDeliveryId, deliveries, ledgerEntries, paypalOps, reviewWindowSeconds } from "@milestone/core";
 import { advanceRepayment } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { ACTOR_NAMES, getActor, isContractClient, isContractFreelancer } from "@/lib/session";
@@ -37,6 +37,7 @@ import {
 } from "@/components/ui";
 import { ActivityLedger } from "../_components/activity-ledger";
 import { ApprovalStrip } from "../_components/approval-strip";
+import { CriteriaEditor } from "./_components/criteria-editor";
 
 export const dynamic = "force-dynamic";
 
@@ -326,7 +327,23 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
             freelancer={{ role: "freelancer", name: names.freelancer, at: contract.freelancerApprovedAt }}
             canApproveAs={isParty && !myApproval ? actor.role : null}
             isParty={isParty}
+            criteriaVersion={criteriaVersion(crit)}
           />
+          {/* While neither the signatures nor any funding have fixed them, either party may edit the checks. */}
+          {isParty && !criteriaLock(contract, ms) ? (
+            <div className="mt-4">
+              <CriteriaEditor
+                contractId={contract.id}
+                milestones={ms.map((m) => ({
+                  id: m.id,
+                  seq: m.seq,
+                  title: m.title,
+                  criteria: crit.filter((c) => c.milestoneId === m.id).map((c) => ({ id: c.id, kind: c.kind, description: c.description, spec: c.spec, required: c.required })),
+                }))}
+                signedBy={[ca ? names.client : null, fa ? names.freelancer : null].filter((n): n is string => n !== null)}
+              />
+            </div>
+          ) : null}
         </div>
       )}
 

@@ -289,9 +289,11 @@ export async function callTool(ctx: McpContext, name: string, rawArgs: unknown):
       const r = await callReview(ctx, a.milestoneId!, action);
       const ids = { contractId: found.contract.id, milestoneId: found.milestone.id };
       if (r.status !== 200) {
-        // The review route audits every refusal that carries a reason (agent.<action>_refused); record the others here.
-        if (r.body.reason === undefined) await auditTool(ctx, `agent.${action}_refused`, { ...ids, detail: { reason: null, error: r.body.error ?? null, status: r.status } });
-        return refused({ status: r.status, ...r.body, routeAction: action });
+        // The review route audits the refusals it decides (agent.<action>_refused) and says so with `audited: true`;
+        // record the others (bad request, not found, not the client) here, so each refusal is on the record once.
+        const { audited, ...body } = r.body;
+        if (audited !== true) await auditTool(ctx, `agent.${action}_refused`, { ...ids, detail: { reason: body.reason ?? null, error: body.error ?? null, status: r.status } });
+        return refused({ status: r.status, ...body, routeAction: action });
       }
       return ok({ ...r.body, ok: true, routeAction: action, next: r.body.queued === "release" ? "The release job now pays out; the milestone reads released only when PayPal confirms the payout." : "The milestone is held; nothing will be released until a new delivery passes." });
     }

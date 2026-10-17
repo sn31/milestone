@@ -8,7 +8,16 @@ import { getActor } from "@/lib/session";
 
 interface Compiled { contract: ContractSpec; advanceEligible: Record<number, boolean> }
 
-function demoContract(totalMinor: number, currency: string): Compiled {
+/** A title for a contract compiled without a model: the scope's first sentence, cut at a word near 80 characters. */
+function demoTitle(scopeText: string): string {
+  const first = scopeText.trim().split(/(?<=[.!?])\s|\n/)[0]!.replace(/[.!?]+$/, "").trim();
+  if (!first) return "Demo contract";
+  if (first.length <= 80) return first;
+  const cut = first.slice(0, 80);
+  return `${cut.slice(0, cut.lastIndexOf(" ") > 40 ? cut.lastIndexOf(" ") : 80)}…`;
+}
+
+function demoContract(scopeText: string, totalMinor: number, currency: string): Compiled {
   const a = Math.floor(totalMinor / 3);
   const b = Math.floor(totalMinor / 3);
   const amounts = [a, b, totalMinor - a - b];
@@ -18,7 +27,7 @@ function demoContract(totalMinor: number, currency: string): Compiled {
     ["Docs and handoff", "file", "README exists", { path: "README.md" }],
   ] as const;
   const contract: ContractSpec = {
-    title: "Demo contract",
+    title: demoTitle(scopeText),
     currency,
     totalMinor,
     milestones: specs.map(([title, kind, description, spec], i) => ({
@@ -32,7 +41,7 @@ function demoContract(totalMinor: number, currency: string): Compiled {
 }
 
 async function compile(scopeText: string, currency: string, totalMinor: number, repo?: string): Promise<Compiled> {
-  if (!(await isModelConfigured())) return demoContract(totalMinor, currency);
+  if (!(await isModelConfigured())) return demoContract(scopeText, totalMinor, currency);
   return compileContract({ scopeText, currency, totalMinor, repoHint: repo });
 }
 

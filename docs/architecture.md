@@ -2,12 +2,19 @@
 
 ## Components
 
-- `apps/web`: Next.js App Router. UI, HTTP routes, the PayPal and GitHub webhook receivers. Creates orders and captures them, records approvals and client responses, receives manual and upload deliveries, prices and accepts advances, enqueues jobs. It calls the model only to phrase an advance offer's explanation.
-- `apps/worker`: pg-boss consumers for the jobs `verify`, `release`, `settle`, `advance`.
+- `apps/web`: Next.js App Router. UI, HTTP routes, the PayPal and GitHub webhook receivers. Creates orders and captures them, records approvals and client responses, receives manual and upload deliveries, prices and accepts advances, enqueues jobs. It calls the model to phrase an advance offer's explanation and to drive the agent console.
+- `apps/worker`: pg-boss consumers for the jobs `verify`, `release`, `settle`, `advance`, `dispute` and `reconcile`.
 - `packages/core`: zod schemas, Drizzle schema and migrations, the milestone state machine, the ledger, the idempotency helpers (`requestIdFor`, `storeWebhookOnce`), the job queue.
-- `packages/money`: `paypal/` is the REST client (orders, capture, payouts, refunds, invoicing, webhook verification) and `simulated.ts`, the local stand-in used when `PAYPAL_MODE=simulated`. `policy/` holds `decide()` (pure), `applyReviewWindow()`, `priceAdvance()` and `execute.ts`, the only module that moves money.
+- `packages/money`: `paypal/` is the REST client (orders, capture, payouts, refunds, invoicing, disputes, webhook verification), `mcp-client.ts` (PayPal's MCP server, read-only, see below) and `simulated.ts`, the local stand-in used when `PAYPAL_MODE=simulated`. `policy/` holds `decide()` (pure), `applyReviewWindow()`, `priceAdvance()` and `execute.ts`, the only module that moves money.
 - `packages/verify`: contract compiler, deterministic stage with the baseline suite and the gaming scan (`gaming.ts`), upload stage (`upload-checks.ts`), injection pre-pass, the judgment stage and parser, PR comment formatter, explanations. All model calls go through `llm.ts`. It never imports `@milestone/money`.
 - Postgres: application tables, the job queue (pg-boss) and locks.
+
+The agent layer:
+
+- Mandates (`packages/core/src/mandates.ts`, table `agent_mandates`): a user delegates a list of actions to a named agent, with an approval cap in minor units and a currency, an expiry (at most 90 days) and a revocation time. The bearer token (`msa_...`) is shown once and stored as its sha256. `mandateAllows()` is a pure check of what the user delegated; it fails closed on anything missing or malformed. Mandates are created, listed and revoked through `/api/agents`, which refuses any request that carries an `Authorization` header, so an agent cannot change its own mandate.
+- Milestone MCP server (`POST /api/mcp`, `apps/web/src/lib/mcp/`): Streamable HTTP, stateless, bearer token on every request, plus the stdio bridge `scripts/milestone-mcp.mjs` for Claude Desktop. Its seven tools call the existing route handlers in-process (`lib/mcp/routes.ts`), so no route logic is copied. Freelancer text in tool results sits inside an `untrusted` field. See `docs/mcp.md`.
+- Agent console and `/agents` (`apps/web/src/app/agents/`, `apps/web/src/lib/agent/`): `/agents` creates and revokes mandates and shows every agent action, accepted or refused. `/agents/console` is the client's agent in conversation: the configured model in a tool loop, connected to Milestone MCP with the mandate's token and to PayPal MCP with `list_transactions` only. Tools whose names look like money movement are never offered to the model, whatever a server lists (`lib/agent/tools.ts`, `MONEY_TOOL`).
+- PayPal MCP reconciler (`packages/money/src/paypal/mcp-client.ts`, `apps/worker/src/jobs/reconcile.ts`): the worker starts `@paypal/mcp` over stdio with only the read groups (`transactions.list`, `disputes.list`, `disputes.get`). `callPayPalTool()` refuses any tool outside `PAYPAL_MCP_ALLOWED_TOOLS` before anything is sent, and a session whose server exposes a money tool is refused. The `reconcile` job (queued from `/ops`) matches `list_transactions` against `paypal_ops` and the ledger and writes one `ops.reconciled` audit row; mismatches show on `/ops` and no milestone changes state. The `dispute` job reads the dispute with `get_dispute`, falling back to REST. In simulated mode the same tools answer from the simulator's state, labelled `simulated: true`.
 
 Boundaries enforced by `pnpm check:boundaries`: only `packages/money` talks to PayPal, only `policy/execute.ts` imports `paypal/money.ts`, and `packages/verify` does not import `@milestone/money`.
 
@@ -17,12 +24,17 @@ flowchart LR
   Freelancer([Freelancer]) --> Web
   GH[GitHub] -- "PR merged webhook" --> Web
   PP[PayPal sandbox] -- "signed webhooks" --> Web
+  Agent(["Client's agent (Claude Desktop, Cursor, console)"]) -- "bearer token, mandate" --> MCP["Milestone MCP (/api/mcp)"]
+  MCP -- "same routes, in-process" --> Web
+  Web -- "agent approve" --> Review["review route: mandate + P6 check"]
   Web -- "order, capture" --> Money[packages/money]
   Web -- enqueue --> PG[(Postgres + pg-boss)]
   Web --> Core[packages/core]
   PG --> Worker[apps/worker]
   Worker -- "verify job" --> Verify[packages/verify]
-  Verify -- "judgment, compile" --> LLM[Claude via Anthropic SDK]
+  Verify -- "judgment, compile" --> LLM["Ollama (qwen3) or Claude"]
+  Worker -- "reconcile, dispute reads" --> PPMCP["PayPal MCP (read-only allowlist)"]
+  PPMCP --> PP
   Worker -- "decide()" --> Policy[money/policy]
   Worker -- "release, settle" --> Exec[policy/execute.ts]
   Exec --> PP
@@ -63,6 +75,16 @@ stateDiagram-v2
 ```
 
 A milestone flagged `milestone.needs_operator` stays in `held`: a new delivery is refused (`verify.refused_needs_operator`) and the release job refuses to run again.
+
+## The agent guarantee
+
+An agent can only make a release happen sooner, never one the policy would not. It is enforced in one place, the review route (`apps/web/src/app/api/milestones/[id]/review/route.ts`); the MCP tool `respond_to_review` forwards the agent's bearer token to that route and checks nothing of its own. With an `Authorization: Bearer` header the route resolves the mandate (401 `invalid_token`, 403 `mandate_expired` or `mandate_revoked`), then, inside the milestone's transaction:
+
+1. re-reads the mandate `FOR SHARE`, so a concurrent revoke either lands first and refuses the call or waits for it;
+2. checks `mandateAllows()` for the action (`approve` for approve, `hold` for veto or hold) with the amount, `max(milestone amount, decision amount)`, in the contract's currency (403 `mandate_missing_action`, `mandate_cap_exceeded`);
+3. for approve, requires the milestone in `review` with the stored decision being the policy's own release (P6) for the latest delivery (409 `not_release_decision`) and every required criterion passed (409 `required_criteria_not_passed`). `confirm_partial` is never an agent's.
+
+Accepted and refused calls are audited with the actor `agent:<name> for <user>`. Without an agent the release still happens when the review window closes, so an accepted approve only moves it earlier. No agent path captures, pays out or refunds: `fund_milestone` returns PayPal's approval link for a human. Tests: `apps/web/test/review-agent.test.ts`, `apps/web/test/mcp.test.ts`, `packages/core/test/mandates.test.ts`.
 
 ## Policy rules
 
@@ -106,14 +128,14 @@ Both route deliveries are allowed while the milestone is `funded` or `held`, and
 1. A delivery and a verify job exist (see above).
 2. Code deliveries: the deterministic stage clones the commit, removes committed `node_modules`, installs with `--ignore-scripts`, runs the test, build and file criteria, and runs the test criterion against the client's baseline suite (rule 9). The baseline is the default-branch head saved at funding, else the pull request base, else the commit's first parent; an unfetchable baseline fails closed (the delivery's own tests run and a pass is recorded `unclear`). Before setup the stage restores the baseline's test files, runner config, package-manager config, lockfiles and the files its scripts name, keeps the baseline's `package.json` scripts and dev dependencies, and removes test files and configs the delivery added. A delivery that edits tests is not distrusted; its edits just do not run, and `evd_tamper_check` lists what was restored or removed. The delivery's own tests run afterwards in an informational pass that decides nothing. A gaming scan of the added source lines (runner detection through argv, `require.main` or the stack, `CI` and `NODE_ENV` sniffing, assertion and loader patching in several forms, exits and computed exits, `child_process` in library code) records each hit as `unclear` on the test criterion, so the milestone goes to the client. Policy also sends a new dependency, or a dependency moved to a git, file or tarball source, to the client.
    File deliveries: the upload stage (no model) checks each `upload` criterion against the files matching `spec.pattern` (a glob or extension list): `format` (from magic bytes: pdf, png, jpg, svg, docx, md, txt), `minBytes`, `minWords`, `maxPages`, `minWidth`, `minHeight` and `mustContain`. A criterion passes when one matching file passes every check, is unclear when a check cannot be decided, and fails otherwise. There is no baseline suite or gaming scan because nothing in an upload controls what the checks run.
-3. The judgment stage gives Claude the criteria, evidence summaries and delivery text inside delimited untrusted blocks, with read-only tools (`read_file`, `get_diff`, `list_evidence`, `view_screenshot`, `view_file`). Without `ANTHROPIC_API_KEY` the judgment stage is skipped: the model is recorded as `deterministic-only`, judgment criteria are unclear and rule P3 sends a passing delivery to the client.
+3. The judgment stage gives the model (Ollama by default, Claude when configured; `packages/verify/src/llm.ts`) the criteria, evidence summaries and delivery text inside delimited untrusted blocks, with read-only tools (`read_file`, `get_diff`, `list_evidence`, `view_screenshot`, `view_file`). With no model available (`isModelConfigured()` is false) the judgment stage is skipped: the model is recorded as `deterministic-only`, judgment criteria are unclear and rule P3 sends a passing delivery to the client.
 4. `enforce()` makes deterministic results win, drops unknown evidence ids and downgrades evidence-free passes. `overall()` computes pass, partial or fail from the criteria.
 
-Planned, not built: the KERNEL visual stage (`visual.ts` is a stub), a Bryntum timeline, a disputes copilot, negotiation, and Render deployment.
+Not built: the KERNEL visual stage (`visual.ts` is a stub) and negotiation. The hosted demo is a Render blueprint, `render.yaml`: one service runs the web app and the worker side by side (`scripts/start-render.mjs`, because the simulator's state and uploads are files both read), plus Postgres.
 
 ## Seed contracts
 
-`pnpm db:seed` loads two active contracts. `ctr_demo` (repo `milestone-demo/landing`, three milestones of $100): each milestone has a required test, a required file (`src/password.js`, `public/pricing.html`, `README.md`) and an optional judgment criterion, matching the demo repo branches `m1-pass`, `m2-partial` and `m2-injection`. `ctr_brand` (a bakery brand refresh, no repository, $90 and $60): `upload` criteria for a logo (`*.{svg,png}`, at least 1024 px wide), a PDF style guide (at most 12 pages, containing "Typography") and website copy (`.md` or `.docx`, at least 600 words, containing "About us"), plus optional judgment criteria. The freelancer's PayPal email comes from `PAYPAL_FREELANCER_EMAIL`, the partner's from `PAYPAL_PARTNER_EMAIL`.
+`pnpm db:seed` loads three active contracts; the third, `ctr_dash`, is a second client's small dashboard contract. `ctr_demo` (repo `milestone-demo/landing`, three milestones of $100): each milestone has a required test, a required file (`src/password.js`, `public/pricing.html`, `README.md`) and an optional judgment criterion, matching the demo repo branches `m1-pass`, `m2-partial` and `m2-injection`. `ctr_brand` (a bakery brand refresh, no repository, $90 and $60): `upload` criteria for a logo (`*.{svg,png}`, at least 1024 px wide), a PDF style guide (at most 12 pages, containing "Typography") and website copy (`.md` or `.docx`, at least 600 words, containing "About us"), plus optional judgment criteria. The freelancer's PayPal email comes from `PAYPAL_FREELANCER_EMAIL`, the partner's from `PAYPAL_PARTNER_EMAIL`.
 
 ## The operator flow
 
@@ -121,7 +143,7 @@ If a payout item fails, is blocked, returned or reversed, or a refund fails, the
 
 ## Data model
 
-Ten tables in `packages/core/src/schema.ts`.
+Eleven tables in `packages/core/src/schema.ts`.
 
 - `users`: role (client, freelancer, partner, platform), PayPal email, GitHub login.
 - `contracts`: parties, scope text, currency, total, per-release cap, confidence threshold, review window, repo, status, approval times.
@@ -133,5 +155,6 @@ Ten tables in `packages/core/src/schema.ts`.
 - `webhook_events`: source, event id, type, payload, processed time. Unique on (source, event_id).
 - `ledger_entries`: transaction id, account, amount in minor units, currency, debit or credit, ref. Balances are derived; each `txn_id` sums to zero.
 - `audit_log`: append-only; actor, event, detail, contract and milestone ids.
+- `agent_mandates`: user, agent name, token hash, actions, approval cap and currency, expiry, revocation and last-used times.
 
 Money is integer minor units plus currency throughout.

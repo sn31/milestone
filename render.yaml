@@ -1,44 +1,81 @@
-# Render Blueprint: web service, background worker, Postgres. Jobs live in Postgres too (pg-boss).
+# Render Blueprint for the hosted Milestone demo (https://render.com/docs/blueprint-spec). Owner's steps: docs/deploy.md.
+#
+# One web service runs Next.js and the job worker side by side (scripts/start-render.mjs): the PayPal simulator's
+# state and uploaded deliveries are files both processes share, so they live on one instance with one disk. Jobs live
+# in Postgres (pg-boss), so there is no Key Value store. `node scripts/check-render.mjs` checks this file in CI.
 services:
   - type: web
-    name: milestone-web
+    name: milestone
     runtime: node
-    plan: starter
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @milestone/web build
-    startCommand: pnpm --filter @milestone/web start
+    # 1 CPU / 2 GB: the worker runs the delivered repository's npm install and test suite next to Next.js.
+    # 0.5c-512mb is enough to browse the demo but can run out of memory during a verification.
+    plan: 1c-2g
+    region: oregon
+    # Dev dependencies are needed at run time (tsx runs the worker and the seed, drizzle-kit migrates), so the install
+    # forces them even though NODE_ENV is production. pnpm comes from the packageManager field through corepack.
+    buildCommand: corepack enable && NODE_ENV=development pnpm install --frozen-lockfile && pnpm --filter @milestone/web build
+    # Every deploy: apply migrations, then seed the showcase only if the users table is empty (the first deploy).
+    preDeployCommand: node scripts/start-render.mjs predeploy
+    startCommand: node scripts/start-render.mjs
+    healthCheckPath: /api/dev/paypal/mode
+    autoDeployTrigger: commit
+    disk:
+      name: milestone-var
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: COREPACK_ENABLE_DOWNLOAD_PROMPT
+        value: "0"
       - key: DATABASE_URL
-        fromDatabase: { name: milestone-db, property: connectionString }
-      - fromGroup: milestone-secrets
-  - type: worker
-    name: milestone-worker
-    runtime: node
-    plan: starter
-    buildCommand: corepack enable && pnpm install --frozen-lockfile
-    startCommand: pnpm --filter @milestone/worker start
-    envVars:
-      - key: NODE_VERSION
-        value: "24"
-      - key: DATABASE_URL
-        fromDatabase: { name: milestone-db, property: connectionString }
-      - fromGroup: milestone-secrets
-databases:
-  - name: milestone-db
-    plan: basic-256mb
-envVarGroups:
-  - name: milestone-secrets
-    envVars:
+        fromDatabase:
+          name: milestone-db
+          property: connectionString
+      # Shows the demo banner and enables POST /api/demo/reset (re-seeds the showcase, at most once every 30 s).
+      - key: DEMO_MODE
+        value: "1"
+      # simulated: no PayPal account needed; a built-in simulator answers the REST calls and posts its own webhooks.
+      # To use the real PayPal sandbox instead, set PAYPAL_MODE=sandbox and fill PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET
+      # and PAYPAL_WEBHOOK_ID (webhook at <service url>/api/webhooks/paypal); see docs/deploy.md.
+      - key: PAYPAL_MODE
+        value: simulated
+      - key: PAYPAL_ENV
+        value: sandbox
+      # Authenticates the simulator's own webhooks (required in production). Generated once by Render.
+      - key: SIMULATED_WEBHOOK_SECRET
+        generateValue: true
+      # Files both processes share, on the persistent disk so a restart keeps them.
+      - key: SIMULATED_PAYPAL_STATE_FILE
+        value: /var/data/simulated-paypal.json
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: MILESTONE_NPM_CACHE
+        value: /var/data/npm-cache
+      # APP_URL is left unset on purpose: scripts/start-render.mjs sets it from RENDER_EXTERNAL_URL (the service URL).
+      # MODEL_PROVIDER is left unset: there is no Ollama on Render. With ANTHROPIC_API_KEY set, judgment is by Claude;
+      # without it, judgment criteria go to the client (the banner says which).
+      # MILESTONE_ALLOW_LOCAL_REPOS is left unset: hosted deliveries are public https repositories only.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Only for PAYPAL_MODE=sandbox (asked for once, on Blueprint creation; leave empty for the simulated demo).
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET
         sync: false
       - key: PAYPAL_WEBHOOK_ID
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
+      # Optional: GitHub pull-request deliveries (webhook at <service url>/api/webhooks/github) and API rate limits.
       - key: GITHUB_WEBHOOK_SECRET
         sync: false
       - key: GITHUB_TOKEN
         sync: false
+databases:
+  - name: milestone-db
+    plan: 0.1c-256mb
+    region: oregon
+    postgresMajorVersion: "17"
+    databaseName: milestone
+    user: milestone

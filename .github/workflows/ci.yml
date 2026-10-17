@@ -27,6 +27,8 @@ jobs:
       - run: git config --global user.email ci@milestone.test && git config --global user.name ci
       - run: pnpm check:boundaries
       - run: pnpm check:specifiers
+      - name: Render blueprint (render.yaml against the spec and the env vars the code reads)
+        run: node scripts/check-render.mjs
       - run: pnpm typecheck
       - run: pnpm --filter @milestone/web lint
       - run: pnpm test
