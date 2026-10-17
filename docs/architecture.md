@@ -84,7 +84,13 @@ An agent can only make a release happen sooner, never one the policy would not. 
 2. checks `mandateAllows()` for the action (`approve` for approve, `hold` for veto or hold) with the amount, `max(milestone amount, decision amount)`, in the contract's currency (403 `mandate_missing_action`, `mandate_cap_exceeded`);
 3. for approve, requires the milestone in `review` with the stored decision being the policy's own release (P6) for the latest delivery (409 `not_release_decision`) and every required criterion passed (409 `required_criteria_not_passed`). `confirm_partial` is never an agent's.
 
-Accepted and refused calls are audited with the actor `agent:<name> for <user>`. Without an agent the release still happens when the review window closes, so an accepted approve only moves it earlier. No agent path captures, pays out or refunds: `fund_milestone` returns PayPal's approval link for a human. Tests: `apps/web/test/review-agent.test.ts`, `apps/web/test/mcp.test.ts`, `packages/core/test/mandates.test.ts`.
+Accepted and refused calls are audited with the actor `agent:<name> for <user>`. Without an agent the release still happens when the review window closes, so an accepted approve only moves it earlier. No agent path pays out or refunds; the only charge an agent can cause is the funding guarantee's, below. Tests: `apps/web/test/review-agent.test.ts`, `apps/web/test/mcp.test.ts`, `packages/core/test/mandates.test.ts`.
+
+## The funding guarantee
+
+An agent may fund only (a) a milestone of a contract both parties approved, (b) whose status is `draft`, (c) the next unfunded milestone in sequence, (d) for exactly the milestone amount, (e) in the mandate's currency, (f) within the mandate's per-milestone fund cap and its total fund cap across the mandate's life (the sum of everything it has funded), (g) while the mandate is unexpired, unrevoked and includes `fund`, and (h) with a saved PayPal payment token that belongs to the mandate's user and is not removed. It sits beside the release guarantee and changes none of the release rules.
+
+It is enforced in one place: `fundFromVault` in `packages/money/src/policy/execute.ts`. Both ways an agent funds call it, the MCP `fund_milestone` tool and the auto-fund rule (the worker's `autofund` job, enqueued by the settle job when a milestone reaches `released`: the client's newest live mandate with `autoFundNext`, exactly the draft milestone it was enqueued for, the client's saved PayPal; one `agent.autofund` audit row per run). It first reads the facts under row locks and runs `fundingAllows()` (pure, in `packages/core/src/mandates.ts`), then claims a `vault_charge` `paypal_ops` row (`claimVaultCharge`, keyed by mandate and milestone, so a retry replays the same `PayPal-Request-Id`), and only then calls `chargeVault` in `packages/money/src/paypal/money.ts`. `scripts/check-boundaries.mjs` allows that file to be imported only from `execute.ts`. Refusals come back as a reason and write `vault.fund_refused`; a charge writes `paypal.vault_charge` (or `paypal.vault_charge_error`), all as `agent:<name> for <user>` (the auto-fund rule: the same actor, with `via: auto_fund`). The capture goes through the same code a human capture does (`fundMilestoneFromCapture` in `packages/core/src/milestones.ts`): amount check, ledger client to held, status `funded`, baseline recorded. No model has a tool that charges. Tests: `packages/core/test/mandates.test.ts`, `packages/money/test/vault.test.ts`, `packages/money/test/fund-vault.e2e.test.ts`.
 
 ## Policy rules
 
@@ -97,11 +103,13 @@ Accepted and refused calls are audited with the actor `agent:<name> for <user>`.
 3. Release: the release job claims the payout `paypal_ops` row under a row lock, then calls `POST /v1/payments/payouts`.
 4. Partial: payout of the released share, then `POST /v2/payments/captures/{id}/refund` for the rest.
 5. Settle: `PAYMENT.PAYOUTS-ITEM.*` and `PAYMENT.CAPTURE.REFUNDED` webhooks enqueue the settle job, which posts the ledger, moves the milestone to `released` or `partial_released`, and issues a paid receipt invoice.
-6. Advances: the freelancer accepts an offer on a funded milestone, the advance job pays the principal from the capital partner's PayPal account (`fundAdvance`), and the release job later pays the partner first (principal plus the quoted fee) and the freelancer the rest.
+6. Saved PayPal: the client saves a PayPal once with Payment Method Tokens v3 (`packages/money/src/paypal/vault.ts`): `POST /v3/vault/setup-tokens` (`payment_source.paypal`, merchant usage, `permit_multiple_payment_tokens: false`, return and cancel URLs), the payer approves at the returned link, then `POST /v3/vault/payment-tokens` with the setup token turns it into a payment token. The token id and customer id are stored in `payment_methods` (one per setup in `vault_setups`), each step a `paypal_ops` row with its own request id. Removing the PayPal deletes the payment token (`DELETE /v3/vault/payment-tokens/{id}`; a 404 counts as deleted) and marks the row removed. `VAULT.PAYMENT-TOKEN.CREATED` and `.DELETED` webhooks are recorded.
+7. Agent funding: `POST /v2/checkout/orders` with intent `CAPTURE`, `payment_source.paypal.vault_id` and one purchase unit (`reference_id` and `custom_id` are the milestone id). There is no buyer interaction; PayPal answers `COMPLETED` with the capture, which then funds the milestone as in step 2. A `PENDING` capture leaves the `vault_charge` op open until the `PAYMENT.CAPTURE.COMPLETED` webhook lands. In production this needs PayPal's approval for reference transactions.
+8. Advances: the freelancer accepts an offer on a funded milestone, the advance job pays the principal from the capital partner's PayPal account (`fundAdvance`), and the release job later pays the partner first (principal plus the quoted fee) and the freelancer the rest.
 
 ### Simulated PayPal
 
-`PAYPAL_MODE=simulated` (also the default when `PAYPAL_CLIENT_ID` is empty outside production) swaps the PayPal client for `paypal/simulated.ts`, a `fetch` implementation that answers the REST calls Milestone makes with sandbox-shaped JSON. It replays the first success for a repeated `PayPal-Request-Id`, keeps all state in `var/simulated-paypal.json` (shared by web and worker, written under a lock file; delete it to reset) and posts the matching webhook events (capture, payout item, refund) to `APP_URL/api/webhooks/paypal` about 1.5 seconds later with an `X-Milestone-Simulated` header carrying `SIMULATED_WEBHOOK_SECRET` (default `dev` outside production). In simulated mode the webhook route accepts only that header; in sandbox mode only PayPal's signature. The order's approve link points at `/api/dev/paypal/approve`, and `/api/dev/paypal/fail` arms a one-shot payout failure. Those routes answer 404 in sandbox mode. The capital partner has its own simulated account.
+`PAYPAL_MODE=simulated` (also the default when `PAYPAL_CLIENT_ID` is empty outside production) swaps the PayPal client for `paypal/simulated.ts`, a `fetch` implementation that answers the REST calls Milestone makes with sandbox-shaped JSON. It replays the first success for a repeated `PayPal-Request-Id`, keeps all state in `var/simulated-paypal.json` (shared by web and worker, written under a lock file; delete it to reset) and posts the matching webhook events (capture, payout item, refund) to `APP_URL/api/webhooks/paypal` about 1.5 seconds later with an `X-Milestone-Simulated` header carrying `SIMULATED_WEBHOOK_SECRET` (default `dev` outside production). In simulated mode the webhook route accepts only that header; in sandbox mode only PayPal's signature. The order's approve link points at `/api/dev/paypal/approve`, and `/api/dev/paypal/fail` arms a one-shot payout failure. The simulator also answers the vault calls (setup and payment tokens, delete, and a vaulted order, which completes at once with a capture); a setup token's approve link points at the simulator, `armSimulatedVaultCharge` makes the next charge `PENDING` or `DECLINED`, and ids starting `SIM-PMT-SHOW` are accepted without simulator state, so the seeded showcase payment method can fund. Those routes answer 404 in sandbox mode. The capital partner has its own simulated account.
 
 ## Jobs
 
@@ -143,7 +151,7 @@ If a payout item fails, is blocked, returned or reversed, or a refund fails, the
 
 ## Data model
 
-Eleven tables in `packages/core/src/schema.ts`.
+Thirteen tables in `packages/core/src/schema.ts`.
 
 - `users`: role (client, freelancer, partner, platform), PayPal email, GitHub login.
 - `contracts`: parties, scope text, currency, total, per-release cap, confidence threshold, review window, repo, status, approval times.
@@ -155,6 +163,7 @@ Eleven tables in `packages/core/src/schema.ts`.
 - `webhook_events`: source, event id, type, payload, processed time. Unique on (source, event_id).
 - `ledger_entries`: transaction id, account, amount in minor units, currency, debit or credit, ref. Balances are derived; each `txn_id` sums to zero.
 - `audit_log`: append-only; actor, event, detail, contract and milestone ids.
-- `agent_mandates`: user, agent name, token hash, actions, approval cap and currency, expiry, revocation and last-used times.
+- `agent_mandates`: user, agent name, token hash, actions, approval cap and currency, per-milestone and total fund caps, `autoFundNext`, expiry, revocation and last-used times.
+- `payment_methods`: the client's saved PayPal (payment token id, customer id, payer email, removed time). `vault_setups`: one row per setup token, with its status.
 
 Money is integer minor units plus currency throughout.

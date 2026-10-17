@@ -66,12 +66,14 @@ The seeded contract names `milestone-demo/landing` as its repository, so the del
    - `PAYMENT.PAYOUTS-ITEM.SUCCEEDED`, `.FAILED`, `.BLOCKED`, `.DENIED`, `.CANCELED`, `.UNCLAIMED`, `.HELD`, `.RETURNED`, `.REVERSED`, `.REFUNDED`
    - `CUSTOMER.DISPUTE.CREATED`, `CUSTOMER.DISPUTE.UPDATED`, `CUSTOMER.DISPUTE.RESOLVED`
    - `INVOICING.INVOICE.PAID` (stored in the audit log only)
+   - `VAULT.PAYMENT-TOKEN.CREATED`, `VAULT.PAYMENT-TOKEN.DELETED` (recorded; saving a PayPal does not depend on them)
 
    Copy the webhook's id.
 3. On the Render service's Environment page, set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_WEBHOOK_ID`, and change `PAYPAL_MODE` to `sandbox`. For advances, also set `PAYPAL_PARTNER_CLIENT_ID` and `PAYPAL_PARTNER_CLIENT_SECRET`, the credentials of a second sandbox business account's app. Without them, the advance job refuses rather than paying from the platform account. Set `PAYPAL_FREELANCER_EMAIL` and `PAYPAL_PARTNER_EMAIL` to sandbox personal and business accounts, so payouts have real receivers.
-4. Save, which redeploys. To apply the receivers to the seeded users, click Reset demo once after the deploy.
+4. To let clients save a PayPal and agents fund from it, open the app in the Developer Dashboard, go to Features, and under Accept payments open Advanced options and tick **Vault**. Without it `POST /v3/vault/setup-tokens` is refused. In the sandbox that is all; in production, charging a saved PayPal without the buyer present also needs PayPal's approval for reference transactions. 
+5. Save, which redeploys. To apply the receivers to the seeded users, click Reset demo once after the deploy.
 
-To switch back, set `PAYPAL_MODE` to `simulated` and save. Never set `PAYPAL_ENV=live` for the demo.
+In simulated mode (the default on Render) the vault is the simulator, needs no setting, and the showcase seed carries a saved PayPal for Casey. To switch back, set `PAYPAL_MODE` to `simulated` and save. Never set `PAYPAL_ENV=live` for the demo.
 
 ## Optional environment variables
 

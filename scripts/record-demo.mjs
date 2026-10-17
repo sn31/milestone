@@ -184,9 +184,9 @@ try {
 
   // Warm-up off camera: the dev server compiles each route on first hit.
   log("warming up routes");
-  for (const p of ["/", "/contracts/ctr_demo", "/contracts/ctr_brand", "/contracts/ctr_demo/activity", "/lender", "/ops"]) await d.go(p);
+  for (const p of ["/", "/contracts/ctr_demo", "/contracts/ctr_brand", "/contracts/ctr_demo/activity", "/lender", "/ops", "/agents"]) await d.go(p);
   // API routes compile on first hit too; a GET compiles each one without changing anything (POST-only routes answer 405).
-  for (const p of ["/api/milestones/mst_3/order", "/api/milestones/mst_3/capture", "/api/dev/paypal/approve", "/api/dev/paypal/fail", "/api/advances/offer?milestoneId=mst_3", "/api/advances/accept", "/api/milestones/mst_3/deliver", "/api/milestones/mst_3/upload", "/api/milestones/mst_3/review", "/api/ops/mst_3/resolve", "/api/webhooks/paypal"]) {
+  for (const p of ["/api/milestones/mst_3/order", "/api/milestones/mst_3/capture", "/api/dev/paypal/approve", "/api/dev/paypal/fail", "/api/advances/offer?milestoneId=mst_3", "/api/advances/accept", "/api/milestones/mst_3/deliver", "/api/milestones/mst_3/upload", "/api/milestones/mst_3/review", "/api/ops/mst_3/resolve", "/api/webhooks/paypal", "/api/agents"]) {
     await fetch(appUrl + p, { redirect: "manual" }).catch(() => {});
   }
 

@@ -14,12 +14,16 @@
  *   header X-Milestone-Simulated: <SIMULATED_WEBHOOK_SECRET or "dev">. The webhook route accepts that header instead of
  *   PayPal's signature only in simulated mode (see isSimulatedWebhook).
  *
+ * - Vault (Payment Method Tokens v3): setup tokens (approve link -> /api/dev/paypal/vault-approve?token=...), payment
+ *   tokens, delete, and orders with payment_source.paypal.vault_id, which complete at once with a capture and send
+ *   PAYMENT.CAPTURE.COMPLETED. armSimulatedVaultCharge makes the next charge PENDING or DECLINED.
+ *
  * No money moves here; nothing in this file is reachable from the browser. This module re-exports the pieces.
  */
 export { paypalMode, createPayPalClient, createSimulatedPayPalClient, isSimulatedWebhook, simulatedWebhookSecret, SIMULATED_WEBHOOK_HEADER } from "./mode.ts";
 export type { PayPalMode } from "./mode.ts";
 export { configureSimulator, resetSimulator } from "./sim/store.ts";
 export type { SimulatorOptions } from "./sim/store.ts";
-export { simulatedFetch, approveSimulatedOrder, simulatedOrder, failNextSimulatedPayout, armedSimulatedFailures, openSimulatedDispute } from "./sim/handlers.ts";
+export { simulatedFetch, approveSimulatedOrder, simulatedOrder, failNextSimulatedPayout, armedSimulatedFailures, openSimulatedDispute, approveSimulatedSetupToken, simulatedSetupToken, armSimulatedVaultCharge, SHOWCASE_VAULT_PREFIX } from "./sim/handlers.ts";
 export type { SimulatedDispute } from "./sim/handlers.ts";
-export type { SimulatedOrderSummary } from "./sim/views.ts";
+export type { SimulatedOrderSummary, SimulatedSetupTokenSummary } from "./sim/views.ts";

@@ -28,7 +28,7 @@ export function toMinor(text: string, currency: string): number | null {
 }
 
 /** Create a mandate; the token is shown here once (and kept in this tab's sessionStorage for the console). */
-export function MandateForm({ defaultName, allowed }: { defaultName: string; allowed: readonly string[] }) {
+export function MandateForm({ defaultName, allowed, hasSavedPayPal = false }: { defaultName: string; allowed: readonly string[]; hasSavedPayPal?: boolean }) {
   const offered = ACTIONS.filter((a) => allowed.includes(a));
   const router = useRouter();
   const id = useId();
@@ -41,15 +41,32 @@ export function MandateForm({ defaultName, allowed }: { defaultName: string; all
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; token: string; name: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  // "May fund milestones": charges of the saved PayPal, bounded by both caps (needs the fund action).
+  const [vault, setVault] = useState(false);
+  const [fundCap, setFundCap] = useState("150.00");
+  const [fundTotal, setFundTotal] = useState("500.00");
+  const [autoFund, setAutoFund] = useState(false);
 
   const approve = actions.has("approve");
-  const toggle = (a: string) =>
+  const canFund = offered.includes("fund");
+  const toggle = (a: string) => {
+    if (a === "fund" && actions.has("fund")) {
+      setVault(false);
+      setAutoFund(false);
+    }
     setActions((prev) => {
       const next = new Set(prev);
       if (next.has(a)) next.delete(a);
       else next.add(a);
       return next;
     });
+  };
+  const toggleVault = () => {
+    const on = !vault;
+    setVault(on);
+    if (on) setActions((prev) => new Set(prev).add("fund"));
+    else setAutoFund(false);
+  };
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -58,12 +75,20 @@ export function MandateForm({ defaultName, allowed }: { defaultName: string; all
     if (actions.size === 0) return setError("Pick at least one action.");
     const capMinor = approve ? toMinor(cap, currency) : null;
     if (approve && capMinor === null) return setError("The approval cap must be an amount, such as 200.00.");
+    const fundCapMinor = vault ? toMinor(fundCap, currency) : null;
+    const fundTotalCapMinor = vault ? toMinor(fundTotal, currency) : null;
+    if (vault && (fundCapMinor === null || fundCapMinor === 0)) return setError("The per-milestone fund cap must be an amount, such as 150.00.");
+    if (vault && (fundTotalCapMinor === null || fundTotalCapMinor === 0)) return setError("The total fund cap must be an amount, such as 500.00.");
+    if (vault && fundCapMinor! > fundTotalCapMinor!) return setError("The per-milestone fund cap cannot be more than the total.");
     setBusy(true);
     try {
       const r = await createMandateRequest({
         agentName: name.trim(),
         actions: offered.filter((a) => actions.has(a)),
         approveCapMinor: capMinor,
+        fundCapMinor,
+        fundTotalCapMinor,
+        autoFundNext: vault && autoFund,
         currency,
         expiresInDays: days,
       });
@@ -146,6 +171,40 @@ export function MandateForm({ defaultName, allowed }: { defaultName: string; all
             ))}
           </div>
         </fieldset>
+        {canFund ? (
+          <fieldset className="grid gap-3 border-t border-hairline pt-4" data-testid="fund-terms">
+            <legend className="sr-only">May fund milestones</legend>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-control px-2 py-1.5 hover:bg-surface-raised">
+              <input type="checkbox" className="mt-1 accent-[var(--fg)]" checked={vault} onChange={toggleVault} />
+              <span className="min-w-0">
+                <span className="block text-[14px] text-fg">May fund milestones</span>
+                <span className="block text-[12px] leading-4 text-fg-faint">
+                  Pays the next milestone of a contract you both signed into escrow from your saved PayPal, for exactly its amount.
+                  {hasSavedPayPal ? "" : " Save your PayPal below first."}
+                </span>
+              </span>
+            </label>
+            {vault ? (
+              <div className="grid gap-4 pl-2 sm:pl-8">
+                <div className="grid items-start gap-4 sm:grid-cols-2">
+                  <Field label="Per milestone, at most" htmlFor={`${id}-fcap`} hint={`Largest single milestone, in ${currency}.`}>
+                    <input id={`${id}-fcap`} className={`${inputClass} font-mono tabular`} inputMode="decimal" value={fundCap} onChange={(e) => setFundCap(e.target.value)} />
+                  </Field>
+                  <Field label="In all, at most" htmlFor={`${id}-ftotal`} hint="Everything this mandate may ever fund.">
+                    <input id={`${id}-ftotal`} className={`${inputClass} font-mono tabular`} inputMode="decimal" value={fundTotal} onChange={(e) => setFundTotal(e.target.value)} />
+                  </Field>
+                </div>
+                <label className="flex cursor-pointer items-start gap-2.5 rounded-control px-2 py-1.5 hover:bg-surface-raised">
+                  <input type="checkbox" className="mt-1 accent-[var(--fg)]" checked={autoFund} onChange={() => setAutoFund((v) => !v)} />
+                  <span className="min-w-0">
+                    <span className="block text-[14px] text-fg">Fund the next milestone when the previous one is released</span>
+                    <span className="block text-[12px] leading-4 text-fg-faint">No model involved: Milestone does it under this mandate, within the same caps.</span>
+                  </span>
+                </label>
+              </div>
+            ) : null}
+          </fieldset>
+        ) : null}
         <div className="grid items-start gap-4 sm:grid-cols-[1fr_96px_1fr]">
           <Field label="Approval cap" htmlFor={`${id}-cap`} hint={approve ? "Largest single release it may approve." : "Needs Approve releases."}>
             <input id={`${id}-cap`} className={`${inputClass} font-mono tabular`} inputMode="decimal" value={approve ? cap : ""} placeholder="none" disabled={!approve} onChange={(e) => setCap(e.target.value)} />

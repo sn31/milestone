@@ -208,7 +208,7 @@ export type MandateAction = z.infer<typeof MandateAction>;
 export const MANDATE_ACTIONS = MandateAction.options;
 
 // ---------- Jobs and events ----------
-export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute", "reconcile"]);
+export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute", "reconcile", "autofund"]);
 export type JobName = z.infer<typeof JobName>;
 
 /** Confirmed against PayPal's webhook event reference on 2026-10-08. */
@@ -231,5 +231,7 @@ export const PAYPAL_EVENTS = {
   disputeCreated: "CUSTOMER.DISPUTE.CREATED",
   disputeUpdated: "CUSTOMER.DISPUTE.UPDATED",
   disputeResolved: "CUSTOMER.DISPUTE.RESOLVED",
+  vaultPaymentTokenCreated: "VAULT.PAYMENT-TOKEN.CREATED",
+  vaultPaymentTokenDeleted: "VAULT.PAYMENT-TOKEN.DELETED",
 } as const;
 export type PayPalEventName = (typeof PAYPAL_EVENTS)[keyof typeof PAYPAL_EVENTS];

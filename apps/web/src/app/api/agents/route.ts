@@ -29,7 +29,7 @@ export async function POST(req: Request) {
   await audit(db, {
     actor: actor.userId,
     event: "agent.mandate_created",
-    detail: { mandateId: mandate.id, agentName: mandate.agentName, actions: mandate.actions, approveCapMinor: mandate.approveCapMinor, currency: mandate.currency, expiresAt: mandate.expiresAt.toISOString() },
+    detail: { mandateId: mandate.id, agentName: mandate.agentName, actions: mandate.actions, approveCapMinor: mandate.approveCapMinor, fundCapMinor: mandate.fundCapMinor, fundTotalCapMinor: mandate.fundTotalCapMinor, autoFundNext: mandate.autoFundNext, currency: mandate.currency, expiresAt: mandate.expiresAt.toISOString() },
   });
   const base = (process.env.APP_URL || new URL(req.url).origin).replace(/\/+$/, "");
   return json({ mandate: mandateView(mandate), token, shownOnce: true, mcp: { url: `${base}/api/mcp`, header: `Authorization: Bearer ${token}` } }, 201);

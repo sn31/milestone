@@ -6,6 +6,7 @@ import { sleep } from "./cdp.mjs";
 const M1 = "Signup form and validation";
 const M2 = "Account creation API and confirmation page";
 const BRAND1 = "Logo and colour system";
+const AGENT_NAME = "Casey's agent";
 const REPO_INPUT = "input[placeholder='https://github.com/you/repo.git']";
 const BRANCH_INPUT = "input[placeholder=main]";
 const DONE_STATES = ["review", "needs_client", "held", "released", "partial_released"];
@@ -77,6 +78,29 @@ async function waitVerdict(ctx, id, before, timeout = 180_000) {
   return waitStatus(ctx, id, DONE_STATES, 30_000);
 }
 
+
+/**
+ * Casey saves her PayPal on /agents (the simulator approves the setup token at once), then gets a mandate through the
+ * API: read, fund, approve and hold; approve, per-milestone fund and total fund caps of $200.00; auto-fund the next
+ * milestone. The mandate call is the one an API client makes (POST /api/agents with the role cookie).
+ */
+async function agentSetup(ctx) {
+  const { d } = ctx;
+  await d.role("usr_client");
+  await d.go("/agents");
+  await sleep(1000);
+  await d.click({ text: "Save PayPal for agent payments" });
+  await waitDb(ctx, "select count(*) from payment_methods where user_id='usr_client' and removed_at is null", (n) => Number(n) > 0, { timeout: 60_000, what: "Casey's saved PayPal" });
+  ctx.note(`saved PayPal: ${ctx.db("select paypal_payment_token_id from payment_methods where user_id='usr_client' and removed_at is null limit 1")}`);
+  await d.go("/agents");
+  await sleep(1000);
+  const body = JSON.stringify({ agentName: AGENT_NAME, actions: ["read", "fund", "approve", "hold"], approveCapMinor: 20000, fundCapMinor: 20000, fundTotalCapMinor: 20000, autoFundNext: true, currency: "USD", expiresInDays: 30 });
+  const code = await d.eval(`fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: ${JSON.stringify(body)} }).then((r) => r.status)`);
+  if (code !== 201 && code !== 200) throw new Error(`creating the mandate answered HTTP ${code}`);
+  ctx.note(`mandate created (HTTP ${code}): auto-fund next, caps $200.00`);
+  await d.reload();
+}
+
 export const BEATS = [
   {
     id: "hook",
@@ -113,11 +137,21 @@ export const BEATS = [
     },
   },
   {
+    id: "agent-setup",
+    title: "Casey saves her PayPal and gives her agent a $200 mandate with auto-fund",
+    script: "The client's agent, 0:56 to 1:14 (setup)",
+    async run(ctx) {
+      await agentSetup(ctx);
+      await ctx.d.eval(`window.scrollTo({ top: Math.min(document.body.scrollHeight, 320), behavior: "smooth" })`);
+    },
+  },
+  {
     id: "deliver-release",
     title: "Deliver m1-pass, verify, approve, release",
     script: "Deliver and release, 0:45 to 1:20",
     async run(ctx) {
       const { d } = ctx;
+      await d.go("/contracts/ctr_demo");
       const before = verified(ctx, "mst_1");
       await deliver(ctx, M1, "m1-pass");
       await waitStatus(ctx, "mst_1", ["verifying", ...DONE_STATES], 30_000);
@@ -142,14 +176,39 @@ export const BEATS = [
     },
   },
   {
+    id: "agent-fund",
+    title: "Milestone 1 released, so the agent funds milestone 2 from Casey's saved PayPal",
+    script: "The client's agent, 0:56 to 1:14",
+    async run(ctx) {
+      const { d } = ctx;
+      // The release job's auto-fund rule charges the vault once mst_1 is released; nothing here calls a model.
+      await d.role("usr_client");
+      await d.go("/contracts/ctr_demo");
+      await waitDb(ctx, "select count(*) from audit_log where milestone_id='mst_2' and event='paypal.vault_charge'", (n) => Number(n) > 0, { timeout: 90_000, what: "paypal.vault_charge on mst_2" });
+      await waitStatus(ctx, "mst_2", ["funded"], 60_000);
+      ctx.note(`agent.autofund: ${ctx.db("select detail->>'outcome' from audit_log where milestone_id='mst_2' and event='agent.autofund' order by created_at desc limit 1")}`);
+      ctx.note(`mst_2 funded by the agent; actor: ${ctx.db("select actor from audit_log where milestone_id='mst_2' and event='paypal.vault_charge' order by created_at desc limit 1")}`);
+      await catchUp(ctx, M2, "funded", 8000);
+      await d.show({ within: M2, selector: "*", text: M2 }, "start").catch(() => {});
+      await sleep(ctx.holdMs);
+      await d.go("/agents");
+      await sleep(1500);
+      await d.eval(`window.scrollTo({ top: Math.min(document.body.scrollHeight, 640), behavior: "smooth" })`);
+    },
+  },
+  {
     id: "hold",
     title: "Milestone 2: m2-partial held, then m2-injection flagged",
     script: "The hold, 1:20 to 1:50",
     async run(ctx) {
       const { d } = ctx;
-      await ctx.offCamera(async () => {
-        await fund(ctx, M2, "mst_2");
-      });
+      await d.go("/contracts/ctr_demo");
+      // With the agent beat run, mst_2 is already funded (by the agent); otherwise the client funds it off camera.
+      if (status(ctx, "mst_2") === "draft") {
+        await ctx.offCamera(async () => {
+          await fund(ctx, M2, "mst_2");
+        });
+      }
       let before = verified(ctx, "mst_2");
       await deliver(ctx, M2, "m2-partial");
       let s = await waitVerdict(ctx, "mst_2", before);

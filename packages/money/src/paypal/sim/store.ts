@@ -93,6 +93,8 @@ export interface OrderRec {
   createTime: string;
   updateTime: string;
   captureId?: string;
+  /** Set for an order paid from a saved PayPal (payment_source.paypal.vault_id). */
+  vaultId?: string;
 }
 export interface CaptureRec {
   kind: "capture";
@@ -102,6 +104,8 @@ export interface CaptureRec {
   refundedMinor: number;
   createTime: string;
   updateTime: string;
+  /** A capture held as PENDING until this time (epoch ms); PAYMENT.CAPTURE.COMPLETED fires then. */
+  pendingUntil?: number;
 }
 export interface RefundRec {
   kind: "refund";
@@ -177,7 +181,47 @@ export interface DisputeRec {
   evidences: DisputeEvidenceRec[];
   acceptNote?: string;
 }
-export type Rec = OrderRec | CaptureRec | RefundRec | BatchRec | InvoiceRec | IndexRec | IdemRec | FailRec | DisputeRec;
+/** The PayPal attributes a setup token / payment token was created with (payment_source.paypal). */
+export interface VaultSource {
+  description?: string;
+  usage_type?: string;
+  customer_type?: string;
+  usage_pattern?: string;
+  permit_multiple_payment_tokens?: boolean;
+  brand_name?: string;
+}
+/** POST /v3/vault/setup-tokens: PAYER_ACTION_REQUIRED until the payer approves, VAULTED once a payment token exists. */
+export interface SetupTokenRec {
+  kind: "setup_token";
+  id: string;
+  customerId: string;
+  status: "PAYER_ACTION_REQUIRED" | "APPROVED" | "VAULTED";
+  source: VaultSource;
+  returnUrl?: string;
+  cancelUrl?: string;
+  payerEmail?: string;
+  paymentTokenId?: string;
+  createTime: string;
+  updateTime: string;
+}
+/** A saved PayPal: what an order's payment_source.paypal.vault_id names. Deleted by DELETE /v3/vault/payment-tokens/{id}. */
+export interface PaymentTokenRec {
+  kind: "payment_token";
+  id: string;
+  customerId: string;
+  setupTokenId: string;
+  payerEmail: string;
+  payerId: string;
+  source: VaultSource;
+  createTime: string;
+}
+/** An armed outcome for the NEXT charge of a vault id (dev control): PENDING capture or DECLINED. Used once. */
+export interface VaultArmRec {
+  kind: "vault_arm";
+  vaultId: string;
+  outcome: "PENDING" | "DECLINED";
+}
+export type Rec = OrderRec | CaptureRec | RefundRec | BatchRec | InvoiceRec | IndexRec | IdemRec | FailRec | DisputeRec | SetupTokenRec | PaymentTokenRec | VaultArmRec;
 type Kind = Rec["kind"];
 
 // ---------- State ----------
@@ -199,6 +243,8 @@ function keyOf(rec: Rec): string {
       return `idem:${rec.key}`;
     case "fail":
       return `fail:${rec.senderItemId}`;
+    case "vault_arm":
+      return `vault_arm:${rec.vaultId}`;
     default:
       return `${rec.kind}:${rec.id}`;
   }

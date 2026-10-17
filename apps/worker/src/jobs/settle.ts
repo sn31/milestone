@@ -9,12 +9,15 @@ import {
   asRecord,
   asString,
   audit,
+  autoFundMandates,
   canTransition,
+  enqueue,
   fromPayPalValue,
   ledgerEntries,
   ledgerRefs,
   markWebhookProcessed,
   milestones,
+  nextDraftMilestone,
   paypalMode,
   paypalOps,
   postTransaction,
@@ -243,6 +246,8 @@ async function resolveMilestone(
 
 interface After {
   receipt?: { m: MilestoneRow; contract: ContractRow; amountMinor: number };
+  /** The milestone just reached released: the auto-fund rule may fund the contract's next milestone. */
+  released?: { m: MilestoneRow; contract: ContractRow };
 }
 
 type Apply = (tx: Tx, m: MilestoneRow, contract: ContractRow) => Promise<After>;
@@ -305,6 +310,24 @@ export async function settle(job: Job<JobData>): Promise<void> {
   });
 
   if (after.receipt) await issueReceipt(db, after.receipt.m, after.receipt.contract, after.receipt.amountMinor);
+  if (after.released) await enqueueAutofund(db, after.released.m, after.released.contract);
+}
+
+/**
+ * After a milestone reaches released: when the client has a live mandate with auto_fund_next, enqueue the autofund job
+ * for the contract's next draft milestone (one job per milestone: the dedupe key makes a repeat a no-op). The job
+ * checks the whole funding guarantee itself; this only decides whether to ask. A failed enqueue is audited, not thrown:
+ * the release is final either way, and the client can still fund the milestone by hand.
+ */
+async function enqueueAutofund(db: Db, m: MilestoneRow, contract: ContractRow): Promise<void> {
+  try {
+    if ((await autoFundMandates(db, contract.clientId)).length === 0) return;
+    const next = await nextDraftMilestone(db, contract.id);
+    if (!next) return;
+    await enqueue("autofund", next.id, { contractId: contract.id, releasedMilestoneId: m.id }, { dedupe: "autofund" });
+  } catch (err) {
+    await audit(db, { actor: "system", event: "agent.autofund_enqueue_failed", milestoneId: m.id, contractId: contract.id, detail: { error: err instanceof Error ? err.message : String(err) } });
+  }
 }
 
 /** The audit entry for an in-flight item event (UNCLAIMED / HELD). */
@@ -472,7 +495,7 @@ async function finalise(
     return {};
   }
   const moved = await transition(tx, m.id, target, { actor: "paypal", event: `milestone.${target}`, detail: { ...detail, amountMinor: total, refundMinor: claim.refundMinor } });
-  return moved && total > 0 ? { receipt: { m, contract, amountMinor: total } } : {};
+  return { ...(moved && total > 0 ? { receipt: { m, contract, amountMinor: total } } : {}), ...(moved && target === "released" ? { released: { m, contract } } : {}) };
 }
 
 /**

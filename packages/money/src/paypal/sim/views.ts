@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { asRecord, fromPayPalValue, toPayPalValue } from "@milestone/core";
 import type { WebhookEvent } from "../webhooks.ts";
-import { appUrl, get, type Amount, type BatchRec, type CaptureRec, type DisputeRec, type InvoiceRec, type OrderRec, type PayoutItemRec, type RefundRec } from "./store.ts";
+import { appUrl, get, type Amount, type BatchRec, type CaptureRec, type DisputeRec, type InvoiceRec, type OrderRec, type PaymentTokenRec, type PayoutItemRec, type RefundRec, type SetupTokenRec } from "./store.ts";
 
 // ---------- Ids ----------
 
@@ -26,6 +26,10 @@ export const ids = {
   dispute: () => `PP-D-SIM${code(8)}`,
   debug: () => `sim${randomBytes(6).toString("hex")}`,
   token: (kind: string) => `SIM-${kind}-${randomBytes(24).toString("base64url")}`,
+  setupToken: () => `SIM-SETUP-${code(12)}`,
+  paymentToken: () => `SIM-PMT-${code(12)}`,
+  customer: () => `SIM-CUST-${code(10)}`,
+  payer: () => `SIMPAYER${code(5)}`,
 };
 
 // ---------- Views ----------
@@ -51,13 +55,15 @@ function feeMinor(grossMinor: number): number {
   return Math.round(grossMinor * 0.0349);
 }
 
-export function captureView(c: CaptureRec, withOrder = false): Record<string, unknown> {
+export function captureView(c: CaptureRec, withOrder = false, now = Date.now()): Record<string, unknown> {
   const gross = minor(c.amount);
   const fee = feeMinor(gross);
-  const status = c.refundedMinor === 0 ? "COMPLETED" : c.refundedMinor >= gross ? "REFUNDED" : "PARTIALLY_REFUNDED";
+  const pending = c.pendingUntil !== undefined && now < c.pendingUntil;
+  const status = pending ? "PENDING" : c.refundedMinor === 0 ? "COMPLETED" : c.refundedMinor >= gross ? "REFUNDED" : "PARTIALLY_REFUNDED";
   return {
     id: c.id,
     status,
+    ...(pending ? { status_details: { reason: "PENDING_REVIEW" } } : {}),
     amount: c.amount,
     final_capture: true,
     seller_protection: { status: "ELIGIBLE", dispute_categories: ["ITEM_NOT_RECEIVED", "UNAUTHORIZED_TRANSACTION"] },
@@ -99,7 +105,7 @@ export function orderView(o: OrderRec): Record<string, unknown> {
     id: o.id,
     intent: o.intent,
     status: o.status,
-    ...(o.status !== "CREATED" ? { payment_source: { paypal: { email_address: PAYER.email_address, account_id: PAYER.payer_id, account_status: "VERIFIED", name: PAYER.name, address: PAYER.address } } } : {}),
+    ...(o.status !== "CREATED" ? { payment_source: { paypal: paypalSource(o) } } : {}),
     purchase_units: o.units.map((u, i) => ({
       reference_id: u.reference_id,
       ...(u.description ? { description: u.description } : {}),
@@ -112,6 +118,19 @@ export function orderView(o: OrderRec): Record<string, unknown> {
     create_time: o.createTime,
     ...(o.status !== "CREATED" ? { update_time: o.updateTime } : {}),
     links,
+  };
+}
+
+/** payment_source.paypal of an approved / completed order; a vault order names its token and customer. */
+function paypalSource(o: OrderRec): Record<string, unknown> {
+  const token = o.vaultId ? get("payment_token", o.vaultId) : undefined;
+  return {
+    email_address: token?.payerEmail ?? PAYER.email_address,
+    account_id: token?.payerId ?? PAYER.payer_id,
+    account_status: "VERIFIED",
+    name: PAYER.name,
+    address: PAYER.address,
+    ...(o.vaultId ? { attributes: { vault: { id: o.vaultId, status: "VAULTED", ...(token ? { customer: { id: token.customerId } } : {}) } } } : {}),
   };
 }
 
@@ -267,4 +286,72 @@ export interface SimulatedOrderSummary {
 export function summary(o: OrderRec): SimulatedOrderSummary {
   const u = o.units[0];
   return { id: o.id, status: o.status, referenceId: u?.reference_id ?? null, amount: u?.amount ?? null };
+}
+
+// ---------- Vault (Payment Method Tokens v3) ----------
+
+export function setupTokenView(t: SetupTokenRec): Record<string, unknown> {
+  const self = `${API}/v3/vault/setup-tokens/${t.id}`;
+  return {
+    id: t.id,
+    customer: { id: t.customerId },
+    status: t.status,
+    payment_source: {
+      paypal: {
+        ...t.source,
+        ...(t.status !== "PAYER_ACTION_REQUIRED" ? { email_address: t.payerEmail ?? PAYER.email_address, payer_id: PAYER.payer_id } : {}),
+      },
+    },
+    links: [
+      ...(t.status === "PAYER_ACTION_REQUIRED" ? [{ href: `${appUrl()}/api/dev/paypal/vault-approve?token=${encodeURIComponent(t.id)}`, rel: "approve", method: "GET" }] : []),
+      { href: self, rel: "self", method: "GET", encType: "application/json" },
+      ...(t.status === "APPROVED" ? [{ href: `${API}/v3/vault/payment-tokens`, rel: "confirm", method: "POST", encType: "application/json" }] : []),
+    ],
+  };
+}
+
+export function paymentTokenView(p: PaymentTokenRec): Record<string, unknown> {
+  const self = `${API}/v3/vault/payment-tokens/${p.id}`;
+  return {
+    id: p.id,
+    customer: { id: p.customerId },
+    payment_source: {
+      paypal: {
+        ...p.source,
+        email_address: p.payerEmail,
+        payer_id: p.payerId,
+        name: { full_name: `${PAYER.name.given_name} ${PAYER.name.surname}` },
+        address: PAYER.address,
+      },
+    },
+    links: [
+      { href: self, rel: "self", method: "GET", encType: "application/json" },
+      { href: self, rel: "delete", method: "DELETE", encType: "application/json" },
+    ],
+  };
+}
+
+export interface SimulatedSetupTokenSummary {
+  id: string;
+  status: SetupTokenRec["status"];
+  customerId: string;
+  /** Where the payer goes after approving: return_url with approval_token_id (and approval_session_id), as PayPal does. */
+  returnUrl: string | null;
+  cancelUrl: string | null;
+  paymentTokenId: string | null;
+}
+
+export function setupSummary(t: SetupTokenRec): SimulatedSetupTokenSummary {
+  let returnUrl: string | null = null;
+  if (t.returnUrl) {
+    try {
+      const u = new URL(t.returnUrl);
+      u.searchParams.set("approval_token_id", t.id);
+      u.searchParams.set("approval_session_id", `SIM-SESSION-${t.id.slice(-8)}`);
+      returnUrl = u.toString();
+    } catch {
+      returnUrl = t.returnUrl;
+    }
+  }
+  return { id: t.id, status: t.status, customerId: t.customerId, returnUrl, cancelUrl: t.cancelUrl ?? null, paymentTokenId: t.paymentTokenId ?? null };
 }

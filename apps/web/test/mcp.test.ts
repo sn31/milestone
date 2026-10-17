@@ -257,7 +257,8 @@ describe.skipIf(!e2e)("MCP server: agents under a mandate", () => {
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(byName.respond_to_review!.description).toMatch(/only make a release happen sooner, never make one happen that the policy would not/);
     expect(byName.respond_to_review!.inputSchema.properties).toMatchObject({ action: { enum: ["approve", "hold"] } });
-    expect(byName.fund_milestone!.description).toMatch(/never captures/);
+    expect(byName.fund_milestone!.description).toMatch(/never pays out or refunds/);
+    expect(byName.fund_milestone!.description).toMatch(/per-milestone fund cap and its total fund cap/);
     // PayPal's money-moving tools are never exposed.
     expect(tools.some((t) => /pay_order|refund|capture|payout|dispute/i.test(t.name))).toBe(false);
     expect(full.getInstructions()).toMatch(/approval cap 200\.00 USD/);
@@ -364,13 +365,16 @@ describe.skipIf(!e2e)("MCP server: agents under a mandate", () => {
 
   // ---------- fund_milestone ----------
 
-  it("fund_milestone: creates the PayPal order and returns the approval link without capturing; the cookie is restored", async () => {
+  it("fund_milestone without fund caps: creates the PayPal order and returns the approval link without capturing; the cookie is restored", async () => {
     state.jar.set(ACTOR_COOKIE, "usr_freelancer"); // whatever the MCP client sent, the route acts as the mandate's user
     const r = await call(full, "fund_milestone", { milestoneId: draft.id });
     expect(r.isError).toBe(false);
     expect(r.body.orderId).toMatch(/\S/);
     expect(r.body.approvalUrl).toContain(encodeURIComponent(r.body.orderId));
-    expect(r.body.next).toMatch(/never captures/);
+    expect(r.body.next).toMatch(/No money has moved/);
+    // This mandate sets no fund caps (and the client may have no saved PayPal): the approval link, with why.
+    expect(r.body).toMatchObject({ funded: false, vault: { used: false } });
+    expect(["no_saved_paypal", "fund_cap_missing"]).toContain(r.body.vault.reason);
     expect(state.jar.get(ACTOR_COOKIE)).toBe("usr_freelancer");
     const m = await db.query.milestones.findFirst({ where: eq(core.milestones.id, draft.id) });
     expect(m).toMatchObject({ status: "draft", paypalOrderId: r.body.orderId, paypalCaptureId: null });

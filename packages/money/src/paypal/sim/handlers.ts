@@ -6,8 +6,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { asRecord, asString, fromPayPalValue } from "@milestone/core";
 import type { WebhookEvent } from "../webhooks.ts";
-import { SIMULATED_WEBHOOK_HEADER, appUrl, config, del, get, put, read, records, simulatedWebhookSecret, transact, transactSync, type Amount, type BatchRec, type CaptureRec, type DisputeEvidenceRec, type DisputeRec, type InvoiceRec, type OrderRec, type PayoutItemRec, type Rec, type RefundRec } from "./store.ts";
-import { API, amount, batchView, captureView, code, disputeView, event, ids, invoiceView, isResolved, iso, itemView, minor, orderView, refundView, summary, type SimulatedOrderSummary } from "./views.ts";
+import { SIMULATED_WEBHOOK_HEADER, appUrl, config, del, get, put, read, records, simulatedWebhookSecret, transact, transactSync, type Amount, type BatchRec, type CaptureRec, type DisputeEvidenceRec, type DisputeRec, type InvoiceRec, type OrderRec, type PaymentTokenRec, type PayoutItemRec, type Rec, type RefundRec, type SetupTokenRec, type VaultSource } from "./store.ts";
+import { API, PAYER, amount, batchView, captureView, code, disputeView, event, ids, invoiceView, isResolved, iso, itemView, minor, orderView, paymentTokenView, refundView, setupSummary, setupTokenView, summary, type SimulatedOrderSummary, type SimulatedSetupTokenSummary } from "./views.ts";
 
 // ---------- Requests and results ----------
 
@@ -24,6 +24,8 @@ interface SimRequest {
   headers: Headers;
   now: number;
   upload: EvidenceUpload | null;
+  /** The URL's search string (with "?"), for the few GETs that take query parameters. */
+  query: string;
 }
 interface SimResult {
   status: number;
@@ -81,7 +83,10 @@ function createOrder(req: SimRequest): SimResult {
     if (customId) unit.custom_id = customId;
     parsed.push(unit);
   }
-  const ctx = asRecord(asRecord(asRecord(body.payment_source).paypal).experience_context);
+  const paypal = asRecord(asRecord(body.payment_source).paypal);
+  const vaultId = asString(paypal.vault_id);
+  if (vaultId) return chargeVault(req, String(body.intent), parsed, vaultId);
+  const ctx = asRecord(paypal.experience_context);
   const o: OrderRec = { kind: "order", id: ids.order(), status: "CREATED", intent: String(body.intent), units: parsed, createTime: iso(req.now), updateTime: iso(req.now) };
   const ret = asString(ctx.return_url);
   if (ret) o.returnUrl = ret;
@@ -89,6 +94,58 @@ function createOrder(req: SimRequest): SimResult {
   if (cancel) o.cancelUrl = cancel;
   put(o);
   return { status: 201, body: orderView(o) };
+}
+
+/**
+ * The vault id a seeded showcase payment method uses (pnpm db:seed -- --showcase writes no simulator state). An unknown
+ * vault id with this prefix is treated as a saved PayPal the simulator already had, so the showcase can fund from it.
+ */
+export const SHOWCASE_VAULT_PREFIX = "SIM-PMT-SHOW";
+
+/** The payment token for a vault id: a saved one, or a showcase token adopted on first use. */
+function vaultToken(vaultId: string, now: number): PaymentTokenRec | undefined {
+  const known = get("payment_token", vaultId);
+  if (known || !vaultId.startsWith(SHOWCASE_VAULT_PREFIX)) return known;
+  const t: PaymentTokenRec = {
+    kind: "payment_token",
+    id: vaultId,
+    customerId: `SIM-CUST-${vaultId.slice(SHOWCASE_VAULT_PREFIX.length) || "SHOW"}`,
+    setupTokenId: "",
+    payerEmail: PAYER.email_address,
+    payerId: PAYER.payer_id,
+    source: { usage_type: "MERCHANT", customer_type: "CONSUMER", usage_pattern: "UNSCHEDULED_POSTPAID", permit_multiple_payment_tokens: false },
+    createTime: iso(now),
+  };
+  put(t);
+  return t;
+}
+
+/**
+ * An order paid from a saved PayPal: no buyer step, so it is created COMPLETED with its capture in the same answer and
+ * PAYMENT.CAPTURE.COMPLETED follows. An armed PENDING outcome holds the capture PENDING for twice the webhook delay
+ * (the COMPLETED event fires when it clears); an armed DECLINED outcome refuses with INSTRUMENT_DECLINED and moves nothing.
+ */
+function chargeVault(req: SimRequest, intent: string, units: OrderRec["units"], vaultId: string): SimResult {
+  if (intent !== "CAPTURE") return err(422, "UNPROCESSABLE_ENTITY", "A vaulted PayPal order must have intent CAPTURE.", "INVALID_PARAMETER_VALUE");
+  const token = vaultToken(vaultId, req.now);
+  if (!token) return err(422, "UNPROCESSABLE_ENTITY", "The specified vault_id does not exist or was deleted.", "INVALID_VAULT_ID");
+  const unit = units[0]!;
+  const armed = get("vault_arm", vaultId);
+  if (armed) del("vault_arm", vaultId);
+  if (armed?.outcome === "DECLINED") return err(422, "UNPROCESSABLE_ENTITY", "The instrument presented was either declined by the processor or bank, or it can't be used for this payment.", "INSTRUMENT_DECLINED");
+  const o: OrderRec = { kind: "order", id: ids.order(), status: "COMPLETED", intent, units, createTime: iso(req.now), updateTime: iso(req.now), vaultId };
+  const c: CaptureRec = { kind: "capture", id: ids.capture(), orderId: o.id, amount: unit.amount, refundedMinor: 0, createTime: iso(req.now), updateTime: iso(req.now) };
+  const pendingMs = armed?.outcome === "PENDING" ? Math.max(1, config.webhookDelayMs * 2) : 0;
+  if (pendingMs) c.pendingUntil = req.now + pendingMs;
+  o.captureId = c.id;
+  put(c);
+  put(o);
+  const completed = { ...captureView(c, true, c.pendingUntil ?? req.now), ...(unit.custom_id ? { custom_id: unit.custom_id } : {}) };
+  return {
+    status: 201,
+    body: orderView(o),
+    events: [{ event: event("PAYMENT.CAPTURE.COMPLETED", "capture", `Payment completed for ${unit.amount.value} ${unit.amount.currency_code}`, completed), ...(pendingMs ? { delayMs: pendingMs + config.webhookDelayMs } : {}) }],
+  };
 }
 
 function captureOrder(req: SimRequest, orderId: string): SimResult {
@@ -335,6 +392,90 @@ function acceptClaim(req: SimRequest, id: string): SimResult {
   };
 }
 
+// ---------- Vault (Payment Method Tokens v3) ----------
+
+function vaultSource(paypal: Record<string, unknown>): VaultSource {
+  const src: VaultSource = {};
+  const description = asString(paypal.description);
+  if (description) src.description = description;
+  for (const k of ["usage_type", "customer_type", "usage_pattern"] as const) {
+    const v = asString(paypal[k]);
+    if (v) src[k] = v;
+  }
+  if (typeof paypal.permit_multiple_payment_tokens === "boolean") src.permit_multiple_payment_tokens = paypal.permit_multiple_payment_tokens;
+  const brand = asString(asRecord(paypal.experience_context).brand_name);
+  if (brand) src.brand_name = brand;
+  return src;
+}
+
+function createSetupToken(req: SimRequest): SimResult {
+  const body = asRecord(req.body);
+  const source = asRecord(body.payment_source);
+  if (!source.paypal) return err(400, "INVALID_REQUEST", "payment_source.paypal is required.", "MISSING_REQUIRED_PARAMETER");
+  const paypal = asRecord(source.paypal);
+  const ctx = asRecord(paypal.experience_context);
+  const returnUrl = asString(ctx.return_url);
+  const cancelUrl = asString(ctx.cancel_url);
+  if (!returnUrl || !cancelUrl) return err(400, "INVALID_REQUEST", "experience_context.return_url and cancel_url are required.", "MISSING_REQUIRED_PARAMETER");
+  if (!asString(paypal.usage_type)) return err(400, "INVALID_REQUEST", "payment_source.paypal.usage_type is required.", "MISSING_REQUIRED_PARAMETER");
+  const t: SetupTokenRec = {
+    kind: "setup_token",
+    id: ids.setupToken(),
+    customerId: asString(asRecord(body.customer).id) ?? ids.customer(),
+    status: "PAYER_ACTION_REQUIRED",
+    source: vaultSource(paypal),
+    returnUrl,
+    cancelUrl,
+    createTime: iso(req.now),
+    updateTime: iso(req.now),
+  };
+  put(t);
+  return { status: 201, body: setupTokenView(t) };
+}
+
+function createPaymentToken(req: SimRequest): SimResult {
+  const token = asRecord(asRecord(asRecord(req.body).payment_source).token);
+  const setupId = asString(token.id);
+  if (!setupId || token.type !== "SETUP_TOKEN") return err(400, "INVALID_REQUEST", "payment_source.token with type SETUP_TOKEN is required.", "MISSING_REQUIRED_PARAMETER");
+  const t = get("setup_token", setupId);
+  if (!t) return notFound(setupId);
+  if (t.status === "PAYER_ACTION_REQUIRED") return err(422, "UNPROCESSABLE_ENTITY", "The payer has not approved the setup token.", "SETUP_TOKEN_NOT_APPROVED");
+  // permit_multiple_payment_tokens false: a setup token yields one payment token; asking again returns it.
+  const existing = t.paymentTokenId ? get("payment_token", t.paymentTokenId) : undefined;
+  if (existing) return { status: 200, body: paymentTokenView(existing) };
+  const p: PaymentTokenRec = {
+    kind: "payment_token",
+    id: ids.paymentToken(),
+    customerId: t.customerId,
+    setupTokenId: t.id,
+    payerEmail: t.payerEmail ?? PAYER.email_address,
+    payerId: ids.payer(),
+    source: t.source,
+    createTime: iso(req.now),
+  };
+  put(p);
+  t.status = "VAULTED";
+  t.paymentTokenId = p.id;
+  t.updateTime = iso(req.now);
+  put(t);
+  const view = paymentTokenView(p);
+  return { status: 201, body: view, events: [{ event: event("VAULT.PAYMENT-TOKEN.CREATED", "payment_token", `A payment token ${p.id} was created.`, view) }] };
+}
+
+function deletePaymentToken(_req: SimRequest, id: string): SimResult {
+  const p = get("payment_token", id);
+  if (!p) return notFound(id);
+  del("payment_token", id);
+  return { status: 204, body: null, events: [{ event: event("VAULT.PAYMENT-TOKEN.DELETED", "payment_token", `A payment token ${id} was deleted.`, { id, customer: { id: p.customerId } }) }] };
+}
+
+function listPaymentTokens(req: SimRequest): SimResult {
+  const customerId = new URLSearchParams(req.query).get("customer_id");
+  if (!customerId) return err(400, "INVALID_REQUEST", "customer_id is required.", "MISSING_REQUIRED_PARAMETER");
+  const tokens = [...records("payment_token")].filter((p) => p.customerId === customerId);
+  return { status: 200, body: { customer: { id: customerId }, payment_tokens: tokens.map(paymentTokenView), total_items: tokens.length, total_pages: 1 } };
+}
+
 // ---------- OAuth ----------
 
 function token(headers: Headers, raw: string, now: number): SimResult {
@@ -362,7 +503,13 @@ function token(headers: Headers, raw: string, now: number): SimResult {
 type Handler = (req: SimRequest, id: string) => SimResult;
 const ID = "([^/]+)";
 /** method, path pattern (its one group is the decoded resource id), handler. GET handlers never write. */
-const ROUTES: Array<[method: "GET" | "POST", pattern: RegExp, handle: Handler]> = [
+const ROUTES: Array<[method: "GET" | "POST" | "DELETE", pattern: RegExp, handle: Handler]> = [
+  ["POST", /^\/v3\/vault\/setup-tokens$/, createSetupToken],
+  ["GET", new RegExp(`^/v3/vault/setup-tokens/${ID}$`), (_req, id) => getOr404("setup_token", id, setupTokenView)],
+  ["POST", /^\/v3\/vault\/payment-tokens$/, createPaymentToken],
+  ["GET", /^\/v3\/vault\/payment-tokens$/, listPaymentTokens],
+  ["GET", new RegExp(`^/v3/vault/payment-tokens/${ID}$`), (_req, id) => getOr404("payment_token", id, paymentTokenView)],
+  ["DELETE", new RegExp(`^/v3/vault/payment-tokens/${ID}$`), deletePaymentToken],
   ["GET", new RegExp(`^/v1/customer/disputes/${ID}$`), (req, id) => getOr404("dispute", id, (d) => disputeView(d, req.now))],
   ["POST", new RegExp(`^/v1/customer/disputes/${ID}/provide-evidence$`), provideEvidence],
   ["POST", new RegExp(`^/v1/customer/disputes/${ID}/accept-claim$`), acceptClaim],
@@ -458,7 +605,7 @@ export const simulatedFetch: typeof fetch = async (input, init) => {
       return malformed(debugId);
     }
   }
-  const req: SimRequest = { method, path: url.pathname, body, headers, now, upload };
+  const req: SimRequest = { method, path: url.pathname, body, headers, now, upload, query: url.search };
   const requestId = method === "POST" ? headers.get("paypal-request-id") : null;
 
   const result =
@@ -551,6 +698,39 @@ export function failNextSimulatedPayout(senderItemId: string, reason = "RECEIVER
 /** sender_item_ids with an armed failure. */
 export function armedSimulatedFailures(): Array<{ senderItemId: string; reason: string }> {
   return read(() => [...records("fail")].map((r) => ({ senderItemId: r.senderItemId, reason: r.reason })));
+}
+
+// ---------- Vault dev controls (used by /api/dev/paypal/vault-approve) ----------
+
+/**
+ * The payer approves a setup token (what PayPal's approval page does): PAYER_ACTION_REQUIRED -> APPROVED. Idempotent;
+ * null when the token is unknown. The summary's returnUrl is where to send the payer next.
+ */
+export function approveSimulatedSetupToken(setupTokenId: string, opts: { payerEmail?: string } = {}): SimulatedSetupTokenSummary | null {
+  return transactSync(() => {
+    const t = get("setup_token", setupTokenId);
+    if (!t) return null;
+    if (t.status === "PAYER_ACTION_REQUIRED") {
+      t.status = "APPROVED";
+      t.payerEmail = opts.payerEmail ?? PAYER.email_address;
+      t.updateTime = new Date().toISOString();
+      put(t);
+    }
+    return setupSummary(t);
+  });
+}
+
+export function simulatedSetupToken(setupTokenId: string): SimulatedSetupTokenSummary | null {
+  return read(() => {
+    const t = get("setup_token", setupTokenId);
+    return t ? setupSummary(t) : null;
+  });
+}
+
+/** Makes the NEXT charge of this vault id come back with a PENDING capture, or DECLINED (once). */
+export function armSimulatedVaultCharge(vaultId: string, outcome: "PENDING" | "DECLINED"): { vaultId: string; outcome: "PENDING" | "DECLINED" } {
+  transactSync(() => put({ kind: "vault_arm", vaultId, outcome }));
+  return { vaultId, outcome };
 }
 
 // ---------- Disputes (POST /api/disputes/dev) ----------

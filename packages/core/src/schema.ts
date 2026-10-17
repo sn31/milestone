@@ -180,6 +180,12 @@ export const agentMandates = pgTable("agent_mandates", {
   tokenHash: text("token_hash").notNull(),
   actions: jsonb("actions").$type<MandateAction[]>().notNull(),
   approveCapMinor: bigint("approve_cap_minor", { mode: "number" }),
+  /** Largest single milestone the agent may fund from the user's saved PayPal; null: no funding from the vault. */
+  fundCapMinor: bigint("fund_cap_minor", { mode: "number" }),
+  /** Most the agent may fund from the vault over the mandate's life (sum of its vault_charge ops); null: none. */
+  fundTotalCapMinor: bigint("fund_total_cap_minor", { mode: "number" }),
+  /** When true, the auto-fund rule funds the contract's next milestone from the vault (within the same guarantee). */
+  autoFundNext: boolean("auto_fund_next").default(false).notNull(),
   currency: text("currency").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -188,6 +194,41 @@ export const agentMandates = pgTable("agent_mandates", {
 }, (t) => [
   uniqueIndex("agent_mandates_token_hash").on(t.tokenHash),
   index("agent_mandates_user").on(t.userId),
+]);
+
+/**
+ * A user's saved PayPal (PayPal Payment Method Tokens v3). Only PayPal's ids are stored: the payment token id is what an
+ * order's payment_source.paypal.vault_id names. removed_at set: the user removed it (and it was deleted at PayPal), so it
+ * may never be charged again. One row per payment token.
+ */
+export const paymentMethods = pgTable("payment_methods", {
+  id: id(),
+  userId: text("user_id").notNull().references(() => users.id),
+  provider: text("provider").default("paypal").notNull(),
+  paypalPaymentTokenId: text("paypal_payment_token_id").notNull(),
+  paypalCustomerId: text("paypal_customer_id"),
+  payerEmail: text("payer_email"),
+  createdAt: createdAt(),
+  removedAt: timestamp("removed_at", { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("payment_methods_paypal_payment_token_id").on(t.paypalPaymentTokenId),
+  index("payment_methods_user").on(t.userId),
+]);
+
+/**
+ * One "save your PayPal" attempt: the setup token PayPal returned and where it stands
+ * (created -> approved -> vaulted, or cancelled / failed). The setup token is bound to the user who started it, so only
+ * that user can turn it into a payment method.
+ */
+export const vaultSetups = pgTable("vault_setups", {
+  id: id(),
+  userId: text("user_id").notNull().references(() => users.id),
+  setupTokenId: text("setup_token_id").notNull(),
+  status: text("status").default("created").notNull(),
+  createdAt: createdAt(),
+}, (t) => [
+  uniqueIndex("vault_setups_setup_token_id").on(t.setupTokenId),
+  index("vault_setups_user").on(t.userId),
 ]);
 
 // ---------- Relations (relational queries only: db.query.x.findFirst({ with: ... }); no schema change) ----------

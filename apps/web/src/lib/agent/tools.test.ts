@@ -71,6 +71,15 @@ describe("prompt", () => {
     expect(s).toContain('untrusted="true"');
     expect(s).toContain("P6");
   });
+  it("says funding is done by the agent within the fund caps", () => {
+    const withCaps = systemPrompt({ ...m, actions: ["read", "fund"], fundCapMinor: 20000, fundTotalCapMinor: 50000, autoFundNext: true }, "Casey Client", ["fund_milestone"]);
+    expect(withCaps).toContain("Fund caps: $200.00 (USD) per milestone and $500.00 in total");
+    expect(withCaps).toContain("funded automatically after each release");
+    expect(withCaps).toMatch(/Funding is done by you within the fund caps/);
+    expect(withCaps).toMatch(/never pay out, refund/);
+    expect(systemPrompt({ ...m, actions: ["read", "fund"], fundCapMinor: null, fundTotalCapMinor: null }, "Casey Client", [])).toContain("funding only creates a PayPal approval link");
+    expect(systemPrompt(m, "Casey Client", [])).toContain("this agent may not fund milestones");
+  });
   it("wraps earlier tool summaries as untrusted and ends with the new message", () => {
     const wrap = (t: string, l = "evidence") => `<${l} untrusted="true">${t}</${l}>`;
     const p = turnPrompt(
@@ -118,6 +127,24 @@ describe("claimCheck", () => {
     expect(claimCheck("A PayPal approval link was created. No money has moved yet.", [ok("fund_milestone", { milestoneId: "mst_1" })])).toBeNull();
     expect(claimCheck("It has not been released yet; the release is queued.", [])).toBeNull();
     expect(claimCheck("No approval was needed. The milestone has been released.", [])).toMatch(/^Not confirmed/);
+  });
+});
+
+describe("saved-PayPal funding", () => {
+  const funded = { ok: true, funded: true, status: "funded", captureId: "CAP1", amount: { amountMinor: 15000, value: "150.00", currency: "USD" }, remainingTotalCap: { amountMinor: 35000, value: "350.00", currency: "USD" } };
+  it("summarises a funding and a pending charge", () => {
+    expect(summarizeResult(JSON.stringify(funded), false)).toBe("funded 150.00 USD from your saved PayPal into escrow · 350.00 fund cap left");
+    expect(summarizeResult(JSON.stringify({ ok: true, funded: false, pending: true, status: "draft" }), false)).toMatch(/pending/);
+    expect(summarizeResult(JSON.stringify({ ...funded, already: true, status: "released" }), false)).toBe("already funded earlier from your saved PayPal · nothing charged now · released");
+    expect(summarizeResult(JSON.stringify({ ok: false, reason: "fund_total_cap_exceeded", error: "funding this would take the mandate over its total fund cap" }), true)).toMatch(/^refused · fund_total_cap_exceeded/);
+  });
+  it("backs \"I funded\" only with a fund_milestone that funded, never with an approval link", () => {
+    const fundOk = (status: string | null) => ({ tool: "fund_milestone", args: { milestoneId: "mst_2" }, ok: true, status });
+    expect(claimCheck("I funded milestone 2 from your saved PayPal; the money moved into escrow.", [fundOk("funded")])).toBeNull();
+    expect(claimCheck("I funded milestone 2.", [fundOk(null)])).toMatch(/^Not done/);
+    expect(claimCheck("I funded milestone 2.", [fundOk("draft")])).toMatch(/^Not done/);
+    expect(claimCheck("I started funding milestone 2: open the PayPal link.", [fundOk(null)])).toBeNull();
+    expect(claimCheck("I funded milestone 2 and it has been released.", [fundOk("funded")])).toMatch(/^Not confirmed/);
   });
 });
 

@@ -11,6 +11,10 @@ export const DELEGABLE: Record<Role, readonly MandateAction[]> = {
 
 export const MAX_MANDATE_DAYS = 90;
 
+function capView(minor: number | null, currency: string) {
+  return minor === null ? null : { amountMinor: minor, value: toPayPalValue(minor, currency), currency };
+}
+
 /** A mandate as its owner sees it: never the token or its hash. */
 export function mandateView(m: AgentMandate, now = new Date()) {
   const state = m.revokedAt ? "revoked" : m.expiresAt.getTime() <= now.getTime() ? "expired" : "active";
@@ -19,6 +23,9 @@ export function mandateView(m: AgentMandate, now = new Date()) {
     agentName: m.agentName,
     actions: m.actions,
     approveCap: m.approveCapMinor === null ? null : { amountMinor: m.approveCapMinor, value: toPayPalValue(m.approveCapMinor, m.currency), currency: m.currency },
+    fundCap: capView(m.fundCapMinor, m.currency),
+    fundTotalCap: capView(m.fundTotalCapMinor, m.currency),
+    autoFundNext: m.autoFundNext,
     currency: m.currency,
     state,
     createdAt: m.createdAt.toISOString(),
@@ -28,11 +35,62 @@ export function mandateView(m: AgentMandate, now = new Date()) {
   };
 }
 
-export type CreateBody = { agentName: string; actions: MandateAction[]; approveCapMinor: number | null; currency: string; expiresAt: Date };
+export type CreateBody = {
+  agentName: string;
+  actions: MandateAction[];
+  approveCapMinor: number | null;
+  /** Largest single milestone the agent may fund from the saved PayPal; null: no vault funding. */
+  fundCapMinor: number | null;
+  /** Most it may fund from the saved PayPal over the mandate's life; null: no vault funding. */
+  fundTotalCapMinor: number | null;
+  /** Fund the contract's next milestone when the previous one is released (needs "fund" and both fund caps). */
+  autoFundNext: boolean;
+  currency: string;
+  expiresAt: Date;
+};
+
+/**
+ * One cap from a body: `<name>Minor` (integer minor units) or `<name>` (a decimal string in major units). Undefined,
+ * null and "" mean no cap. Returns the minor units, null, or an error message.
+ */
+export function parseCap(b: Record<string, unknown>, name: string, currency: string): number | null | { error: string } {
+  const minor = b[`${name}Minor`];
+  if (minor !== undefined && minor !== null) {
+    if (typeof minor !== "number" || !Number.isSafeInteger(minor) || minor < 0) return { error: `${name}Minor must be a non-negative integer (minor units)` };
+    return minor;
+  }
+  const major = b[name];
+  if (major === undefined || major === null || major === "") return null;
+  if (typeof major !== "string" || !/^\d+(\.\d{1,2})?$/.test(major.trim())) return { error: `${name} must be a decimal string such as "200.00"` };
+  const v = fromPayPalValue(major.trim(), currency);
+  if (!Number.isSafeInteger(v)) return { error: `${name} is out of range` };
+  return v;
+}
+
+/**
+ * The funding terms of a body: per-milestone fund cap, total fund cap, auto-fund-next. A cap needs "fund"; "fund"
+ * with one cap needs the other; auto-fund needs "fund" and both caps; the per-milestone cap is at most the total.
+ * "fund" with no caps stays allowed: the agent may then only start a checkout the client approves (no vault charge).
+ */
+export function parseFundTerms(b: Record<string, unknown>, actions: readonly MandateAction[], currency: string): Pick<CreateBody, "fundCapMinor" | "fundTotalCapMinor" | "autoFundNext"> | { error: string } {
+  const fundCapMinor = parseCap(b, "fundCap", currency);
+  if (fundCapMinor !== null && typeof fundCapMinor === "object") return fundCapMinor;
+  const fundTotalCapMinor = parseCap(b, "fundTotalCap", currency);
+  if (fundTotalCapMinor !== null && typeof fundTotalCapMinor === "object") return fundTotalCapMinor;
+  if (b.autoFundNext !== undefined && typeof b.autoFundNext !== "boolean") return { error: "autoFundNext must be true or false" };
+  const autoFundNext = b.autoFundNext === true;
+  const fund = actions.includes("fund");
+  if ((fundCapMinor !== null || fundTotalCapMinor !== null) && !fund) return { error: 'a fund cap needs "fund" in actions' };
+  if ((fundCapMinor === null) !== (fundTotalCapMinor === null)) return { error: "set both fund caps (fundCap per milestone and fundTotalCap over the mandate), or neither" };
+  if (fundCapMinor !== null && fundTotalCapMinor !== null && fundCapMinor > fundTotalCapMinor) return { error: "fundCap (per milestone) cannot be more than fundTotalCap" };
+  if (autoFundNext && (!fund || fundCapMinor === null || fundTotalCapMinor === null)) return { error: 'autoFundNext needs "fund" in actions and both fund caps' };
+  return { fundCapMinor, fundTotalCapMinor, autoFundNext };
+}
 
 /**
  * Validates POST /api/agents: { agentName, actions, currency?, approveCap? ("200.00", major units) | approveCapMinor?,
- * expiresInDays? (1..90, default 30) | expiresAt? (ISO) }. Returns the input for createMandate or an error message.
+ * fundCap? | fundCapMinor?, fundTotalCap? | fundTotalCapMinor?, autoFundNext?, expiresInDays? (1..90, default 30) |
+ * expiresAt? (ISO) }. Returns the input for createMandate or an error message.
  */
 export function parseCreate(body: unknown, role: Role, now = new Date()): CreateBody | { error: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "expected a JSON object" };
@@ -61,6 +119,8 @@ export function parseCreate(body: unknown, role: Role, now = new Date()): Create
   }
   if (approveCapMinor !== null && !actions.includes("approve")) return { error: 'an approval cap needs "approve" in actions' };
   if (actions.includes("approve") && approveCapMinor === null) return { error: '"approve" needs an approval cap (approveCap or approveCapMinor)' };
+  const fund = parseFundTerms(b, actions, currency);
+  if ("error" in fund) return fund;
 
   let expiresAt: Date;
   if (typeof b.expiresAt === "string") {
@@ -73,7 +133,7 @@ export function parseCreate(body: unknown, role: Role, now = new Date()): Create
   }
   if (expiresAt.getTime() <= now.getTime()) return { error: "expiresAt must be in the future" };
   if (expiresAt.getTime() > now.getTime() + MAX_MANDATE_DAYS * 86_400_000) return { error: `a mandate lasts at most ${MAX_MANDATE_DAYS} days` };
-  return { agentName, actions, approveCapMinor, currency, expiresAt };
+  return { agentName, actions, approveCapMinor, ...fund, currency, expiresAt };
 }
 
 /** Agents never manage mandates: a request carrying an Authorization header is refused before anything else. */

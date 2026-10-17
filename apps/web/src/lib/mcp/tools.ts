@@ -1,22 +1,32 @@
 /**
  * The Milestone MCP tools. Each one: re-reads the mandate, checks it with mandateAllows (respond_to_review leaves that to
  * the review route, which checks it under the milestone's row lock), checks the user is the right party, acts through
- * the same route a human uses, and is audited with actor agentActor(mandate). No tool captures, pays out or refunds:
- * money moves only through the release job after the review route accepts an answer, exactly as for a human.
+ * the same route a human uses, and is audited with actor agentActor(mandate). No tool pays out or refunds: money leaves
+ * escrow only through the release job after the review route accepts an answer, exactly as for a human. The one tool
+ * that can move money is fund_milestone, and only INTO escrow: it charges the client's saved PayPal through
+ * fundFromVault (packages/money/src/policy/execute.ts), which enforces the funding guarantee under row locks.
  */
-import { getOrder, approveLink } from "@milestone/money";
-import { loadMilestone, mandateAllows, paypalMode, type MandateAction, type MandateRefusal } from "@milestone/core";
+import { getOrder, approveLink, fundFromVault, type VaultFundResult } from "@milestone/money";
+import { activePaymentMethod, loadMilestone, mandateAllows, mandateFundedMinor, paypalMode, type AgentMandate, type FundingRefusal, type MandateAction, type MandateRefusal } from "@milestone/core";
+import { defaultBranchHead } from "@milestone/verify";
 import { paypal } from "@/lib/paypal";
 import { auditTool, currentMandate, type McpContext } from "./context";
 import { callContract, callDeliver, callOrder, callReview } from "./routes";
-import { ledgerView, listContracts, milestoneView, partyRole } from "./views";
+import { ledgerView, listContracts, milestoneView, money, partyRole } from "./views";
 
 export const GUARANTEE =
   "Milestone's guarantee: an agent can only make a release happen sooner, never make one happen that the policy would not. " +
   'respond_to_review "approve" is accepted only while the milestone is in review on the policy\'s own release decision ' +
   "(rule P6) for the current delivery, with every required criterion passed, the amount within the mandate's approval cap, " +
-  'and the mandate unexpired, unrevoked and including "approve". No tool here captures, pays out or refunds money, and ' +
-  "PayPal's money-moving tools are never exposed: money moves only through the same routes and policy a human uses.";
+  'and the mandate unexpired, unrevoked and including "approve". No tool here pays out or refunds money, and ' +
+  "PayPal's money-moving tools are never exposed: money leaves escrow only through the same routes and policy a human uses.";
+
+export const FUNDING_GUARANTEE =
+  "Funding guarantee: fund_milestone charges the client's saved PayPal (money goes into Milestone's escrow, never to the " +
+  "freelancer) only for the next unfunded milestone, in order, of a contract both parties approved, for exactly the " +
+  "milestone amount in the mandate's currency, within the mandate's per-milestone fund cap and its total fund cap, while " +
+  'the mandate is unexpired, unrevoked and includes "fund". Anything else is refused with a reason; without a saved ' +
+  "PayPal or fund caps it only creates a PayPal order that a human approves.";
 
 type Json = Record<string, unknown>;
 interface JsonSchema { type: "object"; properties: Record<string, Json>; required?: string[]; additionalProperties: false }
@@ -91,11 +101,13 @@ export const TOOLS: ToolSpec[] = [
   },
   {
     name: "fund_milestone",
-    title: "Start funding a milestone",
+    title: "Fund a milestone",
     description:
-      "Creates (or returns the existing) PayPal order for a draft milestone of an active contract, through the same code as the Fund button, " +
-      "and returns its approvalUrl. It does NOT move money: a human must open approvalUrl and approve the payment in PayPal; Milestone captures " +
-      'only after that approval. This tool never captures. Client mandates only; needs "fund".',
+      "Funds a draft milestone into escrow. When the client has saved a PayPal account in Milestone and this mandate sets fund caps, " +
+      "Milestone charges that saved PayPal itself, with no human step, and returns { funded: true, captureId, amount, remainingTotalCap }. " +
+      "Otherwise it creates (or returns the existing) PayPal order and returns approvalUrl plus vault.why: a human must open approvalUrl and " +
+      "approve the payment. Calling it twice never charges twice. It never pays out or refunds. Client mandates only; needs \"fund\". " +
+      FUNDING_GUARANTEE,
     inputSchema: { type: "object", properties: { milestoneId: ID }, required: ["milestoneId"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     needs: "fund",
@@ -257,18 +269,32 @@ export async function callTool(ctx: McpContext, name: string, rawArgs: unknown):
       if (ctx.agent.role !== "client") return deny("wrong_role", "only a client's mandate can fund a milestone", { milestoneId: a.milestoneId });
       const found = await loadMilestone(ctx.db, a.milestoneId!);
       if (!found || !partyRole(user, found.contract)) return deny("not_found", "milestone not found");
-      const r = await callOrder(ctx, a.milestoneId!);
       const ids = { contractId: found.contract.id, milestoneId: found.milestone.id };
+      const amount = money(found.milestone.amountMinor, found.contract.currency);
+
+      // The saved-PayPal path: only with a saved PayPal and a mandate that sets fund caps. fundFromVault re-checks the
+      // whole funding guarantee under row locks; this only decides which path to take.
+      const paymentMethod = await activePaymentMethod(ctx.db, user);
+      const fallback = !paymentMethod ? ("no_saved_paypal" as const) : mandate.fundCapMinor === null || mandate.fundTotalCapMinor === null ? ("fund_cap_missing" as const) : null;
+      if (!fallback) {
+        const res = await fundFromVault({ client: paypal(), db: ctx.db }, { mandate, paymentMethod, milestone: found.milestone, contract: found.contract, via: "mcp", baselineSha: (c) => defaultBranchHead(c.repoFullName) });
+        const scrub = (text: string) => (paymentMethod?.paypalPaymentTokenId ? text.split(paymentMethod.paypalPaymentTokenId).join("[saved PayPal]") : text);
+        return vaultResult(ctx, mandate, res, ids, amount, scrub, deny);
+      }
+
+      const r = await callOrder(ctx, a.milestoneId!);
       const orderId = typeof r.body.orderId === "string" ? r.body.orderId : null;
-      if (r.status !== 200 || !orderId) return deny(String(r.body.reason ?? "route_refused"), String(r.body.error ?? `the order route answered ${r.status}`), { ...ids, extra: { status: r.status } });
+      if (r.status !== 200 || !orderId) return deny(String(r.body.reason ?? "route_refused"), String(r.body.error ?? `the order route answered ${r.status}`), { ...ids, extra: { status: r.status, vault: { used: false, reason: fallback, why: FALLBACK_TEXT[fallback] } } });
       const approvalUrl = await approvalUrlFor(orderId, ctx.origin);
-      await auditTool(ctx, "agent.fund_milestone", { ...ids, detail: { orderId } });
+      await auditTool(ctx, "agent.fund_milestone", { ...ids, detail: { orderId, source: "approval_link", vaultSkipped: fallback } });
       return ok({
         ok: true,
+        funded: false,
         orderId,
         approvalUrl,
-        amount: { amountMinor: found.milestone.amountMinor, currency: found.contract.currency },
-        next: "A human must open approvalUrl and approve the payment in PayPal. Milestone captures it only after that approval; this tool never captures and no money has moved.",
+        amount,
+        vault: { used: false, reason: fallback, why: FALLBACK_TEXT[fallback] },
+        next: `Not funded from a saved PayPal because ${FALLBACK_TEXT[fallback]}. A human must open approvalUrl and approve the payment in PayPal; Milestone captures it only after that approval. No money has moved.`,
       });
     }
     case "deliver_milestone": {
@@ -299,6 +325,98 @@ export async function callTool(ctx: McpContext, name: string, rawArgs: unknown):
     }
   }
   return refused({ error: `unknown tool ${name}`, reason: "unknown_tool" });
+}
+
+// ---------- fund_milestone: the saved-PayPal path ----------
+
+/** Why fund_milestone fell back to an approval link instead of charging the saved PayPal. */
+const FALLBACK_TEXT = {
+  no_saved_paypal: "the client has not saved a PayPal account in Milestone",
+  fund_cap_missing: "this mandate sets no fund caps, so it does not allow funding from the saved PayPal",
+} as const;
+
+/** Each funding refusal in plain words (the code is returned alongside as `reason`). */
+export const FUNDING_REFUSAL_TEXT: Record<FundingRefusal, string> = {
+  mandate_revoked: "the mandate was revoked",
+  mandate_expired: "the mandate has expired",
+  mandate_missing_action: 'the mandate does not include "fund"',
+  payment_method_missing: "the client has no saved PayPal account",
+  payment_method_not_owned: "the saved PayPal account does not belong to the mandate's user",
+  payment_method_removed: "the client removed the saved PayPal account",
+  not_contract_client: "only the contract's client can fund it",
+  contract_not_approved: "both parties have not approved this contract yet",
+  milestone_not_in_contract: "the milestone is not part of this contract",
+  milestone_not_draft: "the milestone is not waiting for funding (it is past draft)",
+  capture_in_progress: "a payment for this milestone is already in progress",
+  out_of_sequence: "an earlier milestone of this contract is still unfunded; milestones are funded in order",
+  previous_in_escrow: "another milestone of this contract still holds money in escrow; an agent funds the next one only after it settles",
+  amount_mismatch: "the charge would not be exactly the milestone amount",
+  currency_mismatch: "the contract's currency is not the mandate's currency",
+  fund_cap_missing: "the mandate sets no fund caps",
+  fund_cap_exceeded: "the milestone amount is over the mandate's per-milestone fund cap",
+  fund_total_cap_exceeded: "funding this would take the mandate over its total fund cap",
+};
+
+type Deny = (reason: string, error: string, o?: { contractId?: string; milestoneId?: string; extra?: Json }) => Promise<ToolResult>;
+
+/** What the agent is told about a saved-PayPal charge. Never names the vault (payment token) id. */
+async function vaultResult(ctx: McpContext, mandate: AgentMandate, res: VaultFundResult, ids: { contractId: string; milestoneId: string }, amount: ReturnType<typeof money>, scrub: (s: string) => string, deny: Deny): Promise<ToolResult> {
+  const extra = { via: "saved_paypal" };
+  if (!res.ok) {
+    switch (res.kind) {
+      case "refused":
+        return deny(res.reason, FUNDING_REFUSAL_TEXT[res.reason], { ...ids, extra: { ...extra, next: "Nothing was charged. The client can still fund it themselves with the Fund button in Milestone." } });
+      case "paypal_error":
+        return deny("paypal_error", scrub(`PayPal did not complete the charge: ${res.error}`), { ...ids, extra: { ...extra, retryable: res.retryable, next: res.retryable ? "The outcome is unknown; calling fund_milestone again replays the same request and never charges twice." : "PayPal refused the charge; nothing was charged." } });
+      case "not_completed":
+        return deny("paypal_not_completed", `PayPal created the order but did not capture it (${res.orderStatus}); nothing was charged`, { ...ids, extra });
+      case "mismatch":
+        return deny("capture_mismatch", "PayPal captured an amount that does not match the milestone; an operator will look at it", { ...ids, extra });
+      case "rejected":
+        return deny("rejected", scrub(res.error), { ...ids, extra });
+    }
+  }
+  const total = mandate.fundTotalCapMinor ?? 0;
+  const remainingTotalCap = money(Math.max(0, total - (await mandateFundedMinor(ctx.db, mandate.id))), mandate.currency);
+  await auditTool(ctx, "agent.fund_milestone", { ...ids, detail: { source: "saved_paypal", kind: res.kind, status: res.status, captureId: res.captureId, requestId: res.requestId, amountMinor: res.amountMinor, currency: res.currency, replayed: res.replayed } });
+  if (res.kind === "pending") {
+    return ok({
+      ok: true,
+      funded: false,
+      pending: true,
+      status: res.status,
+      captureId: res.captureId,
+      amount,
+      remainingTotalCap,
+      via: "saved_paypal",
+      next: "PayPal is holding the payment as pending. The milestone becomes funded when PayPal confirms it; do not call fund_milestone again for it.",
+    });
+  }
+  if (res.kind === "already") {
+    return ok({
+      ok: true,
+      funded: true,
+      already: true,
+      status: res.status,
+      captureId: res.captureId,
+      amount,
+      remainingTotalCap,
+      via: "saved_paypal",
+      replayed: true,
+      next: `This milestone was already funded from the client's saved PayPal earlier (it is now ${res.status}). Nothing was charged now.`,
+    });
+  }
+  return ok({
+    ok: true,
+    funded: true,
+    status: res.status,
+    captureId: res.captureId,
+    amount,
+    remainingTotalCap,
+    via: "saved_paypal",
+    replayed: res.replayed,
+    next: "Funded from the client's saved PayPal. The money is held in Milestone's escrow and is released to the freelancer only when the work is verified.",
+  });
 }
 
 /** The buyer-facing approval link for an order: PayPal's own link (simulated or sandbox), else the checkout URL. */

@@ -173,4 +173,16 @@ describe.skipIf(process.env.MILESTONE_E2E !== "1")("mandate lifecycle against Po
     await expect(createMandate(db, { ...base, currency: "usd" })).rejects.toThrow();
     await expect(createMandate(db, { ...base, expiresAt: now })).rejects.toThrow();
   });
+
+  it("stores the fund caps and auto-fund flag, defaulting to no vault funding, and validates them", async () => {
+    const base = { userId, agentName: "t", currency: "USD", expiresAt: later, now };
+    const { mandate: plain } = await createMandate(db, { ...base, actions: ["read", "fund"] });
+    expect(plain).toMatchObject({ fundCapMinor: null, fundTotalCapMinor: null, autoFundNext: false });
+    const { mandate: funded } = await createMandate(db, { ...base, actions: ["read", "fund"], fundCapMinor: 20_000, fundTotalCapMinor: 50_000, autoFundNext: true });
+    expect(funded).toMatchObject({ fundCapMinor: 20_000, fundTotalCapMinor: 50_000, autoFundNext: true });
+    await expect(createMandate(db, { ...base, actions: ["read", "fund"], fundCapMinor: -1, fundTotalCapMinor: 5 })).rejects.toThrow(/fundCapMinor/);
+    await expect(createMandate(db, { ...base, actions: ["read", "fund"], fundCapMinor: 1, fundTotalCapMinor: 2.5 })).rejects.toThrow(/fundTotalCapMinor/);
+    await expect(createMandate(db, { ...base, actions: ["read"], fundCapMinor: 1, fundTotalCapMinor: 1, autoFundNext: true })).rejects.toThrow(/autoFundNext/);
+    await expect(createMandate(db, { ...base, actions: ["read", "fund"], fundCapMinor: 1, autoFundNext: true })).rejects.toThrow(/autoFundNext/);
+  });
 });

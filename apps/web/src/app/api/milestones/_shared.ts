@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { PayPalError, captureFunding, getOrder, moneyContextFor, type MoneyContext } from "@milestone/money";
 import { defaultBranchHead } from "@milestone/verify";
-import { AUDIT_EVENTS, OP_KINDS, accounts, asRecord, asString, audit, loadMilestone, milestones, postTransaction, recordOpResult, requestIdFor, toPayPalValue, transition, type Db, type MilestoneStatus } from "@milestone/core";
+import { OP_KINDS, VAULT_CHARGE_OP_KIND, asRecord, asString, fundMilestoneFromCapture, isCaptureInfo, loadMilestone, milestones, paypalOps, recordOpResult, requestIdFor, type CaptureInfo, type Db, type FundResult } from "@milestone/core";
 import { jsonError } from "@/lib/http";
 import { paypal } from "@/lib/paypal";
 
@@ -23,93 +23,18 @@ export function paypalErrorResponse(e: unknown) {
 
 // ---------- Funding: shared by the capture route and the PayPal webhook ----------
 
-/** The parts of a PayPal capture we act on (order capture response or PAYMENT.CAPTURE.* resource). */
-export interface CaptureInfo {
-  id: string;
-  status: string;
-  amount: { value: string; currency_code: string };
-}
-
-export type FundResult =
-  | { kind: "funded"; status: "funded"; captureId: string }
-  /** Nothing to do: the milestone is already past draft (repeated onApprove, double click, redelivered webhook). */
-  | { kind: "already"; status: MilestoneStatus; captureId: string | null }
-  /** PayPal holds the capture as PENDING; PAYMENT.CAPTURE.COMPLETED finishes the job. */
-  | { kind: "pending"; status: "draft"; captureId: string; captureStatus: string }
-  | { kind: "mismatch"; captureId: string }
-  | { kind: "rejected"; httpStatus: 404 | 409; error: string }
-  | { kind: "paypal_error"; error: unknown };
-
-export function isCaptureInfo(v: unknown): v is CaptureInfo {
-  const c = v as Partial<CaptureInfo> | null;
-  return !!c && typeof c.id === "string" && typeof c.status === "string" && !!c.amount && typeof c.amount.value === "string" && typeof c.amount.currency_code === "string";
-}
+/** The capture shape, the funding outcome and its guard live in @milestone/core; re-exported for existing importers. */
+export { isCaptureInfo };
+export type { CaptureInfo, FundResult };
 
 /**
- * Funds a draft milestone from a capture: amount check, then under SELECT ... FOR UPDATE on the milestone row
- * the capture id, the client -> held ledger entry (skipped when one with this capture id exists) and draft -> funded.
- * A PENDING capture only records its id. Idempotent; safe to call from the route and the webhook concurrently.
+ * Funds a draft milestone from a capture through core's fundMilestoneFromCapture (the same booking the agent's
+ * saved-PayPal charge uses): amount check, then under SELECT ... FOR UPDATE on the milestone row the capture id, the
+ * client -> held ledger entry (skipped when one with this capture id exists) and draft -> funded. A PENDING capture
+ * only records its id. Idempotent; safe to call from the route and the webhook concurrently.
  */
-export async function fundFromCapture(db: Db, milestoneId: string, capture: CaptureInfo, actor: string, orderId: string | null = null): Promise<FundResult> {
-  const found = await loadMilestone(db, milestoneId);
-  if (!found) return { kind: "rejected", httpStatus: 404, error: "milestone not found" };
-  const { milestone: m, contract: c } = found;
-  if (m.status !== "draft") return { kind: "already", status: m.status, captureId: m.paypalCaptureId };
-
-  const expected = toPayPalValue(m.amountMinor, c.currency);
-  if (capture.amount.currency_code !== c.currency || capture.amount.value !== expected) {
-    await audit(db, {
-      actor: "paypal",
-      event: AUDIT_EVENTS.milestoneCaptureMismatch,
-      milestoneId: m.id,
-      contractId: c.id,
-      detail: { captureId: capture.id, expected: { value: expected, currency: c.currency }, got: capture.amount },
-    });
-    return { kind: "mismatch", captureId: capture.id };
-  }
-
-  if (capture.status !== "COMPLETED") {
-    const recorded = await db.transaction(async (tx) => {
-      const [row] = await tx.select({ status: milestones.status, captureId: milestones.paypalCaptureId }).from(milestones).where(eq(milestones.id, m.id)).for("update");
-      if (!row || row.status !== "draft") return row ?? null;
-      if (row.captureId !== capture.id) {
-        await tx.update(milestones).set({ paypalCaptureId: capture.id }).where(eq(milestones.id, m.id));
-        await audit(tx, { actor: "paypal", event: AUDIT_EVENTS.milestoneCapturePending, milestoneId: m.id, contractId: c.id, detail: { captureId: capture.id, captureStatus: capture.status } });
-      }
-      return null;
-    });
-    if (recorded) return { kind: "already", status: recorded.status, captureId: recorded.captureId };
-    return { kind: "pending", status: "draft", captureId: capture.id, captureStatus: capture.status };
-  }
-
-  // Outside the row lock: a network call (the default branch head, as the verifier's tamper-check baseline; null
-  // without GITHUB_TOKEN or on any GitHub failure). Recorded only by the call that moves the milestone to funded.
-  const baselineSha = await defaultBranchHead(c.repoFullName);
-
-  return db.transaction(async (tx): Promise<FundResult> => {
-    const [row] = await tx.select({ status: milestones.status, captureId: milestones.paypalCaptureId }).from(milestones).where(eq(milestones.id, m.id)).for("update");
-    if (!row) throw new Error(`milestone ${m.id} disappeared`);
-    if (row.status !== "draft") return { kind: "already", status: row.status, captureId: row.captureId };
-
-    await tx.update(milestones).set({ paypalCaptureId: capture.id, ...(baselineSha ? { baselineSha } : {}) }).where(eq(milestones.id, m.id));
-    const posted = await tx.query.ledgerEntries.findFirst({ where: (l) => eq(l.ref, capture.id) });
-    if (!posted) {
-      await postTransaction(tx, {
-        ref: capture.id,
-        currency: c.currency,
-        entries: [
-          { account: accounts.client(c.clientId), amountMinor: m.amountMinor, direction: "debit" },
-          { account: accounts.held(m.id), amountMinor: m.amountMinor, direction: "credit" },
-        ],
-      });
-    }
-    await transition(tx, m.id, "funded", {
-      actor,
-      event: AUDIT_EVENTS.milestoneFunded,
-      detail: { orderId: orderId ?? m.paypalOrderId, captureId: capture.id, amountMinor: m.amountMinor, currency: c.currency, baselineSha },
-    });
-    return { kind: "funded", status: "funded", captureId: capture.id };
-  });
+export function fundFromCapture(db: Db, milestoneId: string, capture: CaptureInfo, actor: string, orderId: string | null = null): Promise<FundResult> {
+  return fundMilestoneFromCapture(db, milestoneId, capture, actor, { orderId, baselineSha: (c) => defaultBranchHead(c.repoFullName) });
 }
 
 /**
@@ -125,7 +50,17 @@ export async function captureAndFund(db: Db, milestoneId: string, orderId: strin
   if (c.status !== "active") return { kind: "rejected", httpStatus: 409, error: `contract is ${c.status}` };
   if (!m.paypalOrderId || m.paypalOrderId !== orderId) return { kind: "rejected", httpStatus: 409, error: "orderId does not match this milestone's order" };
 
-  const rid = await requestIdFor(db, OP_KINDS.capture, m.id);
+  // The client's agent may be charging the saved PayPal for this milestone (fundFromVault holds the milestone row
+  // FOR UPDATE while it checks for a capture op and claims its vault_charge op). Under the same row lock: refuse while
+  // a vault charge exists that did not fail, else claim the capture op, which makes the agent's charge refuse
+  // (capture_in_progress). Either way at most one of the two charges the client.
+  const rid = await db.transaction(async (tx) => {
+    await tx.select({ id: milestones.id }).from(milestones).where(eq(milestones.id, m.id)).for("update");
+    const [vault] = await tx.select({ status: paypalOps.status }).from(paypalOps).where(and(eq(paypalOps.kind, VAULT_CHARGE_OP_KIND), eq(paypalOps.key, m.id)));
+    if (vault && vault.status !== "failed") return null;
+    return requestIdFor(tx, OP_KINDS.capture, m.id);
+  });
+  if (!rid) return { kind: "rejected", httpStatus: 409, error: "the client's agent is already funding this milestone from the saved PayPal" };
   let capture: CaptureInfo;
   try {
     ({ capture } = await captureFunding(moneyContext(db), m.id, orderId));

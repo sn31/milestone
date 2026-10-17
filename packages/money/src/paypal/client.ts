@@ -67,7 +67,7 @@ export class PayPalClient {
     return { accessToken: body.access_token, expiresIn: body.expires_in ?? 900 };
   }
 
-  async request<T>(method: "GET" | "POST" | "PATCH", path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
+  async request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
     return this.send<T>(method, path, body === undefined ? null : JSON.stringify(body), "application/json", opts);
   }
 
@@ -77,7 +77,7 @@ export class PayPalClient {
     return this.send<T>("POST", path, body, contentType, opts);
   }
 
-  private async send<T>(method: "GET" | "POST" | "PATCH", path: string, body: string | Uint8Array<ArrayBuffer> | null, contentType: string, opts: RequestOptions): Promise<T> {
+  private async send<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body: string | Uint8Array<ArrayBuffer> | null, contentType: string, opts: RequestOptions): Promise<T> {
     if (method === "POST" && !opts.requestId && isMoneyPath(path)) {
       throw new Error(`PayPal-Request-Id is required for ${path}`);
     }

@@ -37,11 +37,11 @@ Seed data: three active contracts. "Signup flow for a SaaS landing page" (`ctr_d
 
 ## Agent quick start
 
-1. Run the app, pick the client (Casey) in the role switcher and open `/agents`. Create a mandate: the actions the agent may take (for example read, fund, approve, hold), an approval cap, and an expiry. Copy the `msa_...` token; it is shown once. (`pnpm db:seed -- --reset --showcase` also creates one for Casey and prints its token.)
+1. Run the app, pick the client (Casey) in the role switcher and open `/agents`. Save a PayPal once (the saved-PayPal card; in simulated mode the approval is one click). Then create a mandate: the actions the agent may take (for example read, fund, approve, hold), an approval cap, fund caps (per milestone and in total) and an expiry; tick auto-fund to have the next milestone funded after each release. Copy the `msa_...` token; it is shown once. (`pnpm db:seed -- --reset --showcase` also creates one for Casey and prints its token.)
 2. Connect an MCP client with that token, as described in [docs/mcp.md](docs/mcp.md). For Claude Desktop, add `scripts/milestone-mcp.mjs` as a stdio server with `MILESTONE_URL` and `MILESTONE_AGENT_TOKEN`; for Cursor, point it at `http://localhost:3000/api/mcp` with an `Authorization: Bearer msa_...` header.
 3. Or use the built-in console at `/agents/console` (needs a model): pick the mandate, paste its token, and talk to your agent. It uses the same MCP server, plus PayPal's MCP server read-only.
 
-An agent's approve is accepted only when the policy already decided release for the latest delivery, every required criterion passed and the amount is within the mandate's cap. No agent tool captures, pays out or refunds. Every call, accepted or refused, is in the audit log as `agent:<name> for <user>`, and `/agents` shows it. Revoking the mandate stops the agent on its next call.
+An agent funds only the next draft milestone of an approved contract, for exactly its amount and currency, within the mandate's fund caps, from a saved PayPal that belongs to its user; the funding guarantee is in [docs/mcp.md](docs/mcp.md). An agent's approve is accepted only when the policy already decided release for the latest delivery, every required criterion passed and the amount is within the mandate's cap. No agent tool pays out or refunds. Every call, accepted or refused, is in the audit log as `agent:<name> for <user>`, and `/agents` shows it. Revoking the mandate stops the agent on its next call.
 
 ## Documentation
 

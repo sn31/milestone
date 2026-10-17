@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
-import { UploadPayload, advances, decisionDeliveryId, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { AUDIT_EVENTS, UploadPayload, advances, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { advanceRepayment, paypalMode } from "@milestone/money";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { isContractClient, isContractFreelancer, type Actor } from "@/lib/session";
 import { auditTime } from "@/lib/events";
+import { agentNameOf } from "@/lib/agent/data";
 import { formatMoney, humanize, truncateMiddle } from "@/lib/format";
 import { AdvanceOffer } from "@/components/advance-offer";
 import { DeliverForm } from "@/components/deliver-form";
@@ -402,6 +403,7 @@ export function MilestoneActions({
     <div className="grid gap-3.5">
       {/* Which step only matters while the money is in escrow: a draft has everything ahead, a payout everything behind. */}
       {status !== "draft" && status !== "released" && status !== "partial_released" ? <LifecycleTrack status={status} /> : null}
+      {status !== "draft" && status !== "released" && status !== "partial_released" ? <VaultFundedBy milestone={milestone} /> : null}
       {body}
     </div>
   );
@@ -430,4 +432,46 @@ async function AdvanceRepaid({ milestone, repaidMinor, currency }: { milestone: 
     // no database (tests, previews): the plain note stands
   }
   return <>{text}</>;
+}
+
+/**
+ * "Funded by Casey's agent from saved PayPal": one line on a station whose money came from a charge of the client's
+ * saved PayPal by an agent, read from the milestone's paypal.vault_charge audit row (its actor is the agent, its detail
+ * names the mandate). Nothing for a station funded through checkout.
+ */
+async function VaultFundedBy({ milestone }: { milestone: MilestoneRow }) {
+  let line: { name: string; via: string | null; at: Date } | null = null;
+  try {
+    const db = getDb();
+    const [row] = await db
+      .select({ actor: auditLog.actor, detail: auditLog.detail, createdAt: auditLog.createdAt })
+      .from(auditLog)
+      .where(and(eq(auditLog.milestoneId, milestone.id), eq(auditLog.event, AUDIT_EVENTS.paypalVaultCharge)))
+      .orderBy(desc(auditLog.createdAt))
+      .limit(1);
+    if (row && isAgentActor(row.actor)) {
+      const d = (row.detail ?? {}) as { mandateId?: unknown; via?: unknown };
+      let name = agentNameOf(row.actor);
+      if (typeof d.mandateId === "string") {
+        const [m] = await db.select({ agentName: agentMandates.agentName }).from(agentMandates).where(eq(agentMandates.id, d.mandateId)).limit(1);
+        if (m) name = m.agentName;
+      }
+      line = { name, via: d.via === "auto_fund" ? "auto-fund on release" : d.via === "mcp" ? "Milestone MCP" : null, at: row.createdAt };
+    }
+  } catch {
+    // no database (tests, previews): nothing to say
+  }
+  if (!line) return null;
+  return (
+    <p data-tone="funded" data-testid="vault-funded-by" className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-[13.5px] leading-relaxed text-fg-muted">
+      <span aria-hidden className="size-1.5 shrink-0 translate-y-[-1px] rounded-full bg-tone" />
+      <span className="min-w-0">
+        Funded by <span className="text-fg">{line.name}</span> from saved PayPal
+      </span>
+      <span className="font-mono text-[11px] text-fg-faint tabular">
+        {line.via ? `${line.via} · ` : ""}
+        {auditTime(line.at)}
+      </span>
+    </p>
+  );
 }

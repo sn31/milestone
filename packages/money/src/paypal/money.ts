@@ -98,3 +98,49 @@ export function acceptClaim(client: PayPalClient, disputeId: string, input: { no
     { requestId: input.requestId },
   );
 }
+
+export interface VaultChargeInput {
+  /** From the milestone's vault_charge op, claimed before this call. */
+  requestId: string;
+  /** The saved PayPal's payment token id. */
+  vaultId: string;
+  /** Becomes purchase_units[0].reference_id. */
+  milestoneId: string;
+  amountMinor: number;
+  currency: string;
+  description?: string;
+}
+
+/**
+ * Funds a milestone from the client's saved PayPal: POST /v2/checkout/orders with intent CAPTURE and
+ * payment_source.paypal.vault_id, no buyer interaction. PayPal answers COMPLETED with the capture in the same response
+ * (asked for with Prefer: return=representation). The capture may itself be PENDING (not funded yet: the
+ * PAYMENT.CAPTURE.COMPLETED webhook finishes it). capture is null when PayPal created the order without capturing
+ * (e.g. PAYER_ACTION_REQUIRED): nothing moved.
+ */
+export async function chargeVault(client: PayPalClient, input: VaultChargeInput): Promise<{ order: Order; capture: Capture | null }> {
+  if (!input.requestId) throw new Error("PayPal-Request-Id is required for a vault charge");
+  if (!input.vaultId) throw new Error("vault_id is required");
+  if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0) throw new Error(`bad vault charge amount ${input.amountMinor}`);
+  const order = await client.request<Order>(
+    "POST",
+    "/v2/checkout/orders",
+    {
+      intent: "CAPTURE",
+      purchase_units: [
+        {
+          reference_id: input.milestoneId,
+          // Also on the capture resource of PAYMENT.CAPTURE.* webhooks (reference_id is not), so a webhook can find the
+          // milestone even when this call's answer was lost.
+          custom_id: input.milestoneId,
+          description: input.description ?? "Milestone escrow funding",
+          amount: { currency_code: input.currency, value: toPayPalValue(input.amountMinor, input.currency) },
+        },
+      ],
+      payment_source: { paypal: { vault_id: input.vaultId } },
+    },
+    { requestId: input.requestId, headers: { Prefer: "return=representation" } },
+  );
+  const capture = order.purchase_units?.[0]?.payments?.captures?.[0];
+  return { order, capture: capture ? (capture as Capture) : null };
+}

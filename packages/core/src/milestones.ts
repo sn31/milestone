@@ -1,8 +1,9 @@
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import type { Executor } from "./db.ts";
+import type { Db, Executor } from "./db.ts";
+import { accounts, ledgerRefs, postTransaction } from "./ledger.ts";
 import { auditLog, milestones } from "./schema.ts";
-import type { CriterionSpec, MilestoneStatus, PolicyAction } from "./schemas.ts";
+import { toPayPalValue, type CriterionSpec, type MilestoneStatus, type PolicyAction } from "./schemas.ts";
 
 // ---------- States ----------
 
@@ -143,6 +144,13 @@ export const AUDIT_EVENTS = {
   disputeEvidenceFailed: "dispute.evidence_failed",
   disputeClaimAccepted: "dispute.claim_accepted",
   disputeAcceptFailed: "dispute.accept_failed",
+  // Saved PayPal (vault) and agent funding
+  vaultSetupStarted: "vault.setup_started",
+  paymentMethodSaved: "vault.payment_method_saved",
+  paymentMethodRemoved: "vault.payment_method_removed",
+  vaultFundRefused: "vault.fund_refused",
+  paypalVaultCharge: "paypal.vault_charge",
+  paypalVaultChargeError: "paypal.vault_charge_error",
 } as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[keyof typeof AUDIT_EVENTS];
 
@@ -234,6 +242,12 @@ export async function transition(
 
 // ---------- Loaders ----------
 
+/** The contract's next unfunded milestone: its lowest-seq milestone still in draft; null when none is left. */
+export async function nextDraftMilestone(q: Executor, contractId: string): Promise<typeof milestones.$inferSelect | null> {
+  const [row] = await q.select().from(milestones).where(and(eq(milestones.contractId, contractId), eq(milestones.status, "draft"))).orderBy(asc(milestones.seq)).limit(1);
+  return row ?? null;
+}
+
 type MilestoneRow = typeof milestones.$inferSelect;
 
 /** A milestone with its contract; null when either is missing. */
@@ -258,4 +272,109 @@ export async function loadDeliveryContext(q: Executor, deliveryId: string) {
   const { contract, criteria: rows, ...milestone } = m;
   const criteria: CriterionSpec[] = rows.map((r) => ({ id: r.id, kind: r.kind, description: r.description, spec: r.spec, required: r.required }));
   return { delivery, milestone: milestone satisfies MilestoneRow, contract, criteria };
+}
+
+// ---------- Funding (shared by the capture route, the PayPal webhook and the vault charge) ----------
+
+/** The parts of a PayPal capture we act on (order capture response or PAYMENT.CAPTURE.* resource). */
+export interface CaptureInfo {
+  id: string;
+  status: string;
+  amount: { value: string; currency_code: string };
+}
+
+export type FundResult =
+  | { kind: "funded"; status: "funded"; captureId: string }
+  /** Nothing to do: the milestone is already past draft (repeated onApprove, double click, redelivered webhook). */
+  | { kind: "already"; status: MilestoneStatus; captureId: string | null }
+  /** PayPal holds the capture as PENDING; PAYMENT.CAPTURE.COMPLETED finishes the job. */
+  | { kind: "pending"; status: "draft"; captureId: string; captureStatus: string }
+  | { kind: "mismatch"; captureId: string }
+  | { kind: "rejected"; httpStatus: 404 | 409; error: string }
+  | { kind: "paypal_error"; error: unknown };
+
+export function isCaptureInfo(v: unknown): v is CaptureInfo {
+  const c = v as Partial<CaptureInfo> | null;
+  return !!c && typeof c.id === "string" && typeof c.status === "string" && !!c.amount && typeof c.amount.value === "string" && typeof c.amount.currency_code === "string";
+}
+
+export interface FundFromCaptureOptions {
+  /** The PayPal order the capture belongs to; recorded on the milestone (and in the funded audit row). */
+  orderId?: string | null;
+  /**
+   * The verifier's tamper-check baseline (the default branch head), resolved outside the row lock and only on the path
+   * that moves the milestone to funded. The caller supplies it (a network call); omitted, none is recorded.
+   */
+  baselineSha?: (contract: { repoFullName: string | null }) => Promise<string | null>;
+  /** Extra fields for the milestone.funded audit row (e.g. the mandate and payment method of a vault charge). */
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * Funds a draft milestone from a capture: amount check, then under SELECT ... FOR UPDATE on the milestone row the
+ * capture id (and order id), the client -> held ledger entry (skipped when one with this capture id exists) and
+ * draft -> funded, audited as `actor`. A PENDING capture only records its id. Idempotent; safe to call from the capture
+ * route, the webhook and the vault charge concurrently. Makes no PayPal call.
+ */
+export async function fundMilestoneFromCapture(db: Db, milestoneId: string, capture: CaptureInfo, actor: string, opts: FundFromCaptureOptions = {}): Promise<FundResult> {
+  const found = await loadMilestone(db, milestoneId);
+  if (!found) return { kind: "rejected", httpStatus: 404, error: "milestone not found" };
+  const { milestone: m, contract: c } = found;
+  if (m.status !== "draft") return { kind: "already", status: m.status, captureId: m.paypalCaptureId };
+  const orderId = opts.orderId ?? null;
+
+  const expected = toPayPalValue(m.amountMinor, c.currency);
+  if (capture.amount.currency_code !== c.currency || capture.amount.value !== expected) {
+    await audit(db, {
+      actor: "paypal",
+      event: AUDIT_EVENTS.milestoneCaptureMismatch,
+      milestoneId: m.id,
+      contractId: c.id,
+      detail: { captureId: capture.id, expected: { value: expected, currency: c.currency }, got: capture.amount },
+    });
+    return { kind: "mismatch", captureId: capture.id };
+  }
+
+  if (capture.status !== "COMPLETED") {
+    const recorded = await db.transaction(async (tx) => {
+      const [row] = await tx.select({ status: milestones.status, captureId: milestones.paypalCaptureId }).from(milestones).where(eq(milestones.id, m.id)).for("update");
+      if (!row || row.status !== "draft") return row ?? null;
+      if (row.captureId !== capture.id) {
+        await tx.update(milestones).set({ paypalCaptureId: capture.id, ...(orderId ? { paypalOrderId: orderId } : {}) }).where(eq(milestones.id, m.id));
+        await audit(tx, { actor: "paypal", event: AUDIT_EVENTS.milestoneCapturePending, milestoneId: m.id, contractId: c.id, detail: { captureId: capture.id, captureStatus: capture.status } });
+      }
+      return null;
+    });
+    if (recorded) return { kind: "already", status: recorded.status, captureId: recorded.captureId };
+    return { kind: "pending", status: "draft", captureId: capture.id, captureStatus: capture.status };
+  }
+
+  // Outside the row lock: a network call. Recorded only by the call that moves the milestone to funded.
+  const baselineSha = opts.baselineSha ? await opts.baselineSha(c).catch(() => null) : null;
+
+  return db.transaction(async (tx): Promise<FundResult> => {
+    const [row] = await tx.select({ status: milestones.status, captureId: milestones.paypalCaptureId }).from(milestones).where(eq(milestones.id, m.id)).for("update");
+    if (!row) throw new Error(`milestone ${m.id} disappeared`);
+    if (row.status !== "draft") return { kind: "already", status: row.status, captureId: row.captureId };
+
+    await tx.update(milestones).set({ paypalCaptureId: capture.id, ...(orderId ? { paypalOrderId: orderId } : {}), ...(baselineSha ? { baselineSha } : {}) }).where(eq(milestones.id, m.id));
+    const ref = ledgerRefs.capture(capture.id);
+    const posted = await tx.query.ledgerEntries.findFirst({ where: (l) => eq(l.ref, ref) });
+    if (!posted) {
+      await postTransaction(tx, {
+        ref,
+        currency: c.currency,
+        entries: [
+          { account: accounts.client(c.clientId), amountMinor: m.amountMinor, direction: "debit" },
+          { account: accounts.held(m.id), amountMinor: m.amountMinor, direction: "credit" },
+        ],
+      });
+    }
+    await transition(tx, m.id, "funded", {
+      actor,
+      event: AUDIT_EVENTS.milestoneFunded,
+      detail: { ...opts.detail, orderId: orderId ?? m.paypalOrderId, captureId: capture.id, amountMinor: m.amountMinor, currency: c.currency, baselineSha },
+    });
+    return { kind: "funded", status: "funded", captureId: capture.id };
+  });
 }

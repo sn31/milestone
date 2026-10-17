@@ -96,6 +96,13 @@ export function summarizeResult(text: string, isError: boolean, max = 120): stri
       const inner = summarizeResult(JSON.stringify(v.data), false, max);
       return oneLine(`${v.simulated === true ? "simulated · " : ""}${inner}`, max);
     }
+    if (v.ok === true && v.funded === true && v.already === true) return oneLine(`already funded earlier from your saved PayPal · nothing charged now${typeof v.status === "string" ? ` · ${v.status}` : ""}`, max);
+    if (v.ok === true && v.funded === true) {
+      const amt = isRecord(v.amount) && typeof v.amount.value === "string" ? ` ${v.amount.value} ${String(v.amount.currency ?? "")}`.trimEnd() : "";
+      const left = isRecord(v.remainingTotalCap) && typeof v.remainingTotalCap.value === "string" ? ` · ${v.remainingTotalCap.value} fund cap left` : "";
+      return oneLine(`funded${amt} from your saved PayPal into escrow${left}`, max);
+    }
+    if (v.ok === true && v.pending === true) return oneLine("charged · PayPal holds the payment as pending; funded when PayPal confirms", max);
     if (typeof v.approvalUrl === "string") return oneLine("order created · waiting for you to approve in PayPal (no money moved)", max);
     const status = statusOf(v);
     if (status) {
@@ -169,16 +176,21 @@ export function formatArgs(args: unknown, max = 90): string {
 }
 
 /** What a reply may claim, and the tool call (with its action) that must have succeeded in the same turn. */
-const CLAIMS: Array<{ word: RegExp; tool: string; action?: string; says: string }> = [
+const CLAIMS: Array<{ word: RegExp; tool: string; action?: string; says: string; funded?: true }> = [
   { word: /\b(i|we)('ve| have)? (just )?approved\b|\bapproval (was )?(accepted|submitted)\b|\bhas been approved\b/i, tool: "respond_to_review", action: "approve", says: "approve" },
   { word: /\b(i|we)('ve| have)? (just )?(held|vetoed|put .* on hold)\b|\bhas been (held|vetoed)\b/i, tool: "respond_to_review", action: "hold", says: "hold" },
-  { word: /\b(i|we)('ve| have)? (just )?(funded|started funding)\b/i, tool: "fund_milestone", says: "fund" },
+  // "funded" needs a fund_milestone that actually funded (a status past draft); an approval link only "started funding".
+  { word: /\b(i|we)('ve| have)? (just )?funded\b/i, tool: "fund_milestone", says: "fund", funded: true },
+  { word: /\b(i|we)('ve| have)? (just )?started funding\b/i, tool: "fund_milestone", says: "fund" },
   { word: /\b(i|we)('ve| have)? (just )?drafted\b/i, tool: "draft_contract", says: "draft" },
 ];
 /** A sentence clause that denies money moved ("No money has moved yet", "it has not been released") is not a claim. */
 const NEGATED = /\b(no|not|never|nothing|hasn't|has not|isn't|wasn't)\b[^.!?;]*?\b(moved|released|paid( out)?|sent|completed)\b/gi;
 const withoutNegations = (reply: string) => reply.replace(NEGATED, " ");
 const MONEY_CLAIM = /\b(has been|was|is now|been) (released|paid( out)?)\b|\bpayment (has been )?(sent|completed)\b|\bmoney (has )?moved\b/i;
+/** Claims a successful saved-PayPal funding backs (money moved into escrow), but never a release or payout. */
+const ESCROW_CLAIM = /\bpayment (has been )?completed\b|\bmoney (has )?moved\b/i;
+const RELEASE_CLAIM = /\b(has been|was|is now|been) (released|paid( out)?)\b|\bpayment (has been )?sent\b/i;
 
 export interface CallRecord {
   tool: string;
@@ -195,10 +207,13 @@ export interface CallRecord {
 export function claimCheck(reply: string, calls: readonly CallRecord[]): string | null {
   for (const c of CLAIMS) {
     if (!c.word.test(reply)) continue;
-    const backed = calls.some((k) => k.ok && k.tool === c.tool && (!c.action || k.args.action === c.action));
+    const backed = calls.some((k) => k.ok && k.tool === c.tool && (!c.action || k.args.action === c.action) && (!c.funded || (k.status !== null && k.status !== "draft")));
     if (!backed) return `Not done: no successful ${c.tool}${c.action ? ` "${c.action}"` : ""} call was made in this turn, so nothing was ${c.says === "fund" ? "funded" : c.says === "draft" ? "drafted" : c.says === "hold" ? "held" : "approved"}.`;
   }
-  if (MONEY_CLAIM.test(withoutNegations(reply)) && !calls.some((k) => k.ok && k.tool === "get_milestone" && (k.status === "released" || k.status === "partial_released"))) {
+  const text = withoutNegations(reply);
+  const fundedNow = calls.some((k) => k.ok && k.tool === "fund_milestone" && k.status === "funded");
+  const escrowOnly = fundedNow && ESCROW_CLAIM.test(text) && !RELEASE_CLAIM.test(text);
+  if (MONEY_CLAIM.test(text) && !escrowOnly && !calls.some((k) => k.ok && k.tool === "get_milestone" && (k.status === "released" || k.status === "partial_released"))) {
     return "Not confirmed: no get_milestone call in this turn shows the milestone released. A queued release is not a payment until PayPal confirms it.";
   }
   return null;

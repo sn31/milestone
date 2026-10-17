@@ -9,8 +9,12 @@ export type { ReceiptInput } from "./paypal/invoices.ts";
 export { verifyWebhookSignature, parsePayoutItemEvent, parseRefundEvent, parsePayoutBatchEvent } from "./paypal/webhooks.ts";
 export type { WebhookEvent, PayoutItemEvent, RefundEvent, PayoutBatchEvent } from "./paypal/webhooks.ts";
 // Simulated PayPal (PAYPAL_MODE=simulated): local loop and demo-day backup. createPayPalClient picks the client.
-export { createPayPalClient, createSimulatedPayPalClient, simulatedFetch, configureSimulator, resetSimulator, isSimulatedWebhook, simulatedWebhookSecret, SIMULATED_WEBHOOK_HEADER, approveSimulatedOrder, simulatedOrder, failNextSimulatedPayout, armedSimulatedFailures } from "./paypal/simulated.ts";
-export type { SimulatorOptions, SimulatedOrderSummary } from "./paypal/simulated.ts";
+export { createPayPalClient, createSimulatedPayPalClient, simulatedFetch, configureSimulator, resetSimulator, isSimulatedWebhook, simulatedWebhookSecret, SIMULATED_WEBHOOK_HEADER, approveSimulatedOrder, simulatedOrder, failNextSimulatedPayout, armedSimulatedFailures, approveSimulatedSetupToken, simulatedSetupToken, armSimulatedVaultCharge, SHOWCASE_VAULT_PREFIX } from "./paypal/simulated.ts";
+export type { SimulatorOptions, SimulatedOrderSummary, SimulatedSetupTokenSummary } from "./paypal/simulated.ts";
+// Saved PayPal (Payment Method Tokens v3): setup and payment tokens. Not money calls; the vault CHARGE is chargeVault in
+// ./paypal/money.ts, reached only through fundFromVault below.
+export { createSetupToken, getSetupToken, createPaymentToken, getPaymentToken, deletePaymentToken, startVaultSetup, completeVaultSetup, removeVaultPaymentMethod } from "./paypal/vault.ts";
+export type { SetupTokenInput, SetupTokenResponse, PaymentTokenResponse, VaultUsagePattern, CompleteVaultSetupResult } from "./paypal/vault.ts";
 // PayPal mode and payout receiver live in @milestone/core (env.ts); re-exported for existing importers.
 export { paypalMode, payoutReceiver } from "@milestone/core";
 export type { PayPalMode } from "@milestone/core";
@@ -27,8 +31,11 @@ export { priceAdvance, DEFAULT_PRICING } from "./policy/pricing.ts";
 export type { PricingParams, FreelancerRecord, ClientRecord, MilestoneForPricing, AdvanceOffer } from "./policy/pricing.ts";
 export { underwrite, loadRecords, loadUnderwriting, daysUntil, criteriaCounts, describeOffer, DEFAULT_LIMITS, DEFAULT_HORIZON_DAYS, ADVANCE_MILESTONE_STATUSES, advanceRefs, isAdvanceRef, advanceBalances, remainingOwed, loadAdvanceBalances, advanceRepayment, DAY_MS } from "./policy/advance.ts";
 export type { AdvanceTerms, UnderwriteInput, Underwriting, Records, UnderwritingContext, AdvanceKey, AdvanceLedgerRow, AdvanceBalance, AdvanceForRepayment } from "./policy/advance.ts";
-export { captureFunding, executeRelease, executePayout, executeRefund, moneyContextFor, fundAdvance, acceptDisputeClaim, disputeLedgerRef } from "./policy/execute.ts";
-export type { MoneyContext, ReleasePlan, ReleaseResult, PayoutRequest, RefundRequest, PayoutBatch } from "./policy/execute.ts";
+export { captureFunding, executeRelease, executePayout, executeRefund, moneyContextFor, fundAdvance, acceptDisputeClaim, disputeLedgerRef, fundFromVault, autoFundNextMilestone } from "./policy/execute.ts";
+export type { MoneyContext, ReleasePlan, ReleaseResult, PayoutRequest, RefundRequest, PayoutBatch, VaultFundPlan, VaultFundResult, VaultFundVia, AutoFundResult } from "./policy/execute.ts";
+// The funding guarantee itself is pure and lives in @milestone/core (mandates.ts); re-exported for money importers.
+export { fundingAllows, FUNDING_REFUSALS } from "@milestone/core";
+export type { FundingRefusal, FundingFacts } from "@milestone/core";
 // PayPal's MCP server, read-only (reconciliation, dispute reads). An allowlist refuses every money-moving tool.
 export { openPayPalMcp, callPayPalTool, isAllowedPayPalTool, readToolResult, parseTransactions, simulatedTransactions, PayPalMcpRefused, PayPalMcpError, PAYPAL_MCP_ALLOWED_TOOLS, PAYPAL_MCP_DENIED_MONEY_TOOLS, PAYPAL_MCP_TOOL_GROUPS, SIM_EVENT_CODES } from "./paypal/mcp-client.ts";
 export type { PayPalMcpTool, PayPalToolResult, PayPalMcpSession, OpenPayPalMcpOptions, PayPalTransaction } from "./paypal/mcp-client.ts";

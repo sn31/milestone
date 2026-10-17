@@ -42,6 +42,12 @@ export interface MandateSummary {
   agentName: string;
   actions: string[];
   approveCapMinor: number | null;
+  /** Largest single milestone the agent may fund from the client's saved PayPal; null: no saved-PayPal funding. */
+  fundCapMinor?: number | null;
+  /** Most the agent may fund from the saved PayPal over the mandate's life; null: no saved-PayPal funding. */
+  fundTotalCapMinor?: number | null;
+  /** The auto-fund rule funds the next milestone after each release. */
+  autoFundNext?: boolean;
   currency: string;
   expiresAt: string;
   revokedAt: string | null;

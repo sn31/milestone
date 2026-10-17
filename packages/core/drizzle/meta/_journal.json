@@ -43,6 +43,13 @@
       "when": 1792114019224,
       "tag": "0005_agent_mandates",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792199386189,
+      "tag": "0006_vault_funding",
+      "breakpoints": true
     }
   ]
 }

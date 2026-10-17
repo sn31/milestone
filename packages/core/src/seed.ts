@@ -6,7 +6,7 @@ import { createDb } from "./db.ts";
 import { loadRootEnv, paypalMode } from "./env.ts";
 import { ledgerRefs } from "./ledger.ts";
 import { createMandate } from "./mandates.ts";
-import { advances, agentMandates, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paypalOps, users } from "./schema.ts";
+import { advances, agentMandates, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paymentMethods, paypalOps, users } from "./schema.ts";
 import type { PolicyDecision } from "./schemas.ts";
 
 loadRootEnv(); // no .env: rely on process.env
@@ -28,7 +28,7 @@ if (process.argv.includes("--if-empty")) {
 // never starts with stale payout rows that would send a milestone to needs_operator.
 if (process.argv.includes("--reset")) {
   const { sql } = await import("drizzle-orm");
-  await db.execute(sql`truncate table agent_mandates, audit_log, ledger_entries, webhook_events, paypal_ops, advances, deliveries, criteria, milestones, contracts, users restart identity cascade`);
+  await db.execute(sql`truncate table payment_methods, vault_setups, agent_mandates, audit_log, ledger_entries, webhook_events, paypal_ops, advances, deliveries, criteria, milestones, contracts, users restart identity cascade`);
   // Shared files (simulator state, uploaded deliveries) live in the repo's var/ and belong to whichever database uses them,
   // so a reset of a scratch database must not delete them. Only --reset-files does, for the main local setup.
   if (process.argv.includes("--reset-files")) {
@@ -173,6 +173,7 @@ for (let i = 1; i <= 5; i++) {
 // are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator.
 let showcase = 0;
 let agentToken: string | null = null;
+let savedPayPal = false;
 if (process.argv.includes("--showcase")) {
   const { createHash } = await import("node:crypto");
   const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -460,8 +461,18 @@ if (process.argv.includes("--showcase")) {
   await fund(h1, 70, 6);
   await advance(h1, { id: "adv_show_open2", principalMinor: 3000, feeBpsPerDay: 10, days: 7, pFail: 0.1, expectedLossMinor: 150, acceptedAgo: 40, fundedAgo: 39 });
 
-  // Casey's agent: a mandate for usr_client that may approve releases up to $200.00 for 30 days. The token is random
-  // on every run (only its hash is stored), so a rerun replaces the mandate and prints the new token, to stdout only.
+  // Casey's saved PayPal (simulated mode only): a payment method as completeVaultSetup leaves it. The simulator adopts any
+  // vault id starting SIM-PMT-SHOW on first use (SHOWCASE_VAULT_PREFIX), so the agent can fund from it without a
+  // setup-token round trip. In sandbox mode the token would not exist at PayPal, so none is seeded.
+  await db.delete(paymentMethods).where(eq(paymentMethods.id, "pm_show_casey"));
+  if (simulated) {
+    await db.insert(paymentMethods).values({ id: "pm_show_casey", userId: "usr_client", provider: "paypal", paypalPaymentTokenId: "SIM-PMT-SHOWCASEY01", paypalCustomerId: "SIM-CUST-CASEY01", payerEmail: "sb-sim-client@personal.example.com", createdAt: min(-180) });
+    savedPayPal = true;
+  }
+
+  // Casey's agent: a mandate for usr_client that may approve releases up to $200.00 and fund milestones from the saved
+  // PayPal up to $200.00 each and $500.00 in all, for 30 days (auto-fund off). The token is random on every run (only
+  // its hash is stored), so a rerun replaces the mandate and prints the new token, to stdout only.
   await db.delete(agentMandates).where(eq(agentMandates.id, "mdt_show_casey"));
   const { token } = await createMandate(db, {
     id: "mdt_show_casey",
@@ -469,6 +480,9 @@ if (process.argv.includes("--showcase")) {
     agentName: "Casey's agent",
     actions: ["read", "draft_contract", "fund", "approve", "hold"],
     approveCapMinor: 20000,
+    fundCapMinor: 20000,
+    fundTotalCapMinor: 50000,
+    autoFundNext: false,
     currency: "USD",
     expiresAt: new Date(now.getTime() + 30 * 86_400_000),
     now,
@@ -481,5 +495,5 @@ if (process.argv.includes("--showcase")) {
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
 console.log(`seed ok: ${userRows.length} users, 3 contracts, ${3 + brandMilestones.length + dashMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held after a failed payout, second client funded, draft)` : ""}`);
-if (agentToken) console.log(`showcase agent mandate mdt_show_casey (Casey's agent, approve up to 200.00 USD, 30 days). Bearer token, shown once: ${agentToken}`);
+if (agentToken) console.log(`showcase agent mandate mdt_show_casey (Casey's agent, approve up to 200.00 USD, fund up to 200.00 USD a milestone and 500.00 USD in all${savedPayPal ? " from saved PayPal pm_show_casey" : ", no saved PayPal outside simulated mode"}, 30 days). Bearer token, shown once: ${agentToken}`);
 process.exit(0);
