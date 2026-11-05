@@ -469,7 +469,7 @@
         "description": "signature is HMAC-SHA256 of the raw body with GITHUB_WEBHOOK_SECRET.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"action\": \"closed\",\n  \"pull_request\": {\n    \"number\": 1,\n    \"merged\": true,\n    \"merge_commit_sha\": \"0123456789abcdef0123456789abcdef01234567\",\n    \"title\": \"feat: password strength check\",\n    \"body\": \"\",\n    \"head\": {\n      \"ref\": \"m1-pass\"\n    },\n    \"base\": {\n      \"sha\": \"89abcdef0123456789abcdef0123456789abcdef\"\n    }\n  },\n  \"repository\": {\n    \"full_name\": \"milestone-demo/landing\",\n    \"clone_url\": \"https://github.com/milestone-demo/landing.git\"\n  }\n}",
+          "raw": "{\n  \"action\": \"closed\",\n  \"pull_request\": {\n    \"number\": 1,\n    \"merged\": true,\n    \"merge_commit_sha\": \"0123456789abcdef0123456789abcdef01234567\",\n    \"title\": \"feat: password field and validation on the signup form\",\n    \"body\": \"\",\n    \"head\": {\n      \"ref\": \"m1-pass\"\n    },\n    \"base\": {\n      \"sha\": \"89abcdef0123456789abcdef0123456789abcdef\"\n    }\n  },\n  \"repository\": {\n    \"full_name\": \"milestone-demo/landing\",\n    \"clone_url\": \"https://github.com/milestone-demo/landing.git\"\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -545,7 +545,7 @@
         "description": "Freelancer only; milestone must be funded or held. Resolves the ref with git ls-remote and queues a verify job. Build the repo with scripts/make-demo-repo.sh.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"repoUrl\": \"{{demoRepoPath}}\",\n  \"ref\": \"m1-pass\",\n  \"title\": \"Milestone 1: password strength\",\n  \"note\": \"All tests pass.\"\n}",
+          "raw": "{\n  \"repoUrl\": \"{{demoRepoPath}}\",\n  \"ref\": \"m1-pass\",\n  \"title\": \"Milestone 1: signup form and validation\",\n  \"note\": \"All tests pass.\"\n}",
           "options": {
             "raw": {
               "language": "json"

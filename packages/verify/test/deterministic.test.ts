@@ -473,9 +473,9 @@ describe("demo repo branches under the baseline suite", () => {
     return { overlay: out.overlay, tests: status("evd_tests")!.status, delivered: status("evd_tests_delivered")?.summary.match(/exited (\d+)/)?.[1] };
   }
 
-  it("m1-pass passes the client's suite, as a branch and as a merge; its own new test runs as information", { timeout: 60_000 }, async () => {
+  it("m1-pass passes the client's suite, as a branch and as a merge; its own new tests run as information", { timeout: 60_000 }, async () => {
     for (const sha of [shas["m1-pass"]!, shas.m1Merge!]) {
-      expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: ["test/password.test.js"], manifests: [], lockfilesDropped: [], newDependencies: [] }, tests: "pass", delivered: "0" });
+      expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: ["test/password.test.js", "test/signup-form.test.js"], manifests: [], lockfilesDropped: [], newDependencies: [] }, tests: "pass", delivered: "0" });
     }
   });
 
@@ -485,10 +485,10 @@ describe("demo repo branches under the baseline suite", () => {
     for (const sha of [shas["m2-partial"]!, shas["m2-injection"]!]) {
       expect(await stage(sha)).toEqual({ overlay: { restored: [], removed: [], manifests: [], lockfilesDropped: [], newDependencies: [] }, tests: "fail", delivered: undefined });
     }
-    // The merge of m1 then m2 still carries m1's added test file, which is removed for the graded run.
+    // The merge of m1 then m2 still carries m1's added test files, which are removed for the graded run.
     const merged = await stage(shas.m2Merge!);
     expect(merged.overlay!.restored).toEqual([]);
-    expect(merged.overlay!.removed).toEqual(["test/password.test.js"]);
+    expect(merged.overlay!.removed).toEqual(["test/password.test.js", "test/signup-form.test.js"]);
     expect(merged.tests).toBe("fail");
   });
 });
@@ -533,16 +533,16 @@ describe("demo repo m1-pass: citable evidence and no worker paths", () => {
 
   it("records evd_diff, evd_tree and evd_commit; no summary or log mentions the workdir", { timeout: 60_000 }, async () => {
     const g = (...a: string[]) => execFileSync("git", a, { cwd: demo }).toString().trim();
-    const out = await runDeterministicStage({ repoUrl: `file://${demo}`, sha: g("rev-parse", "m1-pass"), criteria, baselineSha: g("rev-parse", "main"), baselineSource: "funding", pullRequest: { title: "Password strength", body: "Adds the check." } });
+    const out = await runDeterministicStage({ repoUrl: `file://${demo}`, sha: g("rev-parse", "m1-pass"), criteria, baselineSha: g("rev-parse", "main"), baselineSource: "funding", pullRequest: { title: "Password field and validation", body: "Adds the password field and its checks." } });
     try {
       const byId = new Map(out.evidence.map((e) => [e.id, e]));
       expect(byId.get(DIFF_EVIDENCE_ID)).toMatchObject({ kind: "diff" });
       expect(byId.get(DIFF_EVIDENCE_ID)!.status).toBeUndefined();
-      expect(byId.get(DIFF_EVIDENCE_ID)!.summary).toMatch(/2 file\(s\) changed against the funding baseline [0-9a-f]{12}, \+\d+ -0:\n  \+\d+ -0 src\/password\.js\n  \+\d+ -0 test\/password\.test\.js/);
+      expect(byId.get(DIFF_EVIDENCE_ID)!.summary).toMatch(/5 file\(s\) changed against the funding baseline [0-9a-f]{12}, \+\d+ -2:\n  \+\d+ -0 public\/index\.html\n  \+\d+ -0 src\/password\.js\n  \+\d+ -2 src\/signup\.js\n  \+\d+ -0 test\/password\.test\.js\n  \+\d+ -0 test\/signup-form\.test\.js/);
       expect(byId.get(DIFF_EVIDENCE_ID)!.summary).toContain("checkPasswordStrength");
       expect(byId.get(TREE_EVIDENCE_ID)).toMatchObject({ kind: "file" });
       expect(byId.get(TREE_EVIDENCE_ID)!.summary).toMatch(/src\/password\.js/);
-      expect(byId.get(COMMIT_EVIDENCE_ID)).toMatchObject({ kind: "note", summary: "commit message:\nfeat: password strength check\n\ndelivery title: Password strength\n\ndelivery description:\nAdds the check." });
+      expect(byId.get(COMMIT_EVIDENCE_ID)).toMatchObject({ kind: "note", summary: "commit message:\nfeat: password field and validation on the signup form\n\ndelivery title: Password field and validation\n\ndelivery description:\nAdds the password field and its checks." });
       const real = execFileSync("realpath", [out.workdir]).toString().trim();
       const everything = [...out.evidence.map((e) => e.summary), ...Object.values(out.logs)].join("\n");
       expect(everything).not.toContain(out.workdir);
