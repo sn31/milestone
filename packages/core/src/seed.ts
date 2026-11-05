@@ -3,6 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
+import { demoRepoFullName, demoRepoUrl } from "./demo-repo.ts";
 import { RECORDED_VERDICT_MODEL, loadRootEnv, paypalMode, seedPaypalEmails } from "./env.ts";
 import { dropQueuedJobs, enqueue, releaseDelaySeconds } from "./jobs.ts";
 import { ledgerRefs } from "./ledger.ts";
@@ -56,6 +57,9 @@ for (const u of userRows) {
 }
 
 const now = new Date();
+// The demo contract's repository: DEMO_REPO_URL's owner/repo when it is a github.com repository (the hosted demo's lock
+// accepts deliveries from it only), else the original demo name.
+const demoRepo = demoRepoFullName() ?? "milestone-demo/landing";
 const contract = {
   id: "ctr_demo",
   clientId: "usr_client",
@@ -64,7 +68,7 @@ const contract = {
   scopeText: "Build a signup flow for a SaaS landing page: form, validation, confirmation page, in three milestones.",
   currency: "USD",
   totalMinor: 30000,
-  repoFullName: "milestone-demo/landing",
+  repoFullName: demoRepo,
   status: "active" as const,
   clientApprovedAt: now,
   freelancerApprovedAt: now,
@@ -295,7 +299,7 @@ if (process.argv.includes("--showcase")) {
   const setStatus = (id: string, status: "review" | "released" | "held" | "needs_client", extra: Record<string, unknown> = {}) => db.update(milestones).set({ status, ...extra }).where(sql`id = ${id}`);
 
   const [m1, m2, m3, b1, b2, h1] = all as [Ms, Ms, Ms, Ms, Ms, Ms, Ms];
-  const repo = "https://github.com/milestone-demo/landing.git";
+  const repo = `${demoRepoUrl() ?? `https://github.com/${demoRepo}`}.git`;
 
   // mst_1: funded, waiting for a delivery.
   await fund(m1, 50, 1);
@@ -308,7 +312,7 @@ if (process.argv.includes("--showcase")) {
     deliveryId: "dlv_show_2",
     ago: 9,
     source: "github_pr",
-    ref: "milestone-demo/landing#7",
+    ref: `${demoRepo}#7`,
     payload: { sha: sha2, title: "Account creation API and confirmation page", body: "Adds POST /api/accounts, the confirmation page and tests.", branch: "feat/accounts", clone_url: repo, base_sha: sha("baseline-mst_2").slice(0, 40), pr: 7 },
     evidence: [
       { id: "ev_2_tests", criterion_id: "crt_2_tests", kind: "log", status: "pass", summary: "npm test: 14 passed, 0 failed in 2.8 s", text: "> landing@1.2.0 test\n> node --test\n\n# tests 14\n# suites 4\n# pass 14\n# fail 0\n# duration_ms 2811" },
@@ -346,7 +350,7 @@ if (process.argv.includes("--showcase")) {
     deliveryId: "dlv_show_3",
     ago: 40,
     source: "github_pr",
-    ref: "milestone-demo/landing#9",
+    ref: `${demoRepo}#9`,
     payload: { sha: sha("pr-9-head").slice(0, 40), title: "Polish, accessibility and docs", body: "Labels, focus order, contrast fixes and a README.", branch: "chore/a11y-docs", clone_url: repo, base_sha: sha("baseline-mst_3").slice(0, 40), pr: 9 },
     evidence: [
       { id: "ev_3_tests", criterion_id: "crt_3_tests", kind: "log", status: "pass", summary: "npm test: 17 passed, 0 failed in 3.1 s", text: "# tests 17\n# pass 17\n# fail 0" },

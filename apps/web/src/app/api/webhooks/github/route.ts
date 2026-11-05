@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { DELIVERABLE_STATUSES, commitDeliveryId, deliveries, enqueue, storeWebhookOnce, type CommitPayload } from "@milestone/core";
+import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, checkDemoRepo, commitDeliveryId, deliveries, enqueue, storeWebhookOnce, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
 
 function verify(raw: string, signature: string | null, secret: string): boolean {
@@ -49,9 +49,17 @@ export async function POST(req: Request) {
   if (contractIds.length === 0) return Response.json({ ignored: true });
   const milestone = await db.query.milestones.findFirst({
     where: (m, { and, eq, inArray }) => and(inArray(m.contractId, contractIds), eq(m.seq, seq), inArray(m.status, [...DELIVERABLE_STATUSES])),
-    columns: { id: true },
+    columns: { id: true, contractId: true },
   });
   if (!milestone) return Response.json({ ignored: true });
+
+  // DEMO_MODE: code from the demo repository only, as on the deliver route; no delivery row, no job.
+  const lock = checkDemoRepo(cloneUrl);
+  if (!lock.ok) {
+    console.warn(`[github] ${milestone.id}: refused a pull-request delivery from ${repoFullName} (${lock.reason})`);
+    await audit(db, { actor: "github", event: AUDIT_EVENTS.deliveryRefused, milestoneId: milestone.id, contractId: milestone.contractId, detail: { source: "github_pr", repoUrl: cloneUrl.slice(0, 500), pr: pr.number, reason: lock.reason } });
+    return Response.json({ error: lock.reason, reason: lock.code }, { status: 403 });
+  }
 
   // Same milestone + same merge commit = same delivery, so a redelivered webhook cannot create a second row.
   const deliveryId = commitDeliveryId(milestone.id, sha);

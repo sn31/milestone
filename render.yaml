@@ -58,6 +58,11 @@ services:
       # With ANTHROPIC_API_KEY set, judgment is by Claude;
       # without it, judgment criteria go to the client (the banner says which).
       # MILESTONE_ALLOW_LOCAL_REPOS is left unset: hosted deliveries are public https repositories only.
+      # The only repository code deliveries are accepted from with DEMO_MODE=1 (delivered code is not sandboxed):
+      # the public demo repository from scripts/render-push-demo-repo.sh, e.g. https://github.com/<you>/landing.
+      # Left empty, every code delivery is refused and only file uploads work (docs/deploy.md).
+      - key: DEMO_REPO_URL
+        sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       # Only for PAYPAL_MODE=sandbox (asked for once, on Blueprint creation; leave empty for the simulated demo).

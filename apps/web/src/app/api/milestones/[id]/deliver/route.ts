@@ -1,4 +1,4 @@
-import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, commitDeliveryId, deliveries, enqueue, type CommitPayload } from "@milestone/core";
+import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, checkDemoRepo, commitDeliveryId, deliveries, enqueue, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
@@ -25,8 +25,17 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!DELIVERABLE_STATUSES.has(m.status)) return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
 
   const body = (await req.json().catch(() => null)) as { repoUrl?: unknown; ref?: unknown; title?: unknown; note?: unknown } | null;
+  const rawRepoUrl = typeof body?.repoUrl === "string" ? body.repoUrl : "";
+  // DEMO_MODE: code from the demo repository only (delivered code runs unsandboxed on the worker host). Refused before
+  // ls-remote, the delivery row and the job; the worker checks again before it clones.
+  const lock = checkDemoRepo(rawRepoUrl);
+  if (!lock.ok) {
+    console.warn(`[deliver] ${m.id}: refused a code delivery (${lock.reason})`);
+    await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.deliveryRefused, milestoneId: m.id, contractId: c.id, detail: { source: "manual", repoUrl: rawRepoUrl.slice(0, 500), reason: lock.reason } });
+    return jsonError(lock.reason, 403, { reason: lock.code });
+  }
   // Local repositories (file://, absolute paths) only where localReposAllowed says so; see resolve.ts.
-  const checked = checkRepoUrl(typeof body?.repoUrl === "string" ? body.repoUrl : "");
+  const checked = checkRepoUrl(rawRepoUrl);
   if (!checked.ok) return jsonError(checked.reason, 400);
   const repoUrl = checked.url;
   const ref = typeof body?.ref === "string" && body.ref.trim() ? body.ref.trim() : "HEAD";

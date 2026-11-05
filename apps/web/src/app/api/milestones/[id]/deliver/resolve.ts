@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
-import { paypalMode } from "@milestone/core";
+import { demoModeOn, paypalMode } from "@milestone/core";
 import { run } from "@milestone/verify";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -32,9 +32,11 @@ export const LOCAL_REPO_REFUSED = "local repositories are not accepted";
 /**
  * Whether this process may clone local repositories (file:// URLs and absolute paths) on a freelancer's say-so.
  * A local path makes the worker clone any repository on the host, so it is only allowed when MILESTONE_ALLOW_LOCAL_REPOS
- * is "1", or outside production while PayPal is simulated (the demo and the recorder deliver from a local checkout).
+ * is "1", or outside production while PayPal is simulated (the recorder delivers from a local checkout), and never with
+ * DEMO_MODE=1 (the hosted demo accepts its one https repository only; see checkDemoRepo in @milestone/core).
  */
 export function localReposAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (demoModeOn(env)) return false;
   if (env.MILESTONE_ALLOW_LOCAL_REPOS?.trim() === "1") return true;
   return env.NODE_ENV !== "production" && paypalMode(env) === "simulated";
 }

@@ -441,4 +441,28 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(tests).toMatchObject({ status: "fail" });
     expect(s.m.status).toBe("held");
   });
+
+  it("DEMO_MODE=1: a delivery from another repository is not cloned; every criterion unclear with the reason -> needs_client, audited", { timeout: 60_000 }, async () => {
+    const saved = { mode: process.env.DEMO_MODE, url: process.env.DEMO_REPO_URL };
+    process.env.DEMO_MODE = "1";
+    process.env.DEMO_REPO_URL = "https://github.com/milestone-demo/landing";
+    try {
+      const t = await setup(30, [{ kind: "test", spec: { command: "npm test" }, required: true }, { kind: "file", spec: { path: "README.md" }, required: true }], { source: "manual" });
+      await verify(t.job);
+      const s = await t.state();
+      // Nothing ran: no tamper check, no test log, no diff (the stage never cloned).
+      expect(s.d.evidence).toEqual([]);
+      expect(s.d.model).toBe("deterministic-only");
+      const v = s.d.verdict as { criteria: Array<{ status: string; rationale: string }> };
+      expect(v.criteria.map((c) => c.status)).toEqual(["unclear", "unclear"]);
+      expect(v.criteria[0]!.rationale).toContain("only accepts code deliveries from https://github.com/milestone-demo/landing");
+      expect(s.m.status).toBe("needs_client");
+      expect(s.m.decision?.ruleIds).toEqual(["P3"]);
+      expect(s.audits).toEqual(["milestone.verifying", "delivery.refused", "verdict.stored", "policy.decided", "milestone.needs_client"]);
+      expect(enqueued.filter((e) => e.milestoneId === t.milestoneId && e.name === "release")).toHaveLength(0);
+    } finally {
+      if (saved.mode === undefined) delete process.env.DEMO_MODE; else process.env.DEMO_MODE = saved.mode;
+      if (saved.url === undefined) delete process.env.DEMO_REPO_URL; else process.env.DEMO_REPO_URL = saved.url;
+    }
+  });
 });

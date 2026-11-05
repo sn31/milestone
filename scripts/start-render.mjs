@@ -84,6 +84,10 @@ need(next);
 need(tsx);
 if (env.MILESTONE_ALLOW_LOCAL_REPOS?.trim() === "1") console.warn("start-render: MILESTONE_ALLOW_LOCAL_REPOS=1, local repositories are allowed");
 else if (httpsOnlyGit()) console.log("start-render: git limited to https repositories");
+if (env.DEMO_MODE?.trim() === "1") {
+  if (env.DEMO_REPO_URL?.trim()) console.log(`start-render: DEMO_MODE=1, code deliveries only from ${env.DEMO_REPO_URL.trim()}`);
+  else console.warn("start-render: DEMO_MODE=1 and DEMO_REPO_URL is not set, so every code delivery is refused (file uploads still work); set it to the public demo repository (docs/deploy.md)");
+}
 
 const port = env.PORT || "10000";
 const children = [

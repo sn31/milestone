@@ -72,6 +72,11 @@ describe("manual delivery ref resolution", () => {
       if (!r.ok) expect(r.reason).not.toBe(LOCAL_REPO_REFUSED);
     }
   });
+  it("never allows local repositories with DEMO_MODE=1, even with MILESTONE_ALLOW_LOCAL_REPOS=1", () => {
+    expect(localReposAllowed({ DEMO_MODE: "1", MILESTONE_ALLOW_LOCAL_REPOS: "1", NODE_ENV: "development", PAYPAL_MODE: "simulated" })).toBe(false);
+    expect(checkRepoUrl("/tmp/repo", { NODE_ENV: "development", DEMO_MODE: "1", MILESTONE_ALLOW_LOCAL_REPOS: "1" })).toEqual({ ok: false, reason: LOCAL_REPO_REFUSED });
+    expect(checkRepoUrl("https://github.com/a/b.git", { NODE_ENV: "production", DEMO_MODE: "1" })).toEqual({ ok: true, url: "https://github.com/a/b.git" });
+  });
   it("validates refs", () => {
     expect(validRef("main")).toBe(true);
     expect(validRef("feature/x-1")).toBe(true);
@@ -151,6 +156,41 @@ describe.skipIf(!e2e)("POST /api/milestones/[id]/deliver against Postgres", asyn
 
     const again = (await (await call({ repoUrl: repo, ref: "m1-feature" })).json()) as { duplicate: boolean };
     expect(again.duplicate).toBe(true);
+  });
+
+  it("with DEMO_MODE=1 refuses any repository but DEMO_REPO_URL with 403 and an audit row, before ls-remote or a job", async () => {
+    const saved = { mode: process.env.DEMO_MODE, url: process.env.DEMO_REPO_URL };
+    const restore = () => {
+      if (saved.mode === undefined) delete process.env.DEMO_MODE; else process.env.DEMO_MODE = saved.mode;
+      if (saved.url === undefined) delete process.env.DEMO_REPO_URL; else process.env.DEMO_REPO_URL = saved.url;
+    };
+    const enqueuedBefore = state.enqueued.length;
+    const deliveriesBefore = (await db.select().from(core.deliveries).where(eq(core.deliveries.milestoneId, milestoneId))).length;
+    try {
+      process.env.DEMO_MODE = "1";
+      process.env.DEMO_REPO_URL = "https://github.com/milestone-demo/landing.git";
+      // A local checkout (even with MILESTONE_ALLOW_LOCAL_REPOS=1), another https repository, and look-alikes.
+      for (const repoUrl of [repo, pathToFileURL(repo).href, "https://github.com/someone/else.git", "https://github.com/milestone-demo/landing/../../someone/else", "https://x@github.com/milestone-demo/landing", "https://github.com:443/milestone-demo/landing"]) {
+        const res = await call({ repoUrl, ref: "main" });
+        expect(res.status, repoUrl).toBe(403);
+        const body = (await res.json()) as { error: string; reason: string };
+        expect(body.reason).toBe("demo_repo_only");
+        expect(body.error).toContain("only accepts code deliveries from https://github.com/milestone-demo/landing");
+      }
+      // Fail closed: DEMO_MODE=1 without DEMO_REPO_URL refuses every code delivery.
+      delete process.env.DEMO_REPO_URL;
+      const closed = await call({ repoUrl: "https://github.com/milestone-demo/landing.git", ref: "main" });
+      expect(closed.status).toBe(403);
+      expect(((await closed.json()) as { error: string }).error).toContain("DEMO_REPO_URL is not set");
+    } finally {
+      restore();
+    }
+    expect(state.enqueued.length).toBe(enqueuedBefore);
+    expect(await db.select().from(core.deliveries).where(eq(core.deliveries.milestoneId, milestoneId))).toHaveLength(deliveriesBefore);
+    const refusals = await db.select().from(core.auditLog).where(eq(core.auditLog.milestoneId, milestoneId));
+    const rows = refusals.filter((r) => r.event === core.AUDIT_EVENTS.deliveryRefused);
+    expect(rows).toHaveLength(7);
+    expect(rows.every((r) => r.actor === "usr_freelancer" && (r.detail as { source?: string }).source === "manual")).toBe(true);
   });
 
   it("refuses a milestone that is not funded or held", async () => {

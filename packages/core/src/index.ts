@@ -11,3 +11,4 @@ export * from "./milestones.ts";
 export * from "./mandates.ts";
 export * from "./criteria.ts";
 export * from "./payment-methods.ts";
+export * from "./demo-repo.ts";

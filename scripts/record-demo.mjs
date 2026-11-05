@@ -133,6 +133,8 @@ const env = {
   DATABASE_URL: dbUrl,
   APP_URL: appUrl,
   PAYPAL_MODE: "simulated",
+  // The recorder delivers from a local checkout (file://), which the hosted demo's lock refuses: never DEMO_MODE here.
+  DEMO_MODE: "",
   SIMULATED_PAYPAL_STATE_FILE: join(outDir, "simulated-paypal.json"),
   UPLOAD_DIR: join(outDir, "uploads"),
   REVIEW_WINDOW_SECONDS: String(reviewSeconds),

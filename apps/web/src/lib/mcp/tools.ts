@@ -117,7 +117,7 @@ export const TOOLS: ToolSpec[] = [
     title: "Deliver a milestone",
     description:
       "Submits a repository delivery for a funded (or held) milestone: repoUrl (https, or a local path where the server allows local " +
-      "repositories) and ref (branch, tag, HEAD or a 40-character commit). Same code and checks as the Deliver form; the verifier then runs " +
+      "repositories; on the hosted demo only its demo repository) and ref (branch, tag, HEAD or a 40-character commit). Same code and checks as the Deliver form; the verifier then runs " +
       'the client\'s acceptance criteria. Freelancer mandates only; needs "deliver".',
     inputSchema: {
       type: "object",

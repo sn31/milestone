@@ -9,6 +9,7 @@ import {
   VerdictOutput,
   VerdictResult,
   audit,
+  checkDemoRepo,
   decisionDeliveryId,
   deliveries,
   enqueue,
@@ -194,6 +195,15 @@ async function produceVerdict(deliveryId: string, milestone: Milestone, payload:
   }
 }
 
+/**
+ * A commit delivery the demo lock refuses (DEMO_MODE=1 and not DEMO_REPO_URL; checkDemoRepo in @milestone/core): nothing
+ * is cloned or run, no model is asked, and every criterion is unclear with the reason, so policy sends it to the client.
+ * The web routes refuse such a delivery before it is queued; this is the second check, in front of the clone.
+ */
+export function refusedVerdict(deliveryId: string, criteria: CriterionSpec[], reason: string) {
+  return { ...checksOnly(deliveryId, criteria, [], [], { suspected: false, hits: [] }, `not verified: delivery refused, ${reason}`), judged: { refused: reason } };
+}
+
 /** Excerpt of each delivered file's text that goes into the judge's prompt; injection detection reads all of it. */
 const EXCERPT = 4_000;
 
@@ -236,10 +246,18 @@ async function ensureVerdict(db: Db, ctx: DeliveryContext): Promise<{ verdict: V
     const context: Milestone = { title: milestone.title, scope: contract.scopeText };
     const progress = evidenceProgress(db, deliveryId);
     await progress.reset();
+    // Defence in depth behind the web routes: in DEMO_MODE a commit from anywhere but DEMO_REPO_URL is never cloned.
+    const lock = source.kind === "commit" ? checkDemoRepo(source.payload.clone_url) : ({ ok: true } as const);
+    if (!lock.ok) {
+      console.warn(`[verify] ${deliveryId}: refused, not cloned (${lock.reason})`);
+      await audit(db, { actor: "verifier", event: AUDIT_EVENTS.deliveryRefused, milestoneId: milestone.id, contractId: contract.id, detail: { deliveryId, source: delivery.source, repoUrl: source.kind === "commit" ? source.payload.clone_url.slice(0, 500) : null, reason: lock.reason } });
+    }
     const v =
       source.kind === "upload"
         ? await produceUploadVerdict(deliveryId, context, source.payload, criteria, progress.append)
-        : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha, progress.append);
+        : !lock.ok
+          ? refusedVerdict(deliveryId, criteria, lock.reason)
+          : await produceVerdict(deliveryId, context, source.payload, criteria, milestone.baselineSha, progress.append);
     const written = await db
       .update(deliveries)
       .set({ evidence: v.evidence, verdict: v.verdict, result: v.result, suspectedInjection: v.verdict.suspected_injection, model: v.model, promptHash: v.promptHash, verifiedAt: new Date() })

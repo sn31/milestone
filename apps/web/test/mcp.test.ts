@@ -407,7 +407,20 @@ describe.skipIf(!e2e)("MCP server: agents under a mandate", () => {
       const gated = await call(f, "deliver_milestone", { milestoneId: funded.id, repoUrl: repoDir, ref: "main" });
       expect(gated.isError).toBe(true);
       expect(gated.body).toMatchObject({ status: 400, error: "local repositories are not accepted" });
+      // DEMO_MODE=1: the route's demo lock refuses any repository but DEMO_REPO_URL, for agents too.
+      process.env.MILESTONE_ALLOW_LOCAL_REPOS = "1";
+      process.env.DEMO_MODE = "1";
+      process.env.DEMO_REPO_URL = "https://github.com/milestone-demo/landing";
+      for (const repoUrl of [repoDir, "https://github.com/someone/else.git"]) {
+        const locked = await call(f, "deliver_milestone", { milestoneId: funded.id, repoUrl, ref: "main" });
+        expect(locked.isError).toBe(true);
+        expect(locked.body).toMatchObject({ status: 403, reason: "demo_repo_only" });
+        expect(String(locked.body.error)).toContain("only accepts code deliveries from https://github.com/milestone-demo/landing");
+      }
+      expect(state.enqueued).toEqual([]);
     } finally {
+      delete process.env.DEMO_MODE;
+      delete process.env.DEMO_REPO_URL;
       process.env.PAYPAL_MODE = prevMode;
       if (prevAllow === undefined) delete process.env.MILESTONE_ALLOW_LOCAL_REPOS;
       else process.env.MILESTONE_ALLOW_LOCAL_REPOS = prevAllow;

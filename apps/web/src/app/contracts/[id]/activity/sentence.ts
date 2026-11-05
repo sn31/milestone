@@ -66,6 +66,8 @@ export function eventSentence(event: string, raw: unknown, names: Record<string,
       const files = Array.isArray(d.files) ? d.files.map((f) => str((f as Detail)?.name)).filter(Boolean) : [];
       return files.length ? `Delivered ${files.length} file${files.length === 1 ? "" : "s"}: ${files.join(", ")}` : "Delivered files";
     }
+    case "delivery.refused":
+      return `Delivery refused${str(d.reason) ? `: ${d.reason}` : ""}`;
     case "verdict.stored": {
       const result = str(d.result) ?? "no result";
       const ignored = d.suspectedInjection === true ? "; text addressed to the reviewer was ignored" : "";

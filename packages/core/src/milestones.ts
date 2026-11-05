@@ -85,6 +85,7 @@ export const AUDIT_EVENTS = {
   contractApproved: "contract.approved",
   deliveryManual: "delivery.manual",
   deliveryUpload: "delivery.upload",
+  deliveryRefused: "delivery.refused",
   // Verify
   verdictStored: "verdict.stored",
   policyDecided: "policy.decided",

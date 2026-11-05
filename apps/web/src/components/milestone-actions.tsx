@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AUDIT_EVENTS, UploadPayload, advances, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { AUDIT_EVENTS, UploadPayload, advances, suggestedRepoUrl, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { advanceRepayment, paypalMode } from "@milestone/money";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db";
@@ -105,7 +105,8 @@ function deliverFor(milestone: MilestoneRow, contract: ContractRow, actor: Actor
       files={files}
       repo={repo}
       resubmit={milestone.status === "held"}
-      defaultRepoUrl={contract.repoFullName ? `https://github.com/${contract.repoFullName}.git` : null}
+      // DEMO_REPO_URL when set (with DEMO_MODE=1 the only repository a code delivery is accepted from), else the contract's.
+      defaultRepoUrl={suggestedRepoUrl(contract.repoFullName)}
       accept={patterns.length ? [...new Set(patterns)].join(", ") : null}
       conditions={<CriteriaList items={items(crit)} bare />}
       conditionsSummary={checksSummary(items(crit))}

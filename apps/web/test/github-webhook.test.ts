@@ -54,6 +54,7 @@ describe.skipIf(!e2e)("github webhook against Postgres", () => {
   const repo = `milestone-demo/landing-${tag}`;
   const contractId = `ctr_t_${tag}`;
   const milestoneId = `mst_t_${tag}`;
+  const milestone2Id = `mst_t2_${tag}`;
   const deliveryIds: string[] = [];
   const delivery = () => { const d = `gh-${tag}-${deliveryIds.length}`; deliveryIds.push(d); return d; };
   /** The fixture, pointed at the throwaway repository so seeded contracts cannot match. */
@@ -67,12 +68,14 @@ describe.skipIf(!e2e)("github webhook against Postgres", () => {
     state.db = db;
     await db.insert(core.contracts).values({ id: contractId, clientId: "usr_client", freelancerId: "usr_freelancer", title: "t", scopeText: "t", currency: "USD", totalMinor: 100, status: "active", repoFullName: repo });
     await db.insert(core.milestones).values({ id: milestoneId, contractId, seq: 1, title: "m1", amountMinor: 100, status: "funded" });
+    await db.insert(core.milestones).values({ id: milestone2Id, contractId, seq: 2, title: "m2", amountMinor: 100, status: "funded" });
   });
   beforeEach(() => { state.enqueued.length = 0; });
   afterAll(async () => {
     if (!e2e) return;
-    await db.delete(core.deliveries).where(eq(core.deliveries.milestoneId, milestoneId));
-    await db.delete(core.milestones).where(eq(core.milestones.id, milestoneId));
+    await db.delete(core.auditLog).where(eq(core.auditLog.contractId, contractId));
+    await db.delete(core.deliveries).where(inArray(core.deliveries.milestoneId, [milestoneId, milestone2Id]));
+    await db.delete(core.milestones).where(inArray(core.milestones.id, [milestoneId, milestone2Id]));
     await db.delete(core.contracts).where(eq(core.contracts.id, contractId));
     await db.delete(core.webhookEvents).where(inArray(core.webhookEvents.eventId, deliveryIds));
   });
@@ -114,5 +117,40 @@ describe.skipIf(!e2e)("github webhook against Postgres", () => {
     body.repository.full_name = `nobody/${tag}`;
     expect(await (await POST(request(body, { delivery: delivery() }))).json()).toEqual({ ignored: true });
     expect(state.enqueued).toHaveLength(0);
+  });
+
+  it("DEMO_MODE=1: a merged PR from another repository is refused (403, audit row, no delivery, no job); the demo repository passes", async () => {
+    const saved = { mode: process.env.DEMO_MODE, url: process.env.DEMO_REPO_URL };
+    const m2 = () => {
+      const p = withRepo("github-pr-merged.json");
+      p.pull_request.head.ref = "m2-partial";
+      p.pull_request.merge_commit_sha = "b".repeat(40);
+      return p;
+    };
+    try {
+      process.env.DEMO_MODE = "1";
+      process.env.DEMO_REPO_URL = "https://github.com/someone/else";
+      const refused = await POST(request(m2(), { delivery: delivery() }));
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ reason: "demo_repo_only" });
+      expect(state.enqueued).toHaveLength(0);
+      expect(await db.select().from(core.deliveries).where(eq(core.deliveries.milestoneId, milestone2Id))).toHaveLength(0);
+      const audits = await db.select().from(core.auditLog).where(eq(core.auditLog.milestoneId, milestone2Id));
+      expect(audits.map((a) => a.event)).toEqual([core.AUDIT_EVENTS.deliveryRefused]);
+      expect(audits[0]).toMatchObject({ actor: "github", contractId, detail: { source: "github_pr", pr: 7, repoUrl: "https://github.com/milestone-demo/landing.git" } });
+
+      delete process.env.DEMO_REPO_URL; // fail closed
+      expect((await POST(request(m2(), { delivery: delivery() }))).status).toBe(403);
+      expect(state.enqueued).toHaveLength(0);
+
+      process.env.DEMO_REPO_URL = "https://github.com/Milestone-Demo/landing/";
+      const ok = await POST(request(m2(), { delivery: delivery() }));
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ ok: true, milestoneId: milestone2Id });
+      expect(state.enqueued).toHaveLength(1);
+    } finally {
+      if (saved.mode === undefined) delete process.env.DEMO_MODE; else process.env.DEMO_MODE = saved.mode;
+      if (saved.url === undefined) delete process.env.DEMO_REPO_URL; else process.env.DEMO_REPO_URL = saved.url;
+    }
   });
 });

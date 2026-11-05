@@ -3,7 +3,7 @@
 // against what the app reads in production:
 //   1. only fields, types, runtimes and plans the spec lists; envVars in one of the spec's forms; no sync:false inside
 //      an environment group (the spec forbids it); fromDatabase names a database in this file;
-//   2. the hosted-demo settings: DEMO_MODE=1, PAYPAL_MODE, a generated SIMULATED_WEBHOOK_SECRET, the pre-deploy
+//   2. the hosted-demo settings: DEMO_MODE=1, DEMO_REPO_URL, PAYPAL_MODE, a generated SIMULATED_WEBHOOK_SECRET, the pre-deploy
 //      migrate + seed, no MILESTONE_ALLOW_LOCAL_REPOS, no Key Value store;
 //   3. every environment variable read in apps/*/src and packages/*/src (tests excluded) is set in the blueprint,
 //      provided by the platform, or listed in the "Optional environment variables" table of docs/deploy.md.
@@ -218,6 +218,7 @@ else {
   const expect = (key, check, why) => { if (!check(webEnv.get(key))) fail(`web service env ${key}: ${why}`); };
   expect("DATABASE_URL", (v) => v?.fromDatabase?.property === "connectionString", "fromDatabase connectionString");
   expect("DEMO_MODE", (v) => v?.value === "1", 'must be "1" on the hosted demo');
+  expect("DEMO_REPO_URL", (v) => v?.sync === false || /^https:\/\//.test(v?.value ?? ""), "the demo lock's repository: sync: false (set by the owner) or an https URL");
   expect("PAYPAL_MODE", (v) => v?.value === "simulated" || v?.value === "sandbox", "simulated or sandbox");
   expect("SIMULATED_WEBHOOK_SECRET", (v) => v?.generateValue === true, "generateValue: true (required in production)");
   expect("NODE_VERSION", (v) => typeof v?.value === "string" && /^24(\.|$)/.test(v.value), "Node 24 (package.json engines)");

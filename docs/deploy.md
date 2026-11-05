@@ -9,7 +9,8 @@ The repository holds a Render Blueprint (`render.yaml`). It describes one web se
 - **Demo mode** (`DEMO_MODE=1`). Every page shows a thin band: "Demo: PayPal sandbox or simulated, test identities; reset any time". The band also says which judgment is live: "Judgment by Claude" when `ANTHROPIC_API_KEY` is set, "Judgment goes to the client: no model on this host" otherwise. The band's **Reset demo** button posts to `/api/demo/reset`, which puts the showcase back (the seed with `--reset --showcase`, then the PayPal simulator's state in `SIMULATED_PAYPAL_STATE_FILE` is emptied and every uploaded file in `UPLOAD_DIR` is deleted; Casey's seeded saved PayPal is a database row the simulator adopts again on first use). The seed also queues the release job for the showcase milestone in review, so when its window closes the worker releases it as it would any other. A reset runs at most once every 30 seconds, and the route answers 404 when `DEMO_MODE` is not `1`.
 - **PayPal simulated by default** (`PAYPAL_MODE=simulated`). A built-in simulator answers the same REST calls as the PayPal sandbox and posts its own signed webhooks to the service, so the demo needs no PayPal account. You can switch to the real sandbox (see below).
 - **Identities** come from a role switcher (client, freelancer, partner), not a sign-in.
-- **Deliveries come from public https repositories only.** The web app refuses local paths in production (`MILESTONE_ALLOW_LOCAL_REPOS` is unset). The start script also gives both processes a `git` restricted to https, so no other route can make the worker fetch a `file://`, local-path, ssh or `git://` repository.
+- **Code deliveries come from the demo repository only.** Delivered code is not sandboxed (it runs on the host under the service's user), so with `DEMO_MODE=1` the deliver route, the MCP `deliver_milestone` tool and the GitHub webhook accept a repository delivery only when its URL names `DEMO_REPO_URL` (compared after normalising: https only, host lowercased, `.git` and a trailing slash dropped, owner and name case-insensitive on github.com; credentials, ports, query strings, fragments, percent-encoding and `..` segments are refused). Anything else gets a 403 with the reason and a `delivery.refused` audit row, before `git ls-remote`, the delivery row or the verify job. The worker checks again before it clones: a queued delivery from another repository is never cloned, and its criteria are recorded `unclear` with the reason, so it goes to the client. With `DEMO_MODE=1` and `DEMO_REPO_URL` unset, every code delivery is refused (fail closed). File uploads are not code and stay open.
+- **No local repositories.** The web app refuses local paths and `file://` URLs in production and whenever `DEMO_MODE=1` (`MILESTONE_ALLOW_LOCAL_REPOS` is unset). The start script also gives both processes a `git` restricted to https, so no other route can make the worker fetch a `file://`, local-path, ssh or `git://` repository.
 
 ## Owner's steps
 
@@ -19,6 +20,7 @@ The repository holds a Render Blueprint (`render.yaml`). It describes one web se
    - `ANTHROPIC_API_KEY`: set it to have Claude judge the judgment criteria. Leave it empty and those criteria go to the client, which the banner says.
    - `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_WEBHOOK_ID`: only for the real sandbox (see below).
    - `GITHUB_WEBHOOK_SECRET` and `GITHUB_TOKEN`: only to deliver through merged pull requests, and to record the default branch as the tamper-check baseline when a milestone is funded.
+   - `DEMO_REPO_URL`: **required for code deliveries.** The https URL of the public demo repository you pushed in [The GitHub demo repository](#the-github-demo-repository) (for example `https://github.com/<you>/landing`). It is the only repository the hosted demo accepts code from; left empty, every code delivery is refused and only file uploads work. Push the repository first, so the first deploy's seed names it on the demo contract.
 4. **Click Apply.** Render creates the database, builds, runs the pre-deploy command, then starts the service. The service URL appears at the top of the service page (for example `https://milestone-xxxx.onrender.com`).
 5. **Open the URL.** You land on the contract ledger, with the demo band at the top.
 
@@ -51,9 +53,10 @@ The hosted worker clones over https and needs no credentials, so the repository 
    ```
 
    The script builds the repository with `scripts/make-demo-repo.sh` and pushes `main` and three delivery branches: `m1-pass` (passes), `m2-partial` (the client's discount test fails) and `m2-injection` (a commit message that tries to instruct the verifier). It never force-pushes. It then checks that an anonymous clone works, as it will on Render.
-3. In the demo, switch to Freelancer, open the signup-flow contract, and deliver a funded milestone. Set the repository URL to `https://github.com/<you>/landing.git` and the branch to one of the three above.
+3. On the Render service's Environment page, set `DEMO_REPO_URL` to `https://github.com/<you>/landing` and save (this redeploys). The hosted demo accepts code deliveries from this repository only; see [What the hosted demo is](#what-the-hosted-demo-is).
+4. In the demo, switch to Freelancer, open the signup-flow contract, and deliver a funded milestone. The deliver form suggests `DEMO_REPO_URL`; set the branch to one of the three above.
 
-The seeded contract names `milestone-demo/landing` as its repository, so the deliver form suggests `https://github.com/milestone-demo/landing.git`. Replace it with your repository's URL unless you own that name on GitHub.
+The seed names the demo contract's repository after `DEMO_REPO_URL` when it is a github.com URL, and falls back to `milestone-demo/landing` otherwise. A database seeded before you set it keeps the old name until you click **Reset demo**; the deliver form suggests `DEMO_REPO_URL` either way, and only that repository is accepted.
 
 ## Switching to the PayPal sandbox
 

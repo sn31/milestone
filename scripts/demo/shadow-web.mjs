@@ -4,14 +4,15 @@
 // (A symlinked src makes next dev accept connections and never answer them.) The snapshot also keeps the recording
 // stable while other people edit apps/web. The shadow lives under <repo>/var (gitignored) because Turbopack only
 // compiles files inside the workspace root.
-import { cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 export function makeShadowWeb(root, dir = join(root, "var", "demo-web")) {
   const web = join(root, "apps", "web");
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
-  for (const name of ["src", "public"]) cpSync(join(web, name), join(dir, name), { recursive: true });
+  // public/ is optional (apps/web has none today).
+  for (const name of ["src", "public"]) if (existsSync(join(web, name))) cpSync(join(web, name), join(dir, name), { recursive: true });
   symlinkSync(relative(dir, join(web, "node_modules")), join(dir, "node_modules"));
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "milestone-demo-web", private: true, type: "module" }, null, 2) + "\n");
   writeFileSync(join(dir, "tsconfig.json"), readFileSync(join(web, "tsconfig.json")));

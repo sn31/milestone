@@ -267,7 +267,8 @@ paths:
       description: |
         Verified with the X-Hub-Signature-256 HMAC against GITHUB_WEBHOOK_SECRET and stored once by
         X-GitHub-Delivery. A merged pull request from a branch named m<seq>-... on a contract's repository creates a
-        delivery and a verify job. Everything else is ignored.
+        delivery and a verify job. Everything else is ignored. With DEMO_MODE=1 a pull request whose clone_url is not
+        DEMO_REPO_URL is refused with 403 and a delivery.refused audit row; no delivery is stored and no job is queued.
       security: []
       parameters:
         - { name: X-Hub-Signature-256, in: header, required: true, schema: { type: string } }
@@ -292,6 +293,9 @@ paths:
                   milestoneId: { type: string }
                   deliveryId: { type: string }
         "400": { description: Bad signature }
+        "403":
+          description: DEMO_MODE=1 and the repository is not DEMO_REPO_URL (reason demo_repo_only)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "500": { description: GITHUB_WEBHOOK_SECRET not set }
   /api/ops/{milestoneId}/resolve:
     post:
@@ -334,7 +338,10 @@ paths:
         The contract's freelancer only, while the milestone is funded or held. The ref (default HEAD) is resolved to a
         commit with git ls-remote, a delivery with source `manual` is stored in the GitHub webhook's payload shape
         (the baseline for the client's test suite is the milestone's funding-time sha), and a verify job is queued. The same
-        milestone and commit give the same delivery id, so a repeat returns `duplicate: true`.
+        milestone and commit give the same delivery id, so a repeat returns `duplicate: true`. With DEMO_MODE=1 (the
+        hosted demo) only DEMO_REPO_URL is accepted (https, compared after normalising); any other repository, or every
+        repository when DEMO_REPO_URL is unset, gets 403 with `reason: demo_repo_only` and a delivery.refused audit row,
+        before ls-remote or a job.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
       requestBody:
