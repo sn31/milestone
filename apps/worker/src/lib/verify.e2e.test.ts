@@ -407,8 +407,11 @@ describe.skipIf(!run)("verify job end to end", async () => {
 
   it("a model call that throws -> the verdict is stored with judgment unclear, decided (P3), never stuck in verifying", { timeout: 60_000 }, async () => {
     const { setProviderForTests } = await import("@milestone/verify");
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
     let calls = 0;
-    setProviderForTests({ name: "anthropic", model: "claude-test", generate: async () => { calls++; throw Object.assign(new Error("overloaded"), { name: "OverloadedError" }); } });
+    // A real SDK error: conclude() only records model-call failures as unclear and rethrows anything else.
+    const overloaded = Anthropic.APIError.generate(529, { type: "error", error: { type: "overloaded_error", message: "overloaded" } }, "overloaded", new Headers());
+    setProviderForTests({ name: "anthropic", model: "claude-test", generate: async () => { calls++; throw overloaded; } });
     process.env.ANTHROPIC_API_KEY = "test-key";
     try {
       const copy = Buffer.from(`# About us\n\n${Array.from({ length: 620 }, (_, i) => `bread${i}`).join(" ")}\n`);
