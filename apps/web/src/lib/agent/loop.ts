@@ -1,7 +1,7 @@
 // Server only. One console turn: the configured model, the mandate's tools on Milestone MCP and PayPal MCP
 // (read-only), in a tool loop shaped like generateJson's (packages/verify/src/llm.ts). Every step is emitted as a
 // ConsoleEvent so the browser shows each tool call as it happens. Tool output reaches the model wrapped as untrusted.
-import { getProvider, toolResultBlocks, wrapUntrusted, type AnswerDef, type Message, type ToolDef, type ToolResult } from "./model";
+import { answerNowMessage, getProvider, toolResultBlocks, wrapUntrusted, type AnswerDef, type Message, type ToolDef, type ToolResult } from "./model";
 import { systemPrompt, turnPrompt } from "./prompt";
 import type { ConsoleEvent, ConsoleMessage, MandateSummary } from "./protocol";
 import { SERVER_LABEL } from "./protocol";
@@ -19,6 +19,9 @@ const ANSWER: AnswerDef = {
     additionalProperties: false,
   },
 };
+
+/** Output budget per model turn. Thinking counts against it (adaptive thinking runs before each tool call). */
+const MAX_TOKENS = 4096;
 
 /** Tool results the model sees are capped (characters) so a long listing does not push the mandate out of context. */
 const RESULT_MAX = 6000;
@@ -48,18 +51,28 @@ export async function runAgentTurn(o: TurnInput): Promise<void> {
   const done: CallRecord[] = [];
   let corrected = false;
 
+  let maxTokens = MAX_TOKENS;
+
   for (let turn = 0; turn < maxTurns; turn++) {
     if (o.signal?.aborted) return;
     o.emit({ t: "thinking", turn });
+    // Tool choice is never forced (the model rejects it): the last turn asks for the reply in the history instead.
+    if (turn === maxTurns - 1) messages.push(answerNowMessage(ANSWER, "last_turn"));
     let res: Awaited<ReturnType<typeof provider.generate>>;
     try {
-      res = await provider.generate({ system, messages, tools: defs, answer: ANSWER, forceAnswer: turn === maxTurns - 1, maxTokens: 1536 });
+      res = await provider.generate({ system, messages, tools: defs, answer: ANSWER, maxTokens });
+      // Cut off at max_tokens (thinking included): the same request once more with double the room, history unchanged.
+      if (res.type === "truncated" && maxTokens === MAX_TOKENS) {
+        maxTokens *= 2;
+        res = await provider.generate({ system, messages, tools: defs, answer: ANSWER, maxTokens });
+      }
     } catch (e) {
       o.emit({ t: "error", error: `The model call failed (${provider.name} · ${provider.model}): ${(e as Error).message}. Nothing further was done.` });
       return;
     }
-    if (res.type === "answer") {
-      const reply = res.value && typeof res.value === "object" ? (res.value as { reply?: unknown }).reply : null;
+    // With tool choice "auto" a turn that ends in plain text is the model's reply, the same as an emit_reply call.
+    if (res.type === "answer" || res.type === "text") {
+      const reply = res.type === "text" ? res.text : res.value && typeof res.value === "object" ? (res.value as { reply?: unknown }).reply : null;
       if (typeof reply !== "string" || !reply.trim()) {
         o.emit({ t: "error", error: "the model returned no reply" });
         return;
@@ -68,11 +81,19 @@ export async function runAgentTurn(o: TurnInput): Promise<void> {
       // A reply that claims an action no tool call made gets one correction turn: make the call, or stop claiming it.
       if (notice && !corrected && turn < maxTurns - 2) {
         corrected = true;
-        messages.push({ role: "assistant", text: reply.trim(), toolCalls: [] });
+        messages.push(res.type === "text" ? res.assistant : { role: "assistant", text: reply.trim(), toolCalls: [] });
         messages.push({ role: "user", content: [{ type: "text", text: `Check: ${notice} If the client asked for it and the mandate and Milestone allow it, call the tool now. Otherwise answer again without claiming it was done.` }] });
         continue;
       }
       o.emit({ t: "reply", text: reply.trim(), ...(notice ? { notice } : {}) });
+      return;
+    }
+    if (res.type === "truncated") {
+      o.emit({ t: "error", error: `the model ran out of output tokens (${maxTokens}) before replying. Nothing further was done.` });
+      return;
+    }
+    if (res.type === "refused") {
+      o.emit({ t: "error", error: `the model declined: ${res.reason}` });
       return;
     }
     if (res.type === "stop") {

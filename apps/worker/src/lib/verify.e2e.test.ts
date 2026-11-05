@@ -405,6 +405,32 @@ describe.skipIf(!run)("verify job end to end", async () => {
     expect(s.m.status).toBe("needs_client");
   });
 
+  it("a model call that throws -> the verdict is stored with judgment unclear, decided (P3), never stuck in verifying", { timeout: 60_000 }, async () => {
+    const { setProviderForTests } = await import("@milestone/verify");
+    let calls = 0;
+    setProviderForTests({ name: "anthropic", model: "claude-test", generate: async () => { calls++; throw Object.assign(new Error("overloaded"), { name: "OverloadedError" }); } });
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    try {
+      const copy = Buffer.from(`# About us\n\n${Array.from({ length: 620 }, (_, i) => `bread${i}`).join(" ")}\n`);
+      const t = await setup(17, [{ kind: "upload", spec: { pattern: [".md"], minWords: 600, mustContain: ["about us"] }, required: true }, { kind: "judgment", spec: {}, required: true }], { files: { "copy.md": copy } });
+      await verify(t.job);
+      const s = await t.state();
+      expect(calls).toBe(1);
+      expect((s.d.verdict as { criteria: Array<{ status: string }> }).criteria.map((c) => c.status)).toEqual(["pass", "unclear"]);
+      expect(s.d.verifiedAt).not.toBeNull();
+      expect(s.d.model).toBe("deterministic-only");
+      expect(s.m.decision).toMatchObject({ action: "ask_client", ruleIds: ["P3"], deliveryId: t.deliveryId });
+      expect(s.m.status).toBe("needs_client");
+      expect(s.audits).toEqual(["milestone.verifying", "verdict.stored", "policy.decided", "milestone.needs_client"]);
+      const db = getDb();
+      const [stored] = await db.select({ detail: auditLog.detail }).from(auditLog).where(eq(auditLog.milestoneId, t.milestoneId)).orderBy(asc(auditLog.createdAt)).offset(1).limit(1);
+      expect(stored?.detail).toMatchObject({ modelError: "OverloadedError" });
+    } finally {
+      setProviderForTests(null);
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+
   it("a manual repo delivery is verified exactly like a merged pull request", { timeout: 120_000 }, async () => {
     const t = await setup(14, crit2, { source: "manual", sha: tamperSha, milestone: { baselineSha: sha } });
     const { s, tamper, tests } = await tamperEvidence(t);

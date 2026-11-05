@@ -8,7 +8,7 @@ export async function explain(kind: "advance_offer" | "policy_decision", numbers
     user: wrapUntrusted(JSON.stringify(numbers, null, 2), "numbers"),
     schema: z.object({ text: z.string().max(400) }),
     schemaName: "explanation",
-    maxTokens: 300,
+    maxTokens: 1024, // thinking counts against it; two sentences need little after that
   });
   return res.ok ? res.value.text : "Explanation unavailable.";
 }

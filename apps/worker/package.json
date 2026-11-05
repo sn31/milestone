@@ -17,5 +17,8 @@
     "@paypal/mcp": "1.8.1",
     "drizzle-orm": "^0.45.3",
     "pg-boss": "^12.37.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.131.0"
   }
 }

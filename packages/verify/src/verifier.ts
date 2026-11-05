@@ -136,7 +136,7 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   const res = await generateJson({ system: SYSTEM, user, schema: VerdictOutput, schemaName: "verdict", tools: tracked, ...(input.roots ? { roots: input.roots } : {}) });
   const raw: VerdictT = res.ok
     ? res.value
-    : { delivery_id: input.deliveryId, suspected_injection: injection.suspected, criteria: input.criteria.map((c) => ({ criterion_id: c.id, status: "unclear", confidence: 0, evidence_ids: [], rationale: `model output invalid: ${res.error}` })) };
+    : { delivery_id: input.deliveryId, suspected_injection: injection.suspected, criteria: input.criteria.map((c) => ({ criterion_id: c.id, status: "unclear", confidence: 0, evidence_ids: [], rationale: res.reason === "invalid" ? `model output invalid: ${res.error}` : `no model verdict: ${res.error}` })) };
 
   const attachedEvidence: JudgeResult["attachedEvidence"] = [];
   const verdict = enforce(raw, input, { toolCalls, attached: attachedEvidence });

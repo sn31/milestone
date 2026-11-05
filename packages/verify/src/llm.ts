@@ -7,9 +7,9 @@ import { z } from "zod";
 import { stripRoots } from "./deterministic.ts";
 import { createAnthropicProvider, toAnthropicContent } from "./providers/anthropic.ts";
 import { modelSettings, type ModelSettings } from "./providers/config.ts";
-import { wrapUntrusted, type Block, type Message, type Provider, type ToolResult } from "./providers/types.ts";
+import { answerNowMessage, wrapUntrusted, type Block, type Message, type Provider, type ToolResult } from "./providers/types.ts";
 
-export { anthropic } from "./providers/anthropic.ts";
+export { anthropic, describeModelError } from "./providers/anthropic.ts";
 export { wrapUntrusted } from "./providers/types.ts";
 export type { Provider } from "./providers/types.ts";
 
@@ -110,26 +110,69 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
   roots?: string[];
 }
 
+/** Output budget per turn when the caller names none. Thinking counts against it, so it leaves room before the emit call. */
+export const DEFAULT_MAX_TOKENS = 8192;
+/** A turn cut off at max_tokens is re-sent once with double the budget, up to this (non-streaming requests stay short). */
+export const MAX_TOKENS_CEILING = 16_000;
+
+/** Why generateJson returned no answer; `max_tokens` and `refusal` are kept apart from a plain bad answer. */
+export type GenerateJsonFailure = "invalid" | "max_tokens" | "refusal" | "no_answer" | "stopped" | "turn_limit";
+
+export type GenerateJsonResult<T> = { ok: true; value: T; model: string } | { ok: false; error: string; reason: GenerateJsonFailure; model: string };
+
 /**
- * Asks for an answer in the zod schema (a forced `emit_<schemaName>` tool), running read-only tools in between. Returns the parsed object, or a parse failure (the caller
- * decides what a failure means, e.g. "unclear").
+ * Asks for an answer in the zod schema through an `emit_<schemaName>` tool, running read-only tools in between. Tool
+ * choice is never forced, so the history asks for the call instead: the last turn carries an answer-now instruction, and a
+ * turn that ends in text gets one nudge (one extra turn). A turn cut off at max_tokens is re-sent once with a bigger
+ * budget. Returns the parsed object, or a failure with its reason (the caller decides what a failure means, e.g. "unclear").
+ * Errors from the provider (API errors) are not caught here: they propagate to the caller.
  */
-export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T>): Promise<{ ok: true; value: z.infer<T>; model: string } | { ok: false; error: string; model: string }> {
+export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T>): Promise<GenerateJsonResult<z.infer<T>>> {
   const provider = getProvider();
-  const answer = { name: `emit_${o.schemaName}`, schemaName: o.schemaName, description: `Return the final ${o.schemaName}.`, schema: z.toJSONSchema(o.schema) as Record<string, unknown> };
+  const answer = { name: `emit_${o.schemaName}`, schemaName: o.schemaName, description: `Return the final ${o.schemaName}. Call this once, when you have your answer.`, schema: z.toJSONSchema(o.schema) as Record<string, unknown> };
   const tools = (o.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: z.toJSONSchema(t.input) as Record<string, unknown> }));
   const messages: Message[] = [{ role: "user", content: [{ type: "text", text: o.user }] }];
-  const maxTurns = o.maxTurns ?? 12;
+  let limit = o.maxTurns ?? 12;
   let model = provider.model;
+  let budget = o.maxTokens ?? DEFAULT_MAX_TOKENS;
+  let budgetRaised = false;
+  let nudged = false;
+  /** Whether the history already ends in an answer-now instruction (no second one is stacked on it). */
+  let asked = false;
+  const fail = (reason: GenerateJsonFailure, error: string) => ({ ok: false as const, error, reason, model });
 
-  for (let turn = 0; turn < maxTurns; turn++) {
-    const res = await provider.generate({ system: o.system, messages, tools, answer, forceAnswer: turn === maxTurns - 1, maxTokens: o.maxTokens ?? 4096 });
+  for (let turn = 0; turn < limit; ) {
+    if (turn === limit - 1 && !asked) {
+      messages.push(answerNowMessage(answer, "last_turn"));
+      asked = true;
+    }
+    const res = await provider.generate({ system: o.system, messages, tools, answer, maxTokens: budget });
     model = res.model;
     if (res.type === "answer") {
       const parsed = o.schema.safeParse(res.value);
-      return parsed.success ? { ok: true, value: parsed.data, model } : { ok: false, error: parsed.error.message, model };
+      return parsed.success ? { ok: true, value: parsed.data, model } : fail("invalid", parsed.error.message);
     }
-    if (res.type === "stop") return { ok: false, error: res.reason, model };
+    if (res.type === "truncated") {
+      // The cut-off turn is not appended: the same request goes again with more room, so history stays unchanged.
+      if (!budgetRaised && budget < MAX_TOKENS_CEILING) {
+        budgetRaised = true;
+        budget = Math.min(MAX_TOKENS_CEILING, budget * 2);
+        continue;
+      }
+      return fail("max_tokens", `the response hit max_tokens (${budget}) before an answer`);
+    }
+    if (res.type === "refused") return fail("refusal", `the model declined: ${res.reason}`);
+    if (res.type === "stop") return fail("stopped", res.reason);
+    turn++;
+    if (res.type === "text") {
+      if (nudged) return fail("no_answer", `the model replied in text without calling ${answer.name}`);
+      nudged = true;
+      messages.push(res.assistant, answerNowMessage(answer, "text_reply"));
+      asked = true;
+      limit = Math.max(limit, turn + 1);
+      continue;
+    }
+    asked = false;
     messages.push(res.assistant);
     const results: ToolResult[] = [];
     for (const u of res.calls) {
@@ -144,5 +187,5 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
     }
     messages.push({ role: "tool", results });
   }
-  return { ok: false, error: "turn limit", model };
+  return fail("turn_limit", "turn limit");
 }

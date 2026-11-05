@@ -25,7 +25,7 @@ import {
   type StoredDecision,
 } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, safePath, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
+import { describeModelError, detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, safePath, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { createEvidenceReader, createUploadEvidenceReader, git, scrubVerdictPaths } from "../lib/evidence.ts";
@@ -129,22 +129,41 @@ async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], 
 type Injection = { suspected: boolean; hits: Array<{ source: string; match: string }> };
 type Milestone = NonNullable<JudgeInput["milestone"]>;
 
-/** Judge with the model when one is configured; otherwise deterministic evidence only and everything else unclear. */
-async function conclude(deliveryId: string, milestone: Milestone, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
+/**
+ * Judge with the model when one is configured; otherwise deterministic evidence only and everything else unclear.
+ *
+ * A model call that throws (401, 429/529 after the SDK's retries, 400, a dropped connection) is caught here, at the
+ * judgment stage boundary: the deterministic results stand, every criterion they do not settle is unclear with the
+ * failure named, and the verdict is stored so decide() runs (P3 sends it to the client). The job completes instead of
+ * pg-boss re-running clone, install and tests, and the milestone never strands in "verifying". The model never decides:
+ * unclear is the honest verdict when it could not be asked.
+ */
+export async function conclude(deliveryId: string, milestone: Milestone, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
   if (await isModelConfigured()) {
-    const r = await judge({ deliveryId, milestone, criteria, evidence, deliveryTexts, reader: reader() });
-    if (extra.suspected) r.verdict.suspected_injection = true;
-    const judged = { toolCalls: r.toolCalls.map((c) => `${c.tool}${c.ok ? "" : " (failed)"}`), attachedEvidence: r.attachedEvidence };
-    return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits], judged };
+    try {
+      const r = await judge({ deliveryId, milestone, criteria, evidence, deliveryTexts, reader: reader() });
+      if (extra.suspected) r.verdict.suspected_injection = true;
+      const judged = { toolCalls: r.toolCalls.map((c) => `${c.tool}${c.ok ? "" : " (failed)"}`), attachedEvidence: r.attachedEvidence };
+      return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits], judged };
+    } catch (e) {
+      const failure = describeModelError(e);
+      console.error(`[verify] ${deliveryId}: the model call failed (${failure}); recording judgment criteria as unclear`, e);
+      return { ...checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, `not judged: the model call failed (${failure})`), judged: { modelError: failure } };
+    }
   }
+  return checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, "not judged: no model configured");
+}
+
+/** The verdict from deterministic evidence alone: each criterion it settles keeps its result, every other one is unclear. */
+function checksOnly(deliveryId: string, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, extra: Injection, unjudged: string) {
   const injection = detectInjection(deliveryTexts);
   const verdict = enforce({ delivery_id: deliveryId, criteria: [], suspected_injection: injection.suspected || extra.suspected }, { deliveryId, criteria, evidence });
   const byCriterion = new Map(evidence.filter((e) => e.criterion_id).map((e) => [e.criterion_id!, e]));
   for (const c of verdict.criteria) {
     const ev = byCriterion.get(c.criterion_id);
-    c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : "not judged: no model configured";
+    c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : unjudged;
   }
-  return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
+  return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null as string | null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
 }
 
 async function produceVerdict(deliveryId: string, milestone: Milestone, payload: CommitPayload, criteria: CriterionSpec[], baselineSha: string | null, onEvidence?: OnEvidence) {

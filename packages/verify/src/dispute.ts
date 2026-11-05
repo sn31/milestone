@@ -627,7 +627,7 @@ export async function draftResponse(pack: EvidencePack, opts: { env?: NodeJS.Pro
   const hash = promptHash(SYSTEM, user);
   const fallback = (why: string): DraftResponse => ({ ...templateResponse(pack), fallbackReason: why });
   try {
-    const res = await generateJson({ system: SYSTEM, user, schema: DraftSchema, schemaName: "dispute_response", maxTokens: 1500, maxTurns: 2 });
+    const res = await generateJson({ system: SYSTEM, user, schema: DraftSchema, schemaName: "dispute_response", maxTokens: 4096, maxTurns: 2 });
     if (!res.ok) return fallback(`model draft unusable: ${res.error.slice(0, 200)}`);
     const paragraphs = res.value.paragraphs.map((p) => p.trim());
     const text = paragraphs.join("\n\n");
