@@ -46,6 +46,9 @@ export async function POST(req: Request) {
     if (form) return back(req, `wait:${wait}`);
     return NextResponse.json({ error: "the demo was reset less than 30 s ago", retryAfter: wait }, { status: 429, headers: { ...noStore, "Retry-After": String(wait) } });
   }
+  // Uploads are cleared BEFORE the seed: a delivery accepted while the seed runs then keeps both its row and its
+  // files, instead of keeping the row while this deletes its files and stranding the milestone in verifying.
+  await clearUploads().catch((e: Error) => console.error(`demo reset: could not clear uploads: ${e.message}`));
   const result = await runShowcaseSeed();
   if (!result.ok) {
     console.error(`demo reset: ${result.error}`);
@@ -59,8 +62,6 @@ export async function POST(req: Request) {
   } catch (e) {
     console.error(`demo reset: could not clear the PayPal simulator: ${(e as Error).message}`);
   }
-  // The tables no longer point at any upload: reclaim the disk. The data reset stands if this fails.
-  await clearUploads().catch((e: Error) => console.error(`demo reset: could not clear uploads: ${e.message}`));
   if (form) return back(req, "done");
   return json({ ok: true });
 }
