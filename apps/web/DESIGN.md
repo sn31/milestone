@@ -10,6 +10,10 @@ explaining the gap rather than inventing a new style.
 Reference implementations: `src/app/layout.tsx` (header, wordmark, role switcher) and `src/app/page.tsx` (the contract ledger).
 Copy their structure.
 
+The review logs below are historical records of how each check was run at the time. They predate the Nov 4 2026 switch to
+Claude as the only model backend, so mentions of Ollama, a local model or "no model key" describe that older setup; the
+no-model fallback they exercise still exists (unset `ANTHROPIC_API_KEY`).
+
 ---
 
 ## 1. Tokens
