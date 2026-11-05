@@ -104,6 +104,10 @@ describe("evidence helpers", () => {
     });
   });
 
+  it("keeps the cut mark on a baseline summary the snapshot shortened", () => {
+    expect(parseBaseline("pass", "baseline suite: ran the baseline suite from 0123456789ab (2 file(s) changed); removed test/a.test.js, test/signup-for…").removed).toBe("test/a.test.js, test/signup-for…");
+  });
+
   it("splits a flag into place, finding, code and reason", () => {
     expect(parseFlag("gaming scan: index.js:50 reads process.env.CI (env-sniff): a; b; the delivered source reacts to the test run itself")).toEqual({ where: "index.js:50", what: "reads process.env.CI", code: "a; b", reason: "the delivered source reacts to the test run itself" });
     expect(parseFlag("something odd happened")).toEqual({ where: null, what: "something odd happened", code: null, reason: null });

@@ -15,6 +15,12 @@ const PENDING_STATUSES = ["pending", "sent"] as const;
 const MAX_EVIDENCE = 40;
 const MAX_EVENTS = 40;
 const MAX_SUMMARY = 240;
+/**
+ * The baseline-suite item (evd_tamper_check, BASELINE_EVIDENCE_ID in lines.ts) gets more room: its summary names the
+ * files the client's suite restored and removed, and the first-parent wording alone takes about 150 characters, so at
+ * 240 the demo's m1-pass log line was cut mid-file-name. The verifier already caps its file lists (capList).
+ */
+const MAX_BASELINE_SUMMARY = 600;
 /** Evidence summaries are cut to this many characters in SQL, before transfer (evidenceLines then caps them at MAX_SUMMARY). */
 const MAX_SUMMARY_RAW = 2048;
 
@@ -77,6 +83,8 @@ type AuditRow = Pick<typeof auditLog.$inferSelect, "id" | "createdAt" | "event">
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
+const cap = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
 /** Normalizes deliveries.evidence into short log lines; unknown shapes are skipped. */
 export function evidenceLines(evidence: unknown[] | null | undefined): EvidenceLine[] {
   const out: EvidenceLine[] = [];
@@ -89,7 +97,7 @@ export function evidenceLines(evidence: unknown[] | null | undefined): EvidenceL
       id: str(o.id) ?? `ev_${out.length}`,
       kind: str(o.kind) ?? "note",
       status: str(o.status),
-      summary: summary.length > MAX_SUMMARY ? `${summary.slice(0, MAX_SUMMARY - 1)}…` : summary,
+      summary: cap(summary, str(o.id) === "evd_tamper_check" ? MAX_BASELINE_SUMMARY : MAX_SUMMARY),
       criterionId: str(o.criterion_id),
     });
     if (out.length >= MAX_EVIDENCE) break;

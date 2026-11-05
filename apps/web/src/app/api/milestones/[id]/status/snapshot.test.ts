@@ -65,4 +65,11 @@ describe("evidenceLines", () => {
     expect(line!.summary.length).toBe(240);
     expect(line!.summary.endsWith("…")).toBe(true);
   });
+
+  it("gives the baseline-suite item room for its file lists", () => {
+    const summary = "baseline suite: ran the baseline suite from the first parent 3239053f1fe4 only (no baseline recorded for this milestone or pull request, so earlier merges are not covered) (5 file(s) changed); removed test/password.test.js, test/signup-form.test.js";
+    expect(summary.length).toBeGreaterThan(240);
+    const [line] = evidenceLines([{ id: "evd_tamper_check", kind: "diff", status: "pass", summary }]);
+    expect(line!.summary).toBe(summary);
+  });
 });

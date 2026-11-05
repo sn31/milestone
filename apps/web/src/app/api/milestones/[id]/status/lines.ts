@@ -66,6 +66,8 @@ export interface BaselineSuite {
 }
 
 export function parseBaseline(status: string | null | undefined, summary: string): BaselineSuite {
+  // A summary cut short by the snapshot ends in "…": the parts are read without it, and the cut part keeps it.
+  const cut = summary.endsWith("…");
   const body = summary.replace(/^baseline suite:\s*/i, "").replace(/…$/, "");
   const sha = /\b([0-9a-f]{7,40})\b/.exec(body)?.[1]?.slice(0, 12) ?? null;
   const firstParent = /from the first parent /.test(body);
@@ -74,6 +76,7 @@ export function parseBaseline(status: string | null | undefined, summary: string
     return { inPlace: false, sha, firstParent, restored: "", removed: "", other: [], reason: reason || null };
   }
   const parts = body.split(/;\s+/).slice(1);
+  if (cut && parts.length) parts[parts.length - 1] += "…";
   const pick = (word: string) => parts.find((p) => p.startsWith(`${word} `))?.slice(word.length + 1) ?? "";
   const other = parts.filter((p) => !/^(restored|removed) /.test(p) && !/^the delivery leaves /.test(p));
   return { inPlace: true, sha, firstParent, restored: pick("restored"), removed: pick("removed"), other, reason: null };
