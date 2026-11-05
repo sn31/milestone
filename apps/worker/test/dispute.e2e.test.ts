@@ -56,7 +56,7 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     (await db.$client.query(`select actor, detail from audit_log where event = $1 and detail->>'disputeId' = $2 order by created_at`, [event, disputeId])).rows as Array<{ actor: string; detail: Record<string, unknown> }>;
 
   beforeAll(async () => {
-    money.configureSimulator({ stateFile: null, webhookDelayMs: 10, disputeResolveDelayMs: 80, deliver: (e) => void events.push(e as never) });
+    money.configureSimulator({ stateFile: null, webhookDelayMs: 10, disputeResolveDelayMs: 1_000, deliver: (e) => void events.push(e as never) });
     await db.insert(users).values([
       { id: clientId, role: "client", name: "Casey E2E", email: `c-${tag}@e2e.test` },
       { id: freelancerId, role: "freelancer", name: "Frankie E2E", email: `f-${tag}@e2e.test`, paypalEmail: `f-${tag}@e2e.test` },
@@ -168,7 +168,7 @@ describe.skipIf(!run)("dispute copilot end to end", async () => {
     const live = await money.getDispute(money.createPayPalClient(), opened.disputeId);
     expect(live.status).toBe("UNDER_REVIEW");
 
-    // PayPal resolves ~2 s (here 80 ms) later; the webhook side records the outcome once.
+    // PayPal resolves ~2 s (here 1 s, long enough that the UNDER_REVIEW read above never races it under a loaded parallel run) later; the webhook side records the outcome once.
     await until(() => Boolean(eventFor("CUSTOMER.DISPUTE.RESOLVED", opened.disputeId)));
     const resolved = eventFor("CUSTOMER.DISPUTE.RESOLVED", opened.disputeId)!;
     expect(await money.recordDisputeEvent(db, resolved as never)).toMatchObject({ outcome: "resolved", milestoneId, enqueue: false });

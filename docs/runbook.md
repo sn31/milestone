@@ -111,7 +111,7 @@ It runs `judge()` on the cases in `fixtures/eval/cases.json`, prints per-case re
 
 ## The end-to-end suites
 
-Unit tests run with `pnpm test`. The suites that need Postgres are opt-in: start Postgres (`docker compose up -d`), run `pnpm db:migrate`, then
+Unit tests run with `pnpm test`. The suites that need Postgres are opt-in: start Postgres (`docker compose up -d`), run `pnpm db:migrate` and `pnpm db:seed` (the web suites need the seeded users), then
 
 ```bash
 MILESTONE_E2E=1 pnpm test
