@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Milestone",
-    "description": "One request per route in docs/openapi.yaml. Auth is the milestone_actor cookie (usr_client, usr_freelancer, usr_partner). Set demoRepoPath to a repo built with scripts/make-demo-repo.sh. The /api/dev/paypal routes answer 404 unless PAYPAL_MODE=simulated.",
+    "description": "One request per route in docs/openapi.yaml (the MCP server's GET and DELETE, which answer 405, are left out; /api/mcp has three POST examples instead). Auth is the milestone_actor cookie (usr_client, usr_freelancer, usr_partner); agent requests send Authorization: Bearer {{mandateToken}} from Create a mandate. Set demoRepoPath to a repo built with scripts/make-demo-repo.sh. The /api/dev/paypal routes and /api/disputes/dev answer 404 unless PAYPAL_MODE=simulated; /api/demo/reset answers 404 unless DEMO_MODE=1.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -32,6 +32,18 @@
     {
       "key": "demoRepoPath",
       "value": "/tmp/milestone-demo"
+    },
+    {
+      "key": "mandateId",
+      "value": ""
+    },
+    {
+      "key": "mandateToken",
+      "value": ""
+    },
+    {
+      "key": "disputeId",
+      "value": ""
     }
   ],
   "item": [
@@ -796,6 +808,655 @@
           ]
         },
         "description": "Only while PAYPAL_MODE=simulated."
+      }
+    },
+    {
+      "name": "Edit criteria (draft contract)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/contracts/{{contractId}}/criteria",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "contracts",
+            "{{contractId}}",
+            "criteria"
+          ]
+        },
+        "description": "Either party, while the contract is a draft. An edit after one approval clears both. 409 contract_locked once both approved or a milestone is funded. With DEMO_MODE=1, test/build commands are allowlisted.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"milestoneId\": \"{{milestoneId}}\",\n  \"operations\": [\n    {\n      \"op\": \"update\",\n      \"criterionId\": \"<criterion id>\",\n      \"patch\": {\n        \"description\": \"Signup form validates email\"\n      }\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Milestone status snapshot",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/{{milestoneId}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "{{milestoneId}}",
+            "status"
+          ]
+        },
+        "description": "Read only. What the contract page polls while a milestone is live."
+      }
+    },
+    {
+      "name": "Several milestone snapshots",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/milestones/status?ids=mst_1,mst_2,mst_3",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "milestones",
+            "status"
+          ],
+          "query": [
+            {
+              "key": "ids",
+              "value": "mst_1,mst_2,mst_3"
+            }
+          ]
+        },
+        "description": "Read only. Send If-None-Match with the last ETag to get 304 when nothing moved."
+      }
+    },
+    {
+      "name": "Reconcile now (operator)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_partner"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/ops/reconcile",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "ops",
+            "reconcile"
+          ]
+        },
+        "description": "Partner or platform only; agents are refused. Queues the reconcile job (PayPal MCP list_transactions, read-only). One per minute."
+      }
+    },
+    {
+      "name": "Dispute: submit response",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/disputes/{{disputeId}}/submit",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "disputes",
+            "{{disputeId}}",
+            "submit"
+          ]
+        },
+        "description": "Freelancer only. PayPal provide-evidence; a double submit is answered once.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"The delivered commit passed the client's suite; receipt attached.\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Dispute: accept claim",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_freelancer"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/disputes/{{disputeId}}/accept",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "disputes",
+            "{{disputeId}}",
+            "accept"
+          ]
+        },
+        "description": "Freelancer only; refunds the buyer. Only after the money left escrow (else 409 milestone_not_final). Without confirm: true nothing is sent.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"confirm\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Open a simulated dispute",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/disputes/dev",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "disputes",
+            "dev"
+          ]
+        },
+        "description": "Simulated PayPal only. The simulator then sends CUSTOMER.DISPUTE.CREATED to the webhook.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"milestoneId\": \"mst_3\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "List my mandates",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/agents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "agents"
+          ]
+        },
+        "description": "People only (any Authorization header is refused). Never returns tokens."
+      }
+    },
+    {
+      "name": "Create a mandate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/agents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "agents"
+          ]
+        },
+        "description": "People only. Returns { mandate, token, mcp }; the msa_ token is shown once. Copy it into mandateToken and the mandate id into mandateId.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"agentName\": \"Casey's agent\",\n  \"actions\": [\n    \"read\",\n    \"fund\",\n    \"approve\",\n    \"hold\"\n  ],\n  \"approveCap\": \"200.00\",\n  \"fundCap\": \"100.00\",\n  \"fundTotalCap\": \"300.00\",\n  \"autoFundNext\": true,\n  \"expiresInDays\": 30\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Change a mandate's funding terms",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/agents/{{mandateId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "agents",
+            "{{mandateId}}"
+          ]
+        },
+        "description": "People only. Only fund caps and autoFundNext can change; null clears a cap.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fundCap\": \"100.00\",\n  \"fundTotalCap\": \"200.00\",\n  \"autoFundNext\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Revoke a mandate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/agents/{{mandateId}}/revoke",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "agents",
+            "{{mandateId}}",
+            "revoke"
+          ]
+        },
+        "description": "People only. Idempotent; the agent is refused from its next call."
+      }
+    },
+    {
+      "name": "Agent console turn",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/agents/console",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "agents",
+            "console"
+          ]
+        },
+        "description": "Streams NDJSON console events. Needs ANTHROPIC_API_KEY (503 model_unavailable otherwise) and APP_URL.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"mandateId\": \"{{mandateId}}\",\n  \"token\": \"{{mandateToken}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"text\": \"What is the state of my signup-flow contract?\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "MCP: list tools",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{mandateToken}}"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json, text/event-stream"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/mcp",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "mcp"
+          ]
+        },
+        "description": "Stateless Streamable HTTP MCP server; authenticated by the mandate token. GET and DELETE answer 405.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"tools/list\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "MCP: read a milestone",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{mandateToken}}"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json, text/event-stream"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/mcp",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "mcp"
+          ]
+        },
+        "description": "Audited as agent:<name> for <user>.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 2,\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"get_milestone\",\n    \"arguments\": {\n      \"milestoneId\": \"{{milestoneId}}\"\n    }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "MCP: approve outside the policy (refused)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{mandateToken}}"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json, text/event-stream"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/mcp",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "mcp"
+          ]
+        },
+        "description": "Refused unless the milestone is in review on the policy's own release decision, every required criterion passed and the amount is within the mandate's cap. The refusal is in the audit log on /agents.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 3,\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"respond_to_review\",\n    \"arguments\": {\n      \"milestoneId\": \"{{milestoneId}}\",\n      \"action\": \"approve\"\n    }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Saved PayPal",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/vault",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "vault"
+          ]
+        },
+        "description": "Client only; agents are refused. { paymentMethod } or { paymentMethod: null }."
+      }
+    },
+    {
+      "name": "Start saving a PayPal",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/vault/start",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "vault",
+            "start"
+          ]
+        },
+        "description": "Client only. Payment Method Tokens v3 setup token; open approveUrl in a browser. Nothing is charged."
+      }
+    },
+    {
+      "name": "Saved PayPal return (browser)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/vault/return?approval_token_id=<setup token id>",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "vault",
+            "return"
+          ],
+          "query": [
+            {
+              "key": "approval_token_id",
+              "value": "<setup token id>"
+            }
+          ]
+        },
+        "description": "Where PayPal sends the payer back; exchanges the setup token for a payment token and redirects to /agents."
+      }
+    },
+    {
+      "name": "Remove the saved PayPal",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_client"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/vault",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "vault"
+          ]
+        },
+        "description": "Client only. Marked removed first (no agent can charge it), then deleted at PayPal. Idempotent."
+      }
+    },
+    {
+      "name": "Simulated save-PayPal approve",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/dev/paypal/vault-approve?token=<setup token id>",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "dev",
+            "paypal",
+            "vault-approve"
+          ],
+          "query": [
+            {
+              "key": "token",
+              "value": "<setup token id>"
+            }
+          ]
+        },
+        "description": "Only while PAYPAL_MODE=simulated. Approves the setup token and redirects to its return_url."
+      }
+    },
+    {
+      "name": "Reset the hosted demo",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/demo/reset",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "demo",
+            "reset"
+          ]
+        },
+        "description": "Only with DEMO_MODE=1 (404 otherwise). Re-seeds the showcase and empties uploads; at most once every 30 s (429 with Retry-After)."
       }
     }
   ]

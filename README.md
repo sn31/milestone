@@ -58,6 +58,7 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 ## Documentation
 
 - [docs/submission.md](docs/submission.md): the Devpost text.
+- [docs/judging.md](docs/judging.md): the judges' testing guide (hosted demo, local run, the agent surface, what is simulated).
 - [docs/architecture.md](docs/architecture.md): components, state machine, money route, jobs, the agent layer, data model.
 - [docs/mcp.md](docs/mcp.md): the Milestone MCP server, mandates and the agent guarantee.
 - [docs/eval.md](docs/eval.md): the model eval set and runs.

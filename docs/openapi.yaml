@@ -1,9 +1,13 @@
 openapi: 3.1.0
 info:
   title: Milestone API
-  version: 0.2.0
+  version: 0.3.0
   summary: HTTP routes of apps/web
   description: |
+    Scope: every route handler under apps/web/src/app/api as of Nov 5 2026 (34 files). The agent, vault, dispute,
+    status, reconcile and demo routes added after 0.2.0 are described at path, method, parameter and status level;
+    their response bodies are named in the descriptions rather than fully modelled.
+
     Routes under apps/web/src/app/api. Authentication is a role cookie, `milestone_actor`, set by the role switcher
     in the UI. Values: usr_client, usr_freelancer, usr_partner. A missing or unknown cookie acts as the client.
     This is a hackathon stand-in for real sign-in. The two webhook routes do not use the cookie; they verify a
@@ -14,6 +18,10 @@ info:
     /api/dev/paypal/* routes exist only while PAYPAL_MODE=simulated and answer 404 otherwise (mode answers always).
     Roles: usr_client, usr_freelancer and usr_partner act on the demo contracts; the freelancer and client checks
     compare the cookie's user with the contract's parties.
+
+    Agents authenticate with `Authorization: Bearer msa_...` (a mandate token from POST /api/agents) on /api/mcp and on
+    /api/milestones/{id}/review. Mandate, saved-PayPal and operator routes refuse any request with an Authorization
+    header: those are for people. /api/demo/reset exists only with DEMO_MODE=1.
   license:
     name: MIT
     identifier: MIT
@@ -30,6 +38,10 @@ tags:
   - name: deliveries
   - name: advances
   - name: ops
+  - name: disputes
+  - name: agents
+  - name: vault
+  - name: demo
   - name: dev
 paths:
   /api/contracts:
@@ -138,6 +150,14 @@ paths:
         Client only. approve (from review or needs_client) and confirm_partial (from needs_client) queue the release
         job. veto (from review) and hold (from needs_client) move the milestone to held. Refused once the payout has
         been claimed, after the window closed (veto and hold), or when a required criterion did not pass.
+
+        An agent may call it with a mandate token. Its approve is accepted only while the milestone is in review on the
+        policy's own release decision (P6) for the latest delivery, every required criterion passed and the amount is
+        within the mandate's cap; veto and hold need "hold" in the mandate; confirm_partial is never an agent's. Accepted
+        and refused agent calls are audited.
+      security:
+        - roleCookie: []
+        - mandateToken: []
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
       requestBody:
@@ -168,6 +188,7 @@ paths:
                       status: { type: string, const: held }
                       changed: { type: boolean }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409":
@@ -565,6 +586,350 @@ paths:
                         senderItemId: { type: string }
                         reason: { type: string }
         "404": { $ref: "#/components/responses/Error" }
+  /api/contracts/{id}/criteria:
+    patch:
+      tags: [contracts]
+      operationId: editCriteria
+      summary: Edit one milestone's release conditions while the contract is a draft
+      description: |
+        Either party. Body: { milestoneId, operations: [{ op: add | remove | update | reorder, ... }] }. Validated with
+        the compiler's rules and audited before and after; an edit after one party approved clears both approvals. With
+        DEMO_MODE=1, test and build commands are limited to npm test, npm run <script> and node <relative .js/.mjs>.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: ctr_demo }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [milestoneId, operations]
+              properties:
+                milestoneId: { type: string }
+                operations: { type: array, items: { type: object, additionalProperties: true } }
+      responses:
+        "200": { description: "{ ok, milestoneId, criteria, approvalsCleared, changed }" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "contract_locked: both parties approved, or a milestone is funded" }
+        "422": { description: "invalid_criteria, with an errors list" }
+  /api/milestones/{id}/status:
+    get:
+      tags: [milestones]
+      operationId: getMilestoneStatus
+      summary: Live snapshot of one milestone (status, decision, latest verification, newest audit row)
+      description: Read only. The contract page polls it while a milestone is live.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
+      responses:
+        "200": { description: Snapshot }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/milestones/status:
+    get:
+      tags: [milestones]
+      operationId: getMilestoneStatuses
+      summary: Snapshots of several milestones at once
+      description: Read only. Sends an ETag; a poll with a matching If-None-Match gets 304. Unknown ids are left out.
+      parameters:
+        - { name: ids, in: query, required: true, schema: { type: string }, example: "mst_1,mst_2,mst_3" }
+      responses:
+        "200": { description: Snapshots of the milestones that exist }
+        "304": { description: Nothing changed since the ETag }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/ops/reconcile:
+    post:
+      tags: [ops]
+      operationId: reconcileNow
+      summary: Queue a reconciliation against PayPal's transactions
+      description: |
+        Partner or platform only; agents (any Authorization header) are refused. Queues the worker's reconcile job, which
+        reads list_transactions through PayPal's MCP server (read-only). A repeat inside the same minute is a no-op.
+      responses:
+        "200": { description: "{ ok, queued: reconcile, jobId }" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/disputes/{id}/submit:
+    post:
+      tags: [disputes]
+      operationId: submitDisputeEvidence
+      summary: Send the freelancer's dispute response to PayPal (provide-evidence)
+      description: The contract's freelancer only. The delivered files go as documents when PayPal takes them. A double submit is answered once.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: Dispute id }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [text], properties: { text: { type: string } } }
+      responses:
+        "200": { description: "{ ok, requestId, attached, skipped }" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/disputes/{id}/accept:
+    post:
+      tags: [disputes]
+      operationId: acceptDisputeClaim
+      summary: Accept the buyer's claim (PayPal refunds the buyer)
+      description: |
+        The contract's freelancer only, and only once the milestone's money left escrow (else 409 milestone_not_final).
+        Without `confirm: true` nothing is sent. The refund moves through execute.ts, which books it in the ledger.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: Dispute id }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: boolean, const: true }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        "200": { description: "{ ok, requestId }" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/disputes/dev:
+    post:
+      tags: [dev]
+      operationId: openSimulatedDispute
+      summary: Have the simulated buyer open a dispute against a milestone's capture
+      security: []
+      description: Simulated PayPal only. The simulator then sends CUSTOMER.DISPUTE.CREATED to the PayPal webhook. JSON or form body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [milestoneId]
+              properties:
+                milestoneId: { type: string, example: mst_3 }
+                reason: { type: string, example: MERCHANDISE_OR_SERVICE_NOT_RECEIVED }
+      responses:
+        "200": { description: The simulated dispute, with milestoneId }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/agents:
+    get:
+      tags: [agents]
+      operationId: listMandates
+      summary: The signed-in user's agent mandates, newest first (never the tokens)
+      description: People only; a request with an Authorization header is refused (403 agents_cannot_manage_mandates).
+      responses:
+        "200": { description: "{ userId, mandates }" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [agents]
+      operationId: createMandate
+      summary: Create a mandate and its bearer token (shown once)
+      description: |
+        People only. "approve" needs an approval cap; fund caps come in pairs and need "fund"; auto-fund needs both fund
+        caps. The token is stored as its sha256 and returned only here, with the MCP URL and header to use it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateMandateRequest" }
+      responses:
+        "201": { description: "{ mandate, token, shownOnce, mcp: { url, header } }" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}:
+    patch:
+      tags: [agents]
+      operationId: updateMandateFunding
+      summary: Change a live mandate's funding terms
+      description: |
+        People only. Only fundCap, fundTotalCap (or their Minor forms) and autoFundNext can change; a key left out keeps
+        its value, null clears a cap. Actions, approval cap, currency and expiry never change: revoke and create anew.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fundCap: { type: [string, "null"], example: "100.00" }
+                fundTotalCap: { type: [string, "null"], example: "300.00" }
+                autoFundNext: { type: boolean }
+      responses:
+        "200": { description: "{ ok, changed, mandate }" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/revoke:
+    post:
+      tags: [agents]
+      operationId: revokeMandate
+      summary: Revoke a mandate (idempotent); the agent is refused from its next call
+      description: People only.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "{ ok, changed, mandate }" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/agents/console:
+    post:
+      tags: [agents]
+      operationId: agentConsoleTurn
+      summary: One turn of the built-in agent console, streamed as NDJSON
+      description: |
+        The signed-in client names one of their mandates and supplies its token; the server runs Claude as an MCP client
+        of /api/mcp under that token (and of PayPal's MCP server, list_transactions only). Needs ANTHROPIC_API_KEY
+        (503 model_unavailable otherwise) and APP_URL or MILESTONE_MCP_URL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mandateId, token, messages]
+              properties:
+                mandateId: { type: string }
+                token: { type: string, example: msa_... }
+                messages: { type: array, items: { type: object, additionalProperties: true }, description: Ends with the client's message }
+      responses:
+        "200":
+          description: Console events, one JSON object per line
+          content: { application/x-ndjson: { schema: { type: string } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/mcp:
+    post:
+      tags: [agents]
+      operationId: mcpPost
+      summary: The Milestone MCP server (Streamable HTTP, stateless, JSON-RPC)
+      description: |
+        Authenticated by a mandate token; the agent acts as the mandate's user through the same routes a human uses, and
+        every call, refused ones included, is audited. Seven tools: list_contracts, get_milestone, get_ledger,
+        draft_contract, fund_milestone, deliver_milestone, respond_to_review. See docs/mcp.md.
+      security:
+        - mandateToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: "A JSON-RPC 2.0 message: initialize, tools/list, tools/call" }
+      responses:
+        "200": { description: JSON-RPC response }
+        "401": { description: Missing or unknown token }
+        "403": { description: Mandate expired or revoked }
+    get:
+      tags: [agents]
+      operationId: mcpGet
+      summary: Not supported by this stateless server (405)
+      security:
+        - mandateToken: []
+      responses:
+        "405": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [agents]
+      operationId: mcpDelete
+      summary: Not supported by this stateless server (405)
+      security:
+        - mandateToken: []
+      responses:
+        "405": { $ref: "#/components/responses/Error" }
+  /api/vault:
+    get:
+      tags: [vault]
+      operationId: getSavedPayPal
+      summary: "The signed-in client's saved PayPal, or { paymentMethod: null }"
+      description: Clients only; agents are refused.
+      responses:
+        "200": { description: "{ paymentMethod }" }
+        "403": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [vault]
+      operationId: removeSavedPayPal
+      summary: Remove the saved PayPal (marked removed first, then deleted at PayPal)
+      description: Clients only. { paymentMethodId } in the body or ?id=, else the current one. Idempotent.
+      parameters:
+        - { name: id, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { description: "{ ok, paymentMethod }" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/vault/start:
+    post:
+      tags: [vault]
+      operationId: startSavePayPal
+      summary: Start saving a PayPal (Payment Method Tokens v3 setup token); nothing is charged
+      description: Clients only; agents are refused. One saved PayPal at a time (409 already_saved). The browser goes to approveUrl.
+      responses:
+        "200":
+          description: Setup token created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setupTokenId, approveUrl]
+                properties:
+                  setupTokenId: { type: string }
+                  approveUrl: { type: string }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/PayPalError" }
+  /api/vault/return:
+    get:
+      tags: [vault]
+      operationId: returnFromSavePayPal
+      summary: PayPal's return URL after the payer approves; exchanges the setup token for a payment token
+      description: The setup token must belong to the signed-in user. Redirects to /agents?vault=<outcome>.
+      parameters:
+        - { name: approval_token_id, in: query, required: false, schema: { type: string } }
+        - { name: cancelled, in: query, required: false, schema: { type: string, enum: ["1"] } }
+      responses:
+        "303":
+          description: Redirect to /agents
+          headers:
+            Location: { schema: { type: string } }
+  /api/dev/paypal/vault-approve:
+    get:
+      tags: [dev]
+      operationId: approveSimulatedVaultSetup
+      summary: Simulated PayPal approval page for saving a PayPal
+      security: []
+      description: |
+        Exists only while PAYPAL_MODE is simulated (404 otherwise). Marks the setup token approved and redirects to its
+        return_url (only one on this app) with ?approval_token_id=<id>.
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "303": { description: Redirect to the setup token's return_url }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/demo/reset:
+    post:
+      tags: [demo]
+      operationId: resetDemo
+      summary: Put the hosted demo back to the showcase data and empty uploaded files
+      security: []
+      description: |
+        Exists only with DEMO_MODE=1 (404 otherwise). At most once every 30 s across all visitors (429 with
+        Retry-After). A form post (the demo band's Reset demo button) gets a 303 to home; a JSON caller gets { ok: true }.
+      responses:
+        "200": { description: "{ ok: true }" }
+        "303": { description: Form post redirected home }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { description: "Reset less than 30 s ago: { error, retryAfter }" }
+        "500": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     roleCookie:
@@ -572,6 +937,10 @@ components:
       in: cookie
       name: milestone_actor
       description: One of usr_client, usr_freelancer, usr_partner. Demo stand-in for sign-in.
+    mandateToken:
+      type: http
+      scheme: bearer
+      description: An agent mandate token (msa_...), shown once when the mandate is created.
   responses:
     Error:
       description: Error
@@ -639,6 +1008,26 @@ components:
           type: array
           items: { type: string }
           description: Case-insensitive strings the file text must contain
+    CreateMandateRequest:
+      type: object
+      required: [agentName, actions]
+      properties:
+        agentName: { type: string, maxLength: 80, example: Casey's agent }
+        actions:
+          type: array
+          minItems: 1
+          items: { type: string, example: approve }
+          description: Mandate actions the caller's role may delegate, for example read, fund, approve, hold
+        currency: { type: string, default: USD }
+        approveCap: { type: string, example: "200.00", description: Major units; required when actions include approve }
+        approveCapMinor: { type: integer, minimum: 0 }
+        fundCap: { type: string, example: "100.00", description: Per milestone; set with fundTotalCap or neither }
+        fundCapMinor: { type: integer, minimum: 0 }
+        fundTotalCap: { type: string, example: "300.00", description: Over the mandate's life }
+        fundTotalCapMinor: { type: integer, minimum: 0 }
+        autoFundNext: { type: boolean, default: false, description: Fund the next milestone after each release; needs fund and both caps }
+        expiresInDays: { type: integer, minimum: 1, maximum: 90, default: 30 }
+        expiresAt: { type: string, format: date-time }
     ArmFailureRequest:
       type: object
       description: Either sender_item_id, or milestoneId with an optional party.
