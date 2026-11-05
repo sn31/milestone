@@ -7,7 +7,7 @@ import { EvidencePanel, toEvidenceItems, type EvidenceItem } from "@/components/
 import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, verdictTone, type CriterionStatus } from "@/components/ui";
 import { toggled } from "@/components/ui/detail-grid";
 import { formatDateTime, formatMoney } from "@/lib/format";
-import { BASELINE_EVIDENCE_ID, failingTests, firstLine, isFlag, isOwnTests, ownTestsText, parseBaseline, parseFlag } from "@/app/api/milestones/[id]/status/lines";
+import { BASELINE_EVIDENCE_ID, RECORDED_MODEL, failingTests, firstLine, isFlag, isOwnTests, ownTestsText, parseBaseline, parseFlag } from "@/app/api/milestones/[id]/status/lines";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
 
@@ -230,7 +230,7 @@ export function VerdictView({
 
   const meta = (
     <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      {delivery.model ? <span>{checksOnly ? "no model · checks only" : delivery.model}</span> : null}
+      {delivery.model ? <span>{checksOnly ? "no model · checks only" : delivery.model === RECORDED_MODEL ? "recorded for the showcase · no model ran" : delivery.model}</span> : null}
       {delivery.verifiedAt ? <span>{formatDateTime(delivery.verifiedAt)}</span> : <span>received {formatDateTime(delivery.receivedAt)}</span>}
     </span>
   );

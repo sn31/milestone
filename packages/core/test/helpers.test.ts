@@ -4,7 +4,9 @@ import { commitDeliveryId } from "../src/ids.ts";
 import { CommitPayload, StoredDecision, decisionDeliveryId, formatMinor, minorDigits, requiredNotPassed, toPayPalValue } from "../src/schemas.ts";
 import { accountKind, accounts, isFreelancerAccount, isHeldAccount, ledgerRefs } from "../src/ledger.ts";
 import { OP_KINDS } from "../src/ops.ts";
-import { paypalMode, payoutReceiver } from "../src/env.ts";
+import { RECORDED_VERDICT_MODEL, envOr, paypalMode, payoutReceiver, seedPaypalEmails, seedVerdictModel } from "../src/env.ts";
+// Read by path (core does not depend on verify) so the seed's copy of the default cannot drift from the real one.
+import { DEFAULT_ANTHROPIC_MODEL } from "../../verify/src/providers/config.ts";
 import { MIN_REVIEW_WINDOW_SECONDS, RELEASABLE_STATUSES, reviewWindowSeconds, statusForDecision } from "../src/milestones.ts";
 
 describe("json helpers", () => {
@@ -225,6 +227,28 @@ describe("env", () => {
     expect(payoutReceiver({ paypalEmail: null, email: "a@x" }, box)).toBeNull();
     expect(payoutReceiver({ paypalEmail: null, email: "a@x" }, sim)).toBe("a@x");
     expect(payoutReceiver(undefined, sim)).toBeNull();
+    // A blank paypalEmail (seeded from an empty .env line) is no email.
+    expect(payoutReceiver({ paypalEmail: "", email: "a@x" }, sim)).toBe("a@x");
+    expect(payoutReceiver({ paypalEmail: " ", email: "a@x" }, box)).toBeNull();
+  });
+  it("envOr: blank or unset is undefined, else trimmed", () => {
+    expect(envOr("X", { X: "" })).toBeUndefined();
+    expect(envOr("X", { X: "  " })).toBeUndefined();
+    expect(envOr("X", {})).toBeUndefined();
+    expect(envOr("X", { X: " a@x " })).toBe("a@x");
+  });
+  it("seedPaypalEmails: empty .env lines fall back to the simulated emails", () => {
+    const blank = { NODE_ENV: "development", PAYPAL_FREELANCER_EMAIL: "", PAYPAL_PARTNER_EMAIL: "", SPIKE_FREELANCER_EMAIL: "", PAYPAL_CLIENT_ID: "", PAYPAL_MODE: "" };
+    expect(seedPaypalEmails(blank)).toEqual({ freelancer: "freelancer@milestone.test", partner: "partner@milestone.test" });
+    expect(seedPaypalEmails({ ...blank, SPIKE_FREELANCER_EMAIL: "s@x" }).freelancer).toBe("s@x");
+    expect(seedPaypalEmails({ ...blank, PAYPAL_FREELANCER_EMAIL: "f@x", PAYPAL_PARTNER_EMAIL: "p@x" })).toEqual({ freelancer: "f@x", partner: "p@x" });
+    expect(seedPaypalEmails({ ...blank, PAYPAL_MODE: "sandbox" })).toEqual({ freelancer: null, partner: null });
+  });
+  it("seedVerdictModel: the app's Claude model with a key, else the recorded marker", () => {
+    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "", MILESTONE_MODEL: "" })).toBe(RECORDED_VERDICT_MODEL);
+    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "" })).toBe(DEFAULT_ANTHROPIC_MODEL);
+    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "claude-opus-5-5" })).toBe("claude-opus-5-5");
+    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "qwen3:14b" })).toBe(DEFAULT_ANTHROPIC_MODEL);
   });
 });
 

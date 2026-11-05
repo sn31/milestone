@@ -52,7 +52,7 @@ export async function POST(req: Request) {
   if (auth.mandate.id !== mandateId || auth.mandate.userId !== actor.userId) {
     return jsonError("That token is for a different mandate", 403, { reason: "mandate_mismatch" });
   }
-  if (!(await isModelConfigured())) return jsonError("No model is reachable, so the agent cannot run", 503, { reason: "model_unavailable" });
+  if (!(await isModelConfigured())) return jsonError("No model is configured: set ANTHROPIC_API_KEY to run the agent", 503, { reason: "model_unavailable" });
 
   const mandate = toSummary(auth.mandate);
   const [user] = await db.select({ name: users.name }).from(users).where(eq(users.id, auth.mandate.userId)).limit(1);
@@ -60,6 +60,8 @@ export async function POST(req: Request) {
   const appUrl = process.env.MILESTONE_MCP_URL ? null : process.env.APP_URL;
   if (!process.env.MILESTONE_MCP_URL && !appUrl) return jsonError("Set APP_URL or MILESTONE_MCP_URL so the console knows where its MCP server is", 503, { reason: "mcp_url_unset" });
   const mcpUrl = process.env.MILESTONE_MCP_URL ?? `${appUrl!.replace(/\/+$/, "")}/api/mcp`;
+  // Base for the approval links the console shows (approvalLinks keeps only same-origin /approve/ paths on it).
+  const origin = process.env.APP_URL?.trim() || new URL(req.url).origin;
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({

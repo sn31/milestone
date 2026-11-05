@@ -1,3 +1,4 @@
+import "@/lib/env"; // the root .env (ANTHROPIC_API_KEY) before isModelConfigured reads it
 import { isModelConfigured } from "@milestone/verify";
 import type { Metadata } from "next";
 import { Button, PageHeader, Panel, StateGlyph, cx } from "@/components/ui";

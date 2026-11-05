@@ -50,6 +50,15 @@ export function loadRootEnv(): string | null {
   return state.path;
 }
 
+/**
+ * An env var's trimmed value, or undefined when it is unset or blank. `cp .env.example .env` loads every `NAME=` line
+ * as "", which a plain `??` passes straight through; read optional settings with this instead.
+ */
+export function envOr(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const v = env[name]?.trim();
+  return v ? v : undefined;
+}
+
 // ---------- PayPal mode ----------
 
 export type PayPalMode = "simulated" | "sandbox";
@@ -69,5 +78,30 @@ export function paypalMode(env: NodeJS.ProcessEnv = process.env): PayPalMode {
  */
 export function payoutReceiver(user: { paypalEmail: string | null; email: string } | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
   if (!user) return null;
-  return user.paypalEmail ?? (paypalMode(env) === "simulated" ? user.email : null);
+  return user.paypalEmail?.trim() || (paypalMode(env) === "simulated" ? user.email : null);
+}
+
+// ---------- Seed defaults ----------
+
+/** The demo users' PayPal emails: the configured ones, else in simulated mode their account emails, else none. */
+export function seedPaypalEmails(env: NodeJS.ProcessEnv = process.env): { freelancer: string | null; partner: string | null } {
+  const simulated = paypalMode(env) === "simulated";
+  return {
+    freelancer: envOr("PAYPAL_FREELANCER_EMAIL", env) ?? envOr("SPIKE_FREELANCER_EMAIL", env) ?? (simulated ? "freelancer@milestone.test" : null),
+    partner: envOr("PAYPAL_PARTNER_EMAIL", env) ?? (simulated ? "partner@milestone.test" : null),
+  };
+}
+
+/** The model id the showcase seed stamps on the verdicts it writes when no Claude key is set (no model would run). */
+export const RECORDED_VERDICT_MODEL = "recorded-showcase";
+
+/**
+ * The model id on the showcase seed's verdicts: the model the app would use with this env, so receipts match the demo
+ * banner. Mirrors anthropicModel() in packages/verify/src/providers/config.ts (core does not depend on verify): keep
+ * the default in sync. Without ANTHROPIC_API_KEY no model runs, so the verdicts are labelled as recorded.
+ */
+export function seedVerdictModel(env: NodeJS.ProcessEnv = process.env): string {
+  if (!envOr("ANTHROPIC_API_KEY", env)) return RECORDED_VERDICT_MODEL;
+  const m = envOr("MILESTONE_MODEL", env);
+  return m && m.startsWith("claude") ? m : "claude-sonnet-5-5";
 }

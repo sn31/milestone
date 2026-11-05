@@ -250,7 +250,7 @@ export function AgentConsole({ mandates, initialMandateId, now, modelReady, mode
             id="agent-console-input"
             rows={1}
             className={cx(inputClass, "max-h-32 min-h-10 resize-none")}
-            placeholder={!modelReady ? "No model is reachable" : !mandate ? "Create a mandate first" : `Message ${agentName}`}
+            placeholder={!modelReady ? "No model configured: set ANTHROPIC_API_KEY" : !mandate ? "Create a mandate first" : `Message ${agentName}`}
             value={draft}
             disabled={disabled}
             onChange={(e) => setDraft(e.target.value)}

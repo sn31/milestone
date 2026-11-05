@@ -3,7 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
-import { loadRootEnv, paypalMode } from "./env.ts";
+import { loadRootEnv, paypalMode, seedPaypalEmails, seedVerdictModel } from "./env.ts";
 import { ledgerRefs } from "./ledger.ts";
 import { createMandate } from "./mandates.ts";
 import { advances, agentMandates, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paymentMethods, paypalOps, users } from "./schema.ts";
@@ -13,6 +13,7 @@ loadRootEnv(); // no .env: rely on process.env
 
 const db = createDb();
 const simulated = paypalMode() === "simulated";
+const paypalEmails = seedPaypalEmails();
 
 // `--if-empty` (Render's pre-deploy runs `seed --showcase --if-empty` on every deploy) seeds only a database whose users
 // table is empty, so the first deploy gets the demo and later deploys leave whatever the demo has become alone.
@@ -44,8 +45,8 @@ if (process.argv.includes("--reset")) {
 const userRows = [
   { id: "usr_client", role: "client" as const, name: "Casey Client", email: "client@milestone.test" },
   { id: "usr_client2", role: "client" as const, name: "Dana Client", email: "client2@milestone.test" },
-  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: process.env.PAYPAL_FREELANCER_EMAIL ?? process.env.SPIKE_FREELANCER_EMAIL ?? (simulated ? "freelancer@milestone.test" : null) },
-  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: process.env.PAYPAL_PARTNER_EMAIL ?? (simulated ? "partner@milestone.test" : null) },
+  { id: "usr_freelancer", role: "freelancer" as const, name: "Frankie Freelancer", email: "freelancer@milestone.test", githubLogin: "milestone-demo", paypalEmail: paypalEmails.freelancer },
+  { id: "usr_partner", role: "partner" as const, name: "Parker Partner", email: "partner@milestone.test", paypalEmail: paypalEmails.partner },
   { id: "usr_platform", role: "platform" as const, name: "Milestone Platform", email: "platform@milestone.test" },
 ];
 for (const u of userRows) {
@@ -183,7 +184,7 @@ if (process.argv.includes("--showcase")) {
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
   };
   const min = (n: number) => new Date(now.getTime() + n * 60_000);
-  const model = process.env.MILESTONE_MODEL ?? "showcase-model";
+  const model = seedVerdictModel();
 
   type Ms = { id: string; contractId: string; clientId: string; amountMinor: number; seq: number };
   const all: Ms[] = [

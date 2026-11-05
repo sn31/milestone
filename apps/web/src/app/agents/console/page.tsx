@@ -36,7 +36,7 @@ export default async function AgentConsolePage({ searchParams }: PageProps<"/age
           initialMandateId={initial}
           now={new Date().getTime()}
           modelReady={modelReady}
-          modelLabel={modelReady ? `Claude · ${currentModel()}` : "no model reachable"}
+          modelLabel={modelReady ? `Claude · ${currentModel()}` : "no model · set ANTHROPIC_API_KEY"}
           clientName={ACTOR_NAMES[actor.userId] ?? actor.userId}
         />
       </div>

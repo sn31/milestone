@@ -26,6 +26,8 @@ export const CHECK_WORD: Record<CheckStatus, string> = { pass: "pass", fail: "fa
 
 /** The model id the worker records when no model was reachable: deterministic checks only, judgment to the client. */
 export const CHECKS_ONLY_MODEL = "deterministic-only";
+/** The model id the showcase seed records on verdicts it wrote without a model (RECORDED_VERDICT_MODEL in core). */
+export const RECORDED_MODEL = "recorded-showcase";
 
 const hhmmss = (iso: string) => iso.slice(11, 19);
 const col = (word: string) => word.padEnd(8, " ");

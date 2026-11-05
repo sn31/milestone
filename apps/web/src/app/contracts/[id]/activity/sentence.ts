@@ -1,5 +1,6 @@
 // The audit log's Detail column: one plain sentence per event, from its detail. The raw object stays one click away in
 // the expanded row. Pure, so it is unit-testable and runs on the server with the redaction applied first.
+import { RECORDED_MODEL } from "@/app/api/milestones/[id]/status/lines";
 import { formatMoney } from "@/lib/format";
 import { payoutFailureLine, payoutReason } from "@/lib/payout-failure";
 
@@ -73,6 +74,8 @@ export function eventSentence(event: string, raw: unknown, names: Record<string,
         const word = result === "pass" ? "every check passed" : result === "fail" ? "a required check did not pass" : result === "partial" ? "required checks passed; the rest goes to the client" : result;
         return `Verdict from the checks alone: ${word}${ignored}`;
       }
+      // The showcase seed's verdicts when no Claude key is set: recorded, not judged on this host.
+      if (d.model === RECORDED_MODEL) return `Verdict: ${result}, recorded for the showcase (no model ran)${ignored}`;
       return `Verdict: ${result} by ${d.model}${ignored}`;
     }
     case "policy.decided": {
