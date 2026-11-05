@@ -111,7 +111,7 @@ describe.skipIf(!run)("release and settle end to end", async () => {
     }
     const state = async () => ({
       m: (await db.query.milestones.findFirst({ where: (t, { eq }) => eq(t.id, milestoneId) }))!,
-      ops: (await db.$client.query(`select kind, key, status, paypal_id, response from paypal_ops where key = $1 or starts_with(key, $1 || ':') order by key`, [milestoneId])).rows as Array<{ kind: string; key: string; status: string; paypal_id: string | null; response: { items?: Record<string, { status: string }> } | null }>,
+      ops: (await db.$client.query(`select kind, key, status, paypal_id, response from paypal_ops where key = $1 or starts_with(key, $1 || ':') order by key, created_at, kind`, [milestoneId])).rows as Array<{ kind: string; key: string; status: string; paypal_id: string | null; response: { items?: Record<string, { status: string }> } | null }>,
       ledger: (await db.$client.query(`select ref, account, amount_minor::int as amount, direction from ledger_entries where ref like $1 order by ref, account`, [`%:${milestoneId}%`])).rows as Array<{ ref: string; account: string; amount: number; direction: string }>,
       audits: (await db.$client.query(`select event from audit_log where milestone_id = $1 order by created_at`, [milestoneId])).rows.map((r: { event: string }) => r.event),
       operator: (await db.$client.query(`select detail from audit_log where milestone_id = $1 and event = 'milestone.needs_operator' order by created_at`, [milestoneId])).rows.map((r: { detail: Record<string, unknown> }) => r.detail),

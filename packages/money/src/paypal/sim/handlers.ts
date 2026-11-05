@@ -629,14 +629,19 @@ export const simulatedFetch: typeof fetch = async (input, init) => {
 
 const RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
+/**
+ * The delivery hook is read when the event is scheduled, not when its timer fires: an event raised under a test's hook
+ * goes to that hook even if the test has since put the default back, instead of trying APP_URL after teardown.
+ */
 function scheduleWebhook(evt: WebhookEvent, delayMs: number): void {
-  setTimeout(() => void deliver(evt, 0), delayMs);
+  const sink = config.deliver;
+  setTimeout(() => void deliver(evt, 0, sink), delayMs).unref?.();
 }
 
-async function deliver(evt: WebhookEvent, attempt: number): Promise<void> {
+async function deliver(evt: WebhookEvent, attempt: number, sink: typeof config.deliver): Promise<void> {
   try {
-    if (config.deliver) {
-      await config.deliver(evt);
+    if (sink) {
+      await sink(evt);
       return;
     }
     const res = await fetch(`${appUrl()}/api/webhooks/paypal`, {
@@ -661,7 +666,7 @@ async function deliver(evt: WebhookEvent, attempt: number): Promise<void> {
       return;
     }
     console.warn(`[simulated paypal] ${evt.event_type} ${evt.id} not delivered (${why}); retrying in ${wait / 1000}s`);
-    setTimeout(() => void deliver(evt, attempt + 1), wait).unref?.();
+    setTimeout(() => void deliver(evt, attempt + 1, sink), wait).unref?.();
   }
 }
 
