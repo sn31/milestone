@@ -74,8 +74,12 @@ export function createEvidenceReader(input: ReaderInput): EvidenceReader {
   };
 }
 
-/** Images and PDFs larger than this go to the model as text (or a note), not as image/document blocks. */
-export const MAX_VIEW_BYTES = 5 * 1024 * 1024;
+/**
+ * Images and PDFs larger than this go to the model as text (or a note), not as image/document blocks. The API's 5 MB
+ * limit applies to the base64 form, 4/3 the raw size, so the raw cap is 3.5 MiB (about 4.9 MB encoded): a bigger file
+ * would fail the whole judgment call with a 400, where a note lets the criterion go unclear.
+ */
+export const MAX_VIEW_BYTES = 3.5 * 1024 * 1024;
 
 export interface UploadReaderInput {
   /** UPLOAD_DIR; every file's path is resolved under it. */
@@ -121,11 +125,11 @@ export function createUploadEvidenceReader(input: UploadReaderInput): EvidenceRe
       const format = sniffFormat(bytes, file.name);
       const note = `${evidenceId}: ${file.name}, ${bytes.length} bytes`;
       if (format === "png" || format === "jpg") {
-        if (bytes.length > MAX_VIEW_BYTES) return `${note}: image larger than ${MAX_VIEW_BYTES} bytes, not shown; rely on the upload checks`;
+        if (bytes.length > MAX_VIEW_BYTES) return `${note}: too large to view (over ${MAX_VIEW_BYTES} bytes), not shown; rely on the upload checks and do not pass a criterion that needs to see it`;
         return { type: "image", mediaType: format === "png" ? "image/png" : "image/jpeg", base64: bytes.toString("base64"), note };
       }
       if (format === "pdf") {
-        if (bytes.length > MAX_VIEW_BYTES) return `${note}: PDF larger than ${MAX_VIEW_BYTES} bytes, extracted text only\n${asText(file, bytes)}`;
+        if (bytes.length > MAX_VIEW_BYTES) return `${note}: PDF too large to view (over ${MAX_VIEW_BYTES} bytes), extracted text only\n${asText(file, bytes)}`;
         return { type: "document", mediaType: "application/pdf", base64: bytes.toString("base64"), note };
       }
       return `${note}\n${asText(file, bytes)}`;

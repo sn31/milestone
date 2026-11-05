@@ -4,6 +4,7 @@ import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
 import { checkRepoUrl, resolveRef, validRef } from "./resolve";
+import { RATE_RULES, limitResponse } from "@/lib/rate-limit";
 
 /**
  * Manual repository delivery by the contract's freelancer: { repoUrl, ref, title?, note? }. The ref is resolved to a
@@ -11,6 +12,9 @@ import { checkRepoUrl, resolveRef, validRef } from "./resolve";
  * exactly like a merged pull request (clone_url + sha, tamper check against the milestone's baseline).
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  // Each delivery queues a worker judgment; deliver and upload share one per-IP bucket (DEMO_MODE only).
+  const limited = limitResponse(req, RATE_RULES.delivery);
+  if (limited) return limited;
   const { id } = await ctx.params;
   const actor = await getActor();
   const db = getDb();

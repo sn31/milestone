@@ -9,6 +9,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { toPayPalValue, type Db } from "@milestone/core";
 import { resolveAgentActor } from "@/lib/session";
 import { noStore } from "@/lib/http";
+import { clientIp } from "@/lib/rate-limit";
 import { withActorCookie, type McpContext } from "./context";
 import { FUNDING_GUARANTEE, GUARANTEE, TOOLS, callTool } from "./tools";
 
@@ -59,7 +60,7 @@ export async function handleMcpPost(req: Request, db: Db): Promise<Response> {
   if (!resolved) return deny(401, "an agent mandate token is required: Authorization: Bearer msa_...", "invalid_token");
   if ("refused" in resolved) return deny(resolved.refused.status, resolved.refused.error, resolved.refused.reason);
   const token = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.get("authorization") ?? "")?.[1] ?? "";
-  const ctx: McpContext = { db, token, agent: resolved.agent, origin: (process.env.APP_URL || new URL(req.url).origin).replace(/\/+$/, "") };
+  const ctx: McpContext = { db, token, agent: resolved.agent, origin: (process.env.APP_URL || new URL(req.url).origin).replace(/\/+$/, ""), clientIp: clientIp(req) };
 
   const server = createMcpServer(ctx);
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

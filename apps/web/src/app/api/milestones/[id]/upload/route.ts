@@ -7,6 +7,7 @@ import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
 import { checkFiles, MAX_FILE_BYTES, MAX_FILES, newUploadDeliveryId, storeFiles, type IncomingFile } from "./store";
+import { RATE_RULES, limitResponse } from "@/lib/rate-limit";
 
 /**
  * File delivery by the contract's freelancer: multipart/form-data with up to 10 "files" (20 MB each). The files are
@@ -14,6 +15,9 @@ import { checkFiles, MAX_FILE_BYTES, MAX_FILES, newUploadDeliveryId, storeFiles,
  * verify job runs the upload checks and the judge on them. Delivered files are untrusted evidence (CLAUDE.md rule 5).
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  // Each delivery queues a worker judgment; deliver and upload share one per-IP bucket (DEMO_MODE only).
+  const limited = limitResponse(req, RATE_RULES.delivery);
+  if (limited) return limited;
   const { id } = await ctx.params;
   const actor = await getActor();
   const db = getDb();

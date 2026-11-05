@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { formatVerdictComment, postVerdictComment } from "@milestone/verify";
-import { createEvidenceReader } from "./evidence.ts";
+import { createHash } from "node:crypto";
+import { MAX_VIEW_BYTES, createEvidenceReader, createUploadEvidenceReader } from "./evidence.ts";
 
 let root: string;
 let workdir: string;
@@ -88,5 +89,27 @@ describe("PR comment", () => {
 
   it("refuses odd repository names", async () => {
     await expect(postVerdictComment({ repoFullName: "a/b/../c", prNumber: 1, body, token: "t", fetch: (async () => Response.json([])) as typeof fetch })).rejects.toThrow(/bad repository/);
+  });
+});
+
+describe("upload reader size cap", () => {
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const png = (size: number) => { const b = Buffer.alloc(size); b.set(PNG); return b; };
+  const readerFor = async (name: string, bytes: Buffer) => {
+    await mkdir(join(root, "uploads"), { recursive: true });
+    await writeFile(join(root, "uploads", name), bytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return createUploadEvidenceReader({ root: join(root, "uploads"), files: [{ name, size: bytes.length, sha256, path: name, mime: "image/png" }], evidence: [] });
+  };
+
+  it("keeps the base64 form of the largest viewable file under the API's 5 MB image limit", () => {
+    expect(Math.ceil(MAX_VIEW_BYTES / 3) * 4).toBeLessThan(5_000_000);
+  });
+  it("sends an image at the cap as an image block and one byte over as text", async () => {
+    const at = await (await readerFor("at.png", png(MAX_VIEW_BYTES))).viewFile("evd_file_1");
+    expect(typeof at === "object" && at.type).toBe("image");
+    const over = await (await readerFor("over.png", png(MAX_VIEW_BYTES + 1))).viewFile("evd_file_1");
+    expect(typeof over).toBe("string");
+    expect((over as string).length).toBeLessThan(1_000);
   });
 });

@@ -108,6 +108,20 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
   maxTokens?: number;
   /** Worker directories (checkout, UPLOAD_DIR) stripped from every tool result and tool error before the model sees it. */
   roots?: string[];
+  /** Total tool-result text (characters) one run may send back to the model; defaults to TOOL_TEXT_BUDGET. */
+  toolTextBudget?: number;
+}
+
+/**
+ * Bound on the tool-result text one generateJson run hands the model, across all its turns (each read_file/get_diff is
+ * capped on its own; this caps the sum). Once spent, further tool calls are not run and get EVIDENCE_BUDGET_EXHAUSTED.
+ */
+export const TOOL_TEXT_BUDGET = 400_000;
+export const EVIDENCE_BUDGET_EXHAUSTED = "evidence budget exhausted: cite what you have already read and give your answer";
+
+/** The text characters a tool output adds to the conversation (image and PDF bytes are bounded by the reader). */
+function textChars(out: ToolOutput): number {
+  return typeof out === "string" ? out.length : (out.note?.length ?? 0);
 }
 
 /** Output budget per turn when the caller names none. Thinking counts against it, so it leaves room before the emit call. */
@@ -139,6 +153,8 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
   let nudged = false;
   /** Whether the history already ends in an answer-now instruction (no second one is stacked on it). */
   let asked = false;
+  const textBudget = o.toolTextBudget ?? TOOL_TEXT_BUDGET;
+  let textUsed = 0;
   const fail = (reason: GenerateJsonFailure, error: string) => ({ ok: false as const, error, reason, model });
 
   for (let turn = 0; turn < limit; ) {
@@ -179,10 +195,12 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
       const tool = o.tools?.find((t) => t.name === u.name);
       let content: ToolOutput;
       if (!tool) content = `unknown tool ${u.name}`;
+      else if (textUsed >= textBudget) content = EVIDENCE_BUDGET_EXHAUSTED;
       else {
         const input = tool.input.safeParse(u.input);
         content = input.success ? await tool.run(input.data).catch((e: Error) => `tool error: ${e.message}`) : `bad input: ${input.error.message}`;
       }
+      textUsed += textChars(content);
       results.push({ callId: u.id, name: u.name, content: toolResultBlocks(scrubOutput(content, o.roots ?? [])) });
     }
     messages.push({ role: "tool", results });

@@ -4,6 +4,7 @@ import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, 
 import { compileContract, isModelConfigured } from "@milestone/verify";
 import { getDb } from "@/lib/db";
 import { jsonError } from "@/lib/http";
+import { RATE_RULES, rateLimited } from "@/lib/rate-limit";
 import { getActor } from "@/lib/session";
 
 interface Compiled { contract: ContractSpec; advanceEligible: Record<number, boolean> }
@@ -70,6 +71,12 @@ export async function POST(req: Request) {
     return fail(req, "Scope, a positive total and a three-letter currency are required.", 400);
   }
   if (repo && !REPO.test(repo)) return fail(req, "Repository must look like owner/name.", 400);
+
+  // Only a model draft spends: the no-model demo contract is not limited.
+  if (await isModelConfigured()) {
+    const wait = rateLimited(req, RATE_RULES.contract);
+    if (wait !== null) return fail(req, `Too many contract drafts from this address; try again in ${wait} s.`, 429);
+  }
 
   let result: Compiled;
   try {

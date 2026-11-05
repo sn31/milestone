@@ -36,7 +36,7 @@ async function read(res: Response): Promise<RouteResult> {
 }
 
 function headers(ctx: McpContext, extra: Record<string, string> = {}): Record<string, string> {
-  return { authorization: `Bearer ${ctx.token}`, accept: "application/json", ...extra };
+  return { authorization: `Bearer ${ctx.token}`, accept: "application/json", ...(ctx.clientIp && ctx.clientIp !== "unknown" ? { "x-forwarded-for": ctx.clientIp } : {}), ...extra };
 }
 
 const params = (id: string) => ({ params: Promise.resolve({ id }) });

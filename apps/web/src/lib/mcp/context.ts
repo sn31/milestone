@@ -11,6 +11,8 @@ export interface McpContext {
   agent: AgentActor;
   /** Origin of the MCP request, used as the base URL of the in-process route calls. */
   origin: string;
+  /** The MCP caller's address (clientIp), forwarded to the in-process route calls so per-IP limits see the caller. */
+  clientIp?: string;
 }
 
 export const userOf = (ctx: McpContext): { userId: string; role: Role } => ({ userId: ctx.agent.userId, role: ctx.agent.role });

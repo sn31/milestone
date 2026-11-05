@@ -9,6 +9,7 @@ import { currentModel, isModelConfigured } from "@/lib/agent/model";
 import type { ConsoleEvent, ConsoleMessage } from "@/lib/agent/protocol";
 import { connectMilestone, paypalTools, type AgentTool } from "@/lib/agent/servers";
 import { MAX_TOOLS } from "@/lib/agent/tools";
+import { RATE_RULES, limitResponse } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,6 +37,8 @@ function parseMessages(v: unknown): ConsoleMessage[] | null {
  * (list_transactions only). Streams ConsoleEvents as NDJSON.
  */
 export async function POST(req: Request) {
+  const limited = limitResponse(req, RATE_RULES.console);
+  if (limited) return limited;
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   const mandateId = typeof body?.mandateId === "string" ? body.mandateId : "";
   const token = typeof body?.token === "string" ? body.token.trim() : "";
