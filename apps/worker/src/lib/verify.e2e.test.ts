@@ -427,7 +427,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
       expect(s.audits).toEqual(["milestone.verifying", "verdict.stored", "policy.decided", "milestone.needs_client"]);
       const db = getDb();
       const [stored] = await db.select({ detail: auditLog.detail }).from(auditLog).where(eq(auditLog.milestoneId, t.milestoneId)).orderBy(asc(auditLog.createdAt)).offset(1).limit(1);
-      expect(stored?.detail).toMatchObject({ modelError: "OverloadedError" });
+      expect(stored?.detail).toMatchObject({ modelError: "InternalServerError 529 overloaded_error" });
     } finally {
       setProviderForTests(null);
       delete process.env.ANTHROPIC_API_KEY;
