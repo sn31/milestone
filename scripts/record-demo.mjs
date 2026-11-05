@@ -199,6 +199,7 @@ try {
     holdMs,
     reviewSeconds,
     note: () => {},
+    mark: () => {},
     async offCamera(fn) {
       recorder.pause();
       try { await fn(); } finally { recorder.resume(); }
@@ -209,8 +210,10 @@ try {
 
   for (const beat of BEATS) {
     if (only && !only.has(beat.id)) continue;
-    const rec = { id: beat.id, title: beat.title, script: beat.script, videoStart: recorder.videoMs() / 1000, wallStart: new Date().toISOString(), notes: [], ok: false };
+    const rec = { id: beat.id, title: beat.title, script: beat.script, videoStart: recorder.videoMs() / 1000, wallStart: new Date().toISOString(), notes: [], marks: [], ok: false };
     ctx.note = (n) => { rec.notes.push(n); log(`  note: ${n}`); };
+    // Named moments in the video (seconds), for the narrated cut: scripts/video/build-video.mjs speeds up the waits between them.
+    ctx.mark = (label) => rec.marks.push({ label, t: Math.round(recorder.videoMs()) / 1000 });
     log(`beat ${beat.id}: ${beat.title}`);
     const t = Date.now();
     try {

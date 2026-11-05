@@ -93,6 +93,7 @@ async function agentSetup(ctx) {
   await sleep(1000);
   await d.click({ text: "Save PayPal for agent payments" });
   await waitDb(ctx, "select count(*) from payment_methods where user_id='usr_client' and removed_at is null", (n) => Number(n) > 0, { timeout: 60_000, what: "Casey's saved PayPal" });
+  ctx.mark("saved");
   ctx.note(`saved PayPal: ${ctx.db("select paypal_payment_token_id from payment_methods where user_id='usr_client' and removed_at is null limit 1")}`);
   await d.go("/agents");
   await sleep(1000);
@@ -101,6 +102,8 @@ async function agentSetup(ctx) {
   if (code !== 201 && code !== 200) throw new Error(`creating the mandate answered HTTP ${code}`);
   ctx.note(`mandate created (HTTP ${code}): auto-fund next, caps $200.00`);
   await d.reload();
+  await sleep(800);
+  ctx.mark("mandate");
 }
 
 export const BEATS = [
@@ -144,7 +147,8 @@ export const BEATS = [
     script: "The client's agent, 0:56 to 1:14 (setup)",
     async run(ctx) {
       await agentSetup(ctx);
-      await ctx.d.eval(`window.scrollTo({ top: Math.min(document.body.scrollHeight, 320), behavior: "smooth" })`);
+      // The saved PayPal and, below it, the new mandate row (Casey's agent, $200.00, funds the next milestone on release).
+      await ctx.d.show({ selector: "#saved-paypal" }, "start");
     },
   },
   {
@@ -156,15 +160,20 @@ export const BEATS = [
       await d.go("/contracts/ctr_demo");
       const before = verified(ctx, "mst_1");
       await deliver(ctx, M1, "m1-pass");
+      ctx.mark("delivered");
       await waitStatus(ctx, "mst_1", ["verifying", ...DONE_STATES], 30_000);
       const s = await waitVerdict(ctx, "mst_1", before);
+      ctx.mark("verdict");
       ctx.note(`m1-pass verdict: ${s}`);
       await d.role("usr_client");
       await catchUp(ctx, M1, s);
       await unfold(ctx, M1);
+      ctx.mark("receipt");
       await sleep(ctx.holdMs);
       if (s === "review") {
-        // The window closes on its own; stay on the countdown.
+        // The window closes on its own; back up to the countdown band (Approve now, Veto release) and stay on it.
+        await d.show({ within: M1, text: "Approve now" }, "center").catch((e) => ctx.note(`no countdown band: ${e.message}`));
+        ctx.mark("countdown");
         await waitStatus(ctx, "mst_1", ["released", "held", "partial_released"], ctx.reviewSeconds * 1000 + 90_000);
       } else if (s === "needs_client") {
         await d.click({ within: M1, text: "Approve in full" });
@@ -172,6 +181,7 @@ export const BEATS = [
       } else {
         throw new Error(`m1-pass ended ${s}, expected review or needs_client`);
       }
+      ctx.mark("released");
       const end = status(ctx, "mst_1");
       ctx.note(`mst_1 after release: ${end}`);
       await catchUp(ctx, M1, end, 8000);
@@ -188,14 +198,17 @@ export const BEATS = [
       await d.go("/contracts/ctr_demo");
       await waitDb(ctx, "select count(*) from audit_log where milestone_id='mst_2' and event='paypal.vault_charge'", (n) => Number(n) > 0, { timeout: 90_000, what: "paypal.vault_charge on mst_2" });
       await waitStatus(ctx, "mst_2", ["funded"], 60_000);
+      ctx.mark("funded");
       ctx.note(`agent.autofund: ${ctx.db("select detail->>'outcome' from audit_log where milestone_id='mst_2' and event='agent.autofund' order by created_at desc limit 1")}`);
       ctx.note(`mst_2 funded by the agent; actor: ${ctx.db("select actor from audit_log where milestone_id='mst_2' and event='paypal.vault_charge' order by created_at desc limit 1")}`);
       await catchUp(ctx, M2, "funded", 8000);
       await d.show({ within: M2, selector: "*", text: M2 }, "start").catch(() => {});
       await sleep(ctx.holdMs);
       await d.go("/agents");
+      ctx.mark("agents");
       await sleep(1500);
-      await d.eval(`window.scrollTo({ top: Math.min(document.body.scrollHeight, 640), behavior: "smooth" })`);
+      // The mandate row (fund meter now $100.00 of $200.00) and, below it, the paypal.vault_charge row by the agent.
+      await d.show({ selector: "#agent-activity-title" }, "center");
     },
   },
   {
@@ -213,19 +226,24 @@ export const BEATS = [
       }
       let before = verified(ctx, "mst_2");
       await deliver(ctx, M2, "m2-partial");
+      ctx.mark("partial-delivered");
       let s = await waitVerdict(ctx, "mst_2", before);
+      ctx.mark("partial-verdict");
       ctx.note(`m2-partial: ${s}`);
       await catchUp(ctx, M2, s);
       await unfold(ctx, M2);
       await sleep(ctx.holdMs);
       before = verified(ctx, "mst_2");
       await deliver(ctx, M2, "m2-injection");
+      ctx.mark("injection-delivered");
       s = await waitVerdict(ctx, "mst_2", before);
+      ctx.mark("injection-verdict");
       const inj = ctx.db("select suspected_injection from deliveries where milestone_id='mst_2' order by created_at desc limit 1");
       ctx.note(`m2-injection: ${s}, suspected_injection=${inj}`);
       await d.role("usr_client");
       await catchUp(ctx, M2, s);
       await d.show({ within: M2, selector: "*", text: M2 }, "start").catch(() => {});
+      ctx.mark("flagged");
       await sleep(ctx.holdMs);
       await unfold(ctx, M2);
     },
@@ -249,7 +267,9 @@ export const BEATS = [
       await d.upload("input[type=file]", ctx.uploadFiles);
       await sleep(900);
       await d.click({ within: BRAND1, text: "Upload and verify" });
+      ctx.mark("uploaded");
       const s = await waitVerdict(ctx, "mst_brand_1", before);
+      ctx.mark("verdict");
       ctx.note(`bakery upload: ${s}`);
       await d.role("usr_client");
       await catchUp(ctx, BRAND1, s);
@@ -288,6 +308,7 @@ export const BEATS = [
       const s = status(ctx, "mst_brand_1");
       if (s === "needs_client") {
         await d.click({ within: BRAND1, text: "Approve in full" });
+        ctx.mark("approved");
       } else if (s !== "review") {
         throw new Error(`bakery milestone is ${s}; expected needs_client or review`);
       }
@@ -295,16 +316,19 @@ export const BEATS = [
         timeout: ctx.reviewSeconds * 1000 + 90_000,
         what: "milestone.needs_operator on mst_brand_1",
       });
+      ctx.mark("needs-operator");
       ctx.note(`mst_brand_1 after the failed payout: ${status(ctx, "mst_brand_1")}`);
       await catchUp(ctx, BRAND1, status(ctx, "mst_brand_1"));
       await d.show({ within: BRAND1, selector: "*", text: BRAND1 }, "start").catch(() => {});
       await sleep(ctx.holdMs);
       await d.role("usr_partner");
       await d.go("/ops");
+      ctx.mark("ops");
       await sleep(ctx.holdMs);
       await d.type({ selector: "input[placeholder^='Paid the freelancer']" }, "Freelancer fixed their PayPal email; paid by hand, batch DEMO-1.");
       await d.click({ text: "Mark resolved" });
       await waitDb(ctx, "select count(*) from audit_log where milestone_id='mst_brand_1' and event='ops.resolved'", (n) => Number(n) > 0, { timeout: 30_000, what: "ops.resolved" });
+      ctx.mark("resolved");
       await sleep(1200);
       await d.reload();
     },
