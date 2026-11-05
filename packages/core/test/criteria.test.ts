@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CriteriaEditBody, applyCriteriaOps, commandsRestricted, criteriaLock, criteriaVersion, isAllowedDemoCommand, isRepoPath, specErrors, validateCriteriaEdit, type EditableCriterion } from "../src/criteria.ts";
+import { CriteriaEditBody, DEFAULT_COMMAND, applyCriteriaOps, commandsRestricted, criteriaLock, criteriaVersion, isAllowedDemoCommand, isRepoPath, specErrors, storableCompiledCriteria, validateCriteriaEdit, type EditableCriterion } from "../src/criteria.ts";
 
 const contract = { id: "con_1" };
 const ms = [
@@ -187,5 +187,43 @@ describe("demo command allowlist", () => {
   it("is restricted only with DEMO_MODE=1", () => {
     expect(commandsRestricted({ DEMO_MODE: "1" })).toBe(true);
     for (const v of [undefined, "", "0", "true"]) expect(commandsRestricted({ DEMO_MODE: v })).toBe(false);
+  });
+});
+
+describe("storableCompiledCriteria (a model draft before it is stored)", () => {
+  const c = (id: string, kind: string, spec: Record<string, unknown>, description = "d") => ({ id, kind, description, spec, required: true });
+  const restricted = { restrictCommands: true };
+  const stored = (list: ReturnType<typeof c>[]) => list.map((x) => ({ ...x, milestoneId: "m1" }));
+
+  it("rewrites a test or build command off the demo allowlist to the kind's default, keeping the check", () => {
+    const out = storableCompiledCriteria([c("t", "test", { command: "npx vitest run" }), c("b", "build", { command: "tsc -p . && vite build" })], restricted);
+    expect(out.map((x) => [x.id, x.kind, x.spec.command])).toEqual([
+      ["t", "test", DEFAULT_COMMAND.test],
+      ["b", "build", DEFAULT_COMMAND.build],
+    ]);
+  });
+
+  it("leaves the command alone when commands are not restricted", () => {
+    const out = storableCompiledCriteria([c("t", "test", { command: "npx vitest run" })], { restrictCommands: false });
+    expect(out[0]!.spec.command).toBe("npx vitest run");
+  });
+
+  it("drops other rejected checks and unknown kinds, keeping valid ones", () => {
+    const out = storableCompiledCriteria([c("f", "file", { path: "../etc/passwd" }), c("x", "magic", {}), c("ok", "file", { path: "README.md" }), c("j", "judgment", {})], restricted);
+    expect(out.map((x) => x.id)).toEqual(["ok", "j"]);
+  });
+
+  it("adds a default test check when no automatic check is left, so every later edit validates", () => {
+    const out = storableCompiledCriteria([c("f", "file", { path: "/abs" }), c("j", "judgment", {})], restricted);
+    expect(out.map((x) => [x.kind, x.spec.command ?? null])).toEqual([
+      ["test", DEFAULT_COMMAND.test],
+      ["judgment", null],
+    ]);
+    expect(validateCriteriaEdit(contract, [ms[0]!], stored(out), restricted)).toEqual({ ok: true });
+  });
+
+  it("its output passes the editor's validation", () => {
+    const out = storableCompiledCriteria([c("t", "test", { command: "npm test -- --watch" }), c("u", "upload", { pattern: "" }), c("v", "visual", { steps: ["open /"] })], restricted);
+    expect(validateCriteriaEdit(contract, [ms[0]!], stored(out), restricted)).toEqual({ ok: true });
   });
 });

@@ -92,16 +92,8 @@ export function seedPaypalEmails(env: NodeJS.ProcessEnv = process.env): { freela
   };
 }
 
-/** The model id the showcase seed stamps on the verdicts it writes when no Claude key is set (no model would run). */
-export const RECORDED_VERDICT_MODEL = "recorded-showcase";
-
 /**
- * The model id on the showcase seed's verdicts: the model the app would use with this env, so receipts match the demo
- * banner. Mirrors anthropicModel() in packages/verify/src/providers/config.ts (core does not depend on verify): keep
- * the default in sync. Without ANTHROPIC_API_KEY no model runs, so the verdicts are labelled as recorded.
+ * The model id the showcase seed stamps on every verdict it writes. Those verdicts are recorded by hand, not produced by
+ * a model, so they carry this marker whether or not a Claude key is set (the UI labels them "recorded for the showcase").
  */
-export function seedVerdictModel(env: NodeJS.ProcessEnv = process.env): string {
-  if (!envOr("ANTHROPIC_API_KEY", env)) return RECORDED_VERDICT_MODEL;
-  const m = envOr("MILESTONE_MODEL", env);
-  return m && m.startsWith("claude") ? m : "claude-sonnet-5-5";
-}
+export const RECORDED_VERDICT_MODEL = "recorded-showcase";

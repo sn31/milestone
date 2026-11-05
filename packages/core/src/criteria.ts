@@ -164,6 +164,51 @@ export function validateCriteriaEdit(
   return errors.length ? { ok: false, errors } : { ok: true };
 }
 
+/** The command a test or build check falls back to: both are on the demo allowlist. */
+export const DEFAULT_COMMAND = { test: "npm test", build: "npm run build" } as const;
+
+/**
+ * A model-compiled milestone's criteria made storable under the same rules the editor applies (specErrors), so a draft
+ * never carries a check the worker would refuse, and one bad check never blocks every later edit of the contract
+ * (validateCriteriaEdit checks all milestones). A test or build check with an unusable command (off the demo allowlist,
+ * missing, multi-line, too long) gets its kind's default command; any other check whose spec is rejected is dropped; a
+ * description is trimmed and cut to DESCRIPTION_MAX. If no automatic check is left, a default test check is added.
+ * Pure: the contracts route and its test run the same code.
+ */
+export function storableCompiledCriteria(
+  list: ReadonlyArray<{ id: string; kind: string; description: string; spec: Record<string, unknown>; required: boolean }>,
+  opts: { restrictCommands?: boolean } = {},
+): StorableCriterion[] {
+  const out: StorableCriterion[] = [];
+  for (const c of list) {
+    const kind = CriterionKind.safeParse(c.kind);
+    if (!kind.success) continue;
+    const description = text(c.description).slice(0, DESCRIPTION_MAX);
+    if (!description) continue;
+    let spec = c.spec && typeof c.spec === "object" && !Array.isArray(c.spec) ? c.spec : {};
+    if (specErrors(kind.data, spec, opts).length) {
+      if (kind.data !== "test" && kind.data !== "build") continue;
+      spec = { ...spec, command: DEFAULT_COMMAND[kind.data] };
+    }
+    out.push({ id: c.id, kind: kind.data, description, spec, required: c.required });
+  }
+  if (!out.some((c) => DETERMINISTIC_KINDS.has(c.kind))) {
+    const ids = new Set(list.map((c) => c.id));
+    let id = "default-test";
+    for (let n = 2; ids.has(id); n++) id = `default-test-${n}`;
+    out.unshift({ id, kind: "test", description: "Test suite passes", spec: { command: DEFAULT_COMMAND.test }, required: true });
+  }
+  return out;
+}
+
+export interface StorableCriterion {
+  id: string;
+  kind: CriterionKind;
+  description: string;
+  spec: Record<string, unknown>;
+  required: boolean;
+}
+
 // ---------- Operations (PATCH /api/contracts/[id]/criteria) ----------
 
 const Spec = z.record(z.string(), z.unknown());

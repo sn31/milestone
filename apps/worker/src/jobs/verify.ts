@@ -26,7 +26,7 @@ import {
   type StoredDecision,
 } from "@milestone/core";
 import { decide } from "@milestone/money";
-import { describeModelError, detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, safePath, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
+import { describeModelError, isModelCallError, detectInjection, enforce, formatVerdictComment, isModelConfigured, judge, overall, postVerdictComment, runDeterministicStage, runUploadStage, safePath, uploadRoot, type DeterministicOutput, type EvidenceReader, type JudgeInput } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
 import { createEvidenceReader, createUploadEvidenceReader, git, scrubVerdictPaths } from "../lib/evidence.ts";
@@ -127,6 +127,9 @@ async function deterministic(payload: CommitPayload, criteria: CriterionSpec[], 
   }
 }
 
+/** The rationale prefix of a criterion the model was not asked about because its call failed (verdict-view shows it; MODEL_FAILED_RATIONALE in apps/web status/lines.ts mirrors it). */
+export const MODEL_FAILED_RATIONALE = "not judged: the model call failed";
+
 type Injection = { suspected: boolean; hits: Array<{ source: string; match: string }> };
 type Milestone = NonNullable<JudgeInput["milestone"]>;
 
@@ -141,15 +144,20 @@ type Milestone = NonNullable<JudgeInput["milestone"]>;
  */
 export async function conclude(deliveryId: string, milestone: Milestone, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, reader: () => EvidenceReader, extra: Injection = { suspected: false, hits: [] }) {
   if (await isModelConfigured()) {
+    // Built outside the catch: a reader that cannot be set up (the checkout, the database) is a job error pg-boss
+    // retries, never a stored verdict that blames the model.
+    const evidenceReader = reader();
     try {
-      const r = await judge({ deliveryId, milestone, criteria, evidence, deliveryTexts, reader: reader() });
+      const r = await judge({ deliveryId, milestone, criteria, evidence, deliveryTexts, reader: evidenceReader });
       if (extra.suspected) r.verdict.suspected_injection = true;
       const judged = { toolCalls: r.toolCalls.map((c) => `${c.tool}${c.ok ? "" : " (failed)"}`), attachedEvidence: r.attachedEvidence };
       return { evidence, verdict: r.verdict, result: r.result, model: r.model, promptHash: r.promptHash as string | null, injectionHits: [...r.injectionHits, ...extra.hits], judged };
     } catch (e) {
+      // Only a failed model call is recorded as unclear; anything else that threw is a job error for pg-boss to retry.
+      if (!isModelCallError(e)) throw e;
       const failure = describeModelError(e);
       console.error(`[verify] ${deliveryId}: the model call failed (${failure}); recording judgment criteria as unclear`, e);
-      return { ...checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, `not judged: the model call failed (${failure})`), judged: { modelError: failure } };
+      return { ...checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, `${MODEL_FAILED_RATIONALE} (${failure})`), judged: { modelError: failure } };
     }
   }
   return checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, "not judged: no model configured");

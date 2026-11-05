@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAnthropicProvider, describeModelError, strictSchema } from "../src/providers/anthropic.ts";
-import { generateJson, setProviderForTests } from "../src/llm.ts";
+import { generateJson, NOT_RUN_FINAL_TURN, setProviderForTests } from "../src/llm.ts";
 
 type Reply = { content: Anthropic.ContentBlock[]; stop_reason?: Anthropic.StopReason; stop_details?: Anthropic.RefusalStopDetails | null };
 
@@ -92,6 +92,57 @@ describe("anthropic provider through generateJson", () => {
     const res = await generateJson({ system: "s", user: "u", schema, schemaName: "e", maxTurns: 1 });
     expect(res.ok).toBe(true);
     expect(f.requests).toHaveLength(2);
+  });
+
+  it("tool calls on the final turn are not run: each gets a not-run result and the answer comes on one extra turn", async () => {
+    let runs = 0;
+    const f = withFake([
+      { content: [use("tu_1", "read_file", { path: "a" }), use("tu_2", "read_file", { path: "b" })] },
+      { content: [use("x", "emit_e", { ok: true })] },
+    ]);
+    const res = await generateJson({
+      system: "s",
+      user: "u",
+      schema,
+      schemaName: "e",
+      maxTurns: 1,
+      tools: [{ name: "read_file", description: "read", input: z.object({ path: z.string() }), run: async () => (runs++, "contents") }],
+    });
+    expect(res).toEqual({ ok: true, value: { ok: true }, model: "claude-test" });
+    expect(runs).toBe(0);
+    expect(f.requests).toHaveLength(2);
+    const [first, second] = f.requests.map((r) => r.messages);
+    // Append-only: the second request starts with the first one's history, then the assistant turn and one tool message.
+    expect(second!.slice(0, first!.length).map((m) => m.role)).toEqual(first!.map((m) => m.role));
+    expect(second).toHaveLength(first!.length + 2);
+    const results = second!.at(-1)!;
+    expect(results.role).toBe("user");
+    const blocks = results.content as Anthropic.ToolResultBlockParam[];
+    expect(blocks.map((b) => [b.type, b.tool_use_id])).toEqual([
+      ["tool_result", "tu_1"],
+      ["tool_result", "tu_2"],
+    ]);
+    expect(JSON.stringify(blocks)).toContain(NOT_RUN_FINAL_TURN);
+  });
+
+  it("tool calls again on the extra turn: turn_limit, and neither final-turn call ran", async () => {
+    let runs = 0;
+    const f = withFake([
+      { content: [use("tu_1", "read_file", { path: "a" })] },
+      { content: [use("tu_2", "read_file", { path: "b" })] },
+      { content: [use("tu_3", "read_file", { path: "c" })] },
+    ]);
+    const res = await generateJson({
+      system: "s",
+      user: "u",
+      schema,
+      schemaName: "e",
+      maxTurns: 2,
+      tools: [{ name: "read_file", description: "read", input: z.object({ path: z.string() }), run: async () => (runs++, "contents") }],
+    });
+    expect(res).toMatchObject({ ok: false, reason: "turn_limit" });
+    expect(runs).toBe(1);
+    expect(f.requests).toHaveLength(3);
   });
 
   it("max_tokens: a partial emit is discarded and the same request goes again once with double the budget", async () => {

@@ -28,6 +28,8 @@ export const CHECK_WORD: Record<CheckStatus, string> = { pass: "pass", fail: "fa
 export const CHECKS_ONLY_MODEL = "deterministic-only";
 /** The model id the showcase seed records on verdicts it wrote without a model (RECORDED_VERDICT_MODEL in core). */
 export const RECORDED_MODEL = "recorded-showcase";
+/** The rationale prefix the worker stores (still model "deterministic-only") when the model call failed; MODEL_FAILED_RATIONALE in apps/worker/src/jobs/verify.ts. */
+export const MODEL_FAILED_RATIONALE = "not judged: the model call failed";
 
 const hhmmss = (iso: string) => iso.slice(11, 19);
 const col = (word: string) => word.padEnd(8, " ");

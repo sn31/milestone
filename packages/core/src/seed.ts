@@ -3,7 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
-import { loadRootEnv, paypalMode, seedPaypalEmails, seedVerdictModel } from "./env.ts";
+import { RECORDED_VERDICT_MODEL, loadRootEnv, paypalMode, seedPaypalEmails } from "./env.ts";
 import { dropQueuedJobs, enqueue, releaseDelaySeconds } from "./jobs.ts";
 import { ledgerRefs } from "./ledger.ts";
 import { createMandate } from "./mandates.ts";
@@ -187,7 +187,7 @@ if (process.argv.includes("--showcase")) {
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
   };
   const min = (n: number) => new Date(now.getTime() + n * 60_000);
-  const model = seedVerdictModel();
+  const model = RECORDED_VERDICT_MODEL;
 
   type Ms = { id: string; contractId: string; clientId: string; amountMinor: number; seq: number };
   const all: Ms[] = [

@@ -4,9 +4,8 @@ import { commitDeliveryId } from "../src/ids.ts";
 import { CommitPayload, StoredDecision, decisionDeliveryId, formatMinor, minorDigits, requiredNotPassed, toPayPalValue } from "../src/schemas.ts";
 import { accountKind, accounts, isFreelancerAccount, isHeldAccount, ledgerRefs } from "../src/ledger.ts";
 import { OP_KINDS } from "../src/ops.ts";
-import { RECORDED_VERDICT_MODEL, envOr, paypalMode, payoutReceiver, seedPaypalEmails, seedVerdictModel } from "../src/env.ts";
+import { envOr, paypalMode, payoutReceiver, seedPaypalEmails } from "../src/env.ts";
 // Read by path (core does not depend on verify) so the seed's copy of the default cannot drift from the real one.
-import { DEFAULT_ANTHROPIC_MODEL } from "../../verify/src/providers/config.ts";
 import { releaseDelaySeconds } from "../src/jobs.ts";
 import { MIN_REVIEW_WINDOW_SECONDS, RELEASABLE_STATUSES, reviewWindowSeconds, statusForDecision } from "../src/milestones.ts";
 
@@ -244,12 +243,6 @@ describe("env", () => {
     expect(seedPaypalEmails({ ...blank, SPIKE_FREELANCER_EMAIL: "s@x" }).freelancer).toBe("s@x");
     expect(seedPaypalEmails({ ...blank, PAYPAL_FREELANCER_EMAIL: "f@x", PAYPAL_PARTNER_EMAIL: "p@x" })).toEqual({ freelancer: "f@x", partner: "p@x" });
     expect(seedPaypalEmails({ ...blank, PAYPAL_MODE: "sandbox" })).toEqual({ freelancer: null, partner: null });
-  });
-  it("seedVerdictModel: the app's Claude model with a key, else the recorded marker", () => {
-    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "", MILESTONE_MODEL: "" })).toBe(RECORDED_VERDICT_MODEL);
-    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "" })).toBe(DEFAULT_ANTHROPIC_MODEL);
-    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "claude-opus-5-5" })).toBe("claude-opus-5-5");
-    expect(seedVerdictModel({ ANTHROPIC_API_KEY: "k", MILESTONE_MODEL: "qwen3:14b" })).toBe(DEFAULT_ANTHROPIC_MODEL);
   });
 });
 

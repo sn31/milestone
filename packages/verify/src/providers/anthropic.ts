@@ -182,6 +182,14 @@ export function createAnthropicProvider(opts: { model?: string; client?: () => A
 }
 
 /**
+ * Whether an error came from the model call itself (an Anthropic API error: an HTTP status, rate limit, overload, auth,
+ * a dropped connection or a timeout), as opposed to anything else that threw around it (a bug, the database, the repo).
+ */
+export function isModelCallError(e: unknown): boolean {
+  return e instanceof Anthropic.APIError;
+}
+
+/**
  * A short, secret-free description of a failed model call for verdicts and audit rows: the SDK error class, the HTTP
  * status and the API's error type (e.g. "RateLimitError 429 rate_limit_error"), never the message or request.
  */

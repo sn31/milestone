@@ -57,6 +57,22 @@ describe("verify job: the model call fails", () => {
     });
   }
 
+  it("a reader that cannot be set up is a job error (pg-boss retries), not a stored verdict, and no model call is made", async () => {
+    const provider = throwing(new Anthropic.APIConnectionError({ message: "x" }));
+    setProviderForTests(provider);
+    const broken = () => {
+      throw new Error("git worktree add failed");
+    };
+    await expect(conclude("dlv_1", { title: "m" }, criteria, evidence, [], broken)).rejects.toThrow("git worktree add failed");
+    expect(provider.calls).toBe(0);
+  });
+
+  it("an error that is not a model-call failure is rethrown for a retry, not recorded as unclear", async () => {
+    const provider = throwing(new Error("connection terminated (database)"));
+    setProviderForTests(provider);
+    await expect(conclude("dlv_1", { title: "m" }, criteria, evidence, [], reader)).rejects.toThrow("database");
+  });
+
   it("names the status and error type, never the message or the key", () => {
     const e = new Anthropic.AuthenticationError(401, { type: "error", error: { type: "authentication_error", message: "invalid x-api-key sk-ant-secret" } }, "invalid x-api-key sk-ant-secret", new Headers());
     expect(describeModelError(e)).toBe("AuthenticationError 401 authentication_error");

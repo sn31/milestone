@@ -7,7 +7,7 @@ import { EvidencePanel, toEvidenceItems, type EvidenceItem } from "@/components/
 import { Button, DUR, EASE, EvidenceChip, Hash, Receipt, ReceiptRow, Stamp, StatePill, cx, verdictTone, type CriterionStatus } from "@/components/ui";
 import { toggled } from "@/components/ui/detail-grid";
 import { formatDateTime, formatMoney } from "@/lib/format";
-import { BASELINE_EVIDENCE_ID, RECORDED_MODEL, failingTests, firstLine, isFlag, isOwnTests, ownTestsText, parseBaseline, parseFlag } from "@/app/api/milestones/[id]/status/lines";
+import { BASELINE_EVIDENCE_ID, MODEL_FAILED_RATIONALE, RECORDED_MODEL, failingTests, firstLine, isFlag, isOwnTests, ownTestsText, parseBaseline, parseFlag } from "@/app/api/milestones/[id]/status/lines";
 
 type DeliveryRow = typeof deliveries.$inferSelect;
 
@@ -330,7 +330,9 @@ export function VerdictView({
               meter={checksOnly ? undefined : <Confidence value={r.confidence} />}
               detail={
                 client
-                  ? "The agent ran the checks only, so this criterion is the client's to judge."
+                  ? r.rationale?.startsWith(MODEL_FAILED_RATIONALE)
+                    ? `The model call failed (${r.rationale.slice(MODEL_FAILED_RATIONALE.length).replace(/^\s*\(|\)\s*$/g, "")}), so this criterion is the client's to judge.`
+                    : "The agent ran the checks only, so this criterion is the client's to judge."
                   : (r.evidence_ids ?? []).map((id) => measuredDetail(byId.get(id)?.summary)).find(Boolean) ?? testDetail(r) ?? withFailing(cleanDetail(r.rationale), r.evidence_ids ?? [])
               }
             >

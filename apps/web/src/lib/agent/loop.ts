@@ -1,7 +1,7 @@
 // Server only. One console turn: the configured model, the mandate's tools on Milestone MCP and PayPal MCP
 // (read-only), in a tool loop shaped like generateJson's (packages/verify/src/llm.ts). Every step is emitted as a
 // ConsoleEvent so the browser shows each tool call as it happens. Tool output reaches the model wrapped as untrusted.
-import { answerNowMessage, getProvider, toolResultBlocks, wrapUntrusted, type AnswerDef, type Message, type ToolDef, type ToolResult } from "./model";
+import { answerNowMessage, getProvider, NOT_RUN_FINAL_TURN, toolResultBlocks, wrapUntrusted, type AnswerDef, type Message, type ToolDef, type ToolResult } from "./model";
 import { systemPrompt, turnPrompt } from "./prompt";
 import type { ConsoleEvent, ConsoleMessage, MandateSummary } from "./protocol";
 import { SERVER_LABEL } from "./protocol";
@@ -52,8 +52,11 @@ export async function runAgentTurn(o: TurnInput): Promise<void> {
   let corrected = false;
 
   let maxTokens = MAX_TOKENS;
+  /** The turn the reply is due on; tool calls made on it are not run and buy exactly one more turn (see below). */
+  let lastTurn = maxTurns - 1;
+  let graced = false;
 
-  for (let turn = 0; turn < maxTurns; turn++) {
+  for (let turn = 0; turn <= lastTurn; turn++) {
     if (o.signal?.aborted) return;
     o.emit({ t: "thinking", turn });
     // Tool choice is never forced (the model rejects it): the last turn asks for the reply in the history instead.
@@ -99,6 +102,22 @@ export async function runAgentTurn(o: TurnInput): Promise<void> {
     if (res.type === "stop") {
       o.emit({ t: "error", error: `the model stopped: ${res.reason}` });
       return;
+    }
+    if (turn === lastTurn) {
+      // The final turn is for the reply: its tool calls are not run. Each gets a not-run result (all in one tool
+      // message, so the history stays append-only) and the model gets exactly one more turn to reply.
+      if (graced) break;
+      graced = true;
+      lastTurn = turn + 1;
+      messages.push(res.assistant, { role: "tool", results: res.calls.map((c) => ({ callId: c.id, name: c.name, content: [{ type: "text", text: NOT_RUN_FINAL_TURN }] })) });
+      for (const c of res.calls) {
+        const id = `c${++seq}`;
+        const args = c.input && typeof c.input === "object" && !Array.isArray(c.input) ? (c.input as Record<string, unknown>) : {};
+        o.emit({ t: "call", id, server: byName.get(c.name)?.server ?? "milestone", tool: c.name, args });
+        done.push({ tool: c.name, args, ok: false, status: null });
+        o.emit({ t: "result", id, ok: false, summary: NOT_RUN_FINAL_TURN, status: null, links: [] });
+      }
+      continue;
     }
     messages.push(res.assistant);
     const results: ToolResult[] = [];

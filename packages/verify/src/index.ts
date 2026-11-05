@@ -4,7 +4,7 @@ export { judge, enforce, overall } from "./verifier.ts";
 export type { EvidenceReader, JudgeInput, JudgeResult } from "./verifier.ts";
 export { detectInjection } from "./injection.ts";
 export { explain } from "./explain.ts";
-export { MODEL, promptHash, toolResultContent, wrapUntrusted, isModelConfigured, currentModel, modelConfig, describeModelError, setProviderForTests } from "./llm.ts";
+export { MODEL, promptHash, toolResultContent, wrapUntrusted, isModelConfigured, currentModel, modelConfig, describeModelError, isModelCallError, setProviderForTests } from "./llm.ts";
 export type { Tool, ToolOutput, ModelConfig, Provider } from "./llm.ts";
 export { runUploadStage, evaluateUploadCriterion, inspect as inspectUpload, sniffFormat, pngSize, jpegSize, pdfPageCount, pdfText, pdfInfo, docxText, countWords, patternMatcher, fileEvidenceId, uploadRoot, MIME_BY_FORMAT, safePath, resolveUpload, readUploadedFile, sha256Hex } from "./upload-checks.ts";
 export type { UploadStageFile, UploadStageInput, UploadStageOutput, FileInspection } from "./upload-checks.ts";

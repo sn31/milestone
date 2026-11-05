@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, type ContractSpec } from "@milestone/core";
+import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, storableCompiledCriteria, type ContractSpec } from "@milestone/core";
 import { compileContract, isModelConfigured } from "@milestone/verify";
 import { getDb } from "@/lib/db";
 import { jsonError } from "@/lib/http";
@@ -43,7 +43,9 @@ function demoContract(scopeText: string, totalMinor: number, currency: string): 
 
 async function compile(scopeText: string, currency: string, totalMinor: number, repo?: string): Promise<Compiled> {
   if (!(await isModelConfigured())) return demoContract(scopeText, totalMinor, currency);
-  return compileContract({ scopeText, currency, totalMinor, repoHint: repo });
+  const compiled = await compileContract({ scopeText, currency, totalMinor, repoHint: repo });
+  // The model's draft goes through the editor's rules (DEMO_MODE allowlist included) before it is stored.
+  return { ...compiled, contract: { ...compiled.contract, milestones: compiled.contract.milestones.map((m) => ({ ...m, criteria: storableCompiledCriteria(m.criteria) })) } };
 }
 
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;

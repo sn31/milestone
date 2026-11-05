@@ -9,7 +9,7 @@ import { createAnthropicProvider, toAnthropicContent } from "./providers/anthrop
 import { modelSettings, type ModelSettings } from "./providers/config.ts";
 import { answerNowMessage, wrapUntrusted, type Block, type Message, type Provider, type ToolResult } from "./providers/types.ts";
 
-export { anthropic, describeModelError } from "./providers/anthropic.ts";
+export { anthropic, describeModelError, isModelCallError } from "./providers/anthropic.ts";
 export { wrapUntrusted } from "./providers/types.ts";
 export type { Provider } from "./providers/types.ts";
 
@@ -118,6 +118,8 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
  */
 export const TOOL_TEXT_BUDGET = 400_000;
 export const EVIDENCE_BUDGET_EXHAUSTED = "evidence budget exhausted: cite what you have already read and give your answer";
+/** The result every tool call on the final turn gets instead of running: the turn was for the answer. */
+export const NOT_RUN_FINAL_TURN = "not run: give your final answer now";
 
 /** The text characters a tool output adds to the conversation (image and PDF bytes are bounded by the reader). */
 function textChars(out: ToolOutput): number {
@@ -137,8 +139,9 @@ export type GenerateJsonResult<T> = { ok: true; value: T; model: string } | { ok
 /**
  * Asks for an answer in the zod schema through an `emit_<schemaName>` tool, running read-only tools in between. Tool
  * choice is never forced, so the history asks for the call instead: the last turn carries an answer-now instruction, and a
- * turn that ends in text gets one nudge (one extra turn). A turn cut off at max_tokens is re-sent once with a bigger
- * budget. Returns the parsed object, or a failure with its reason (the caller decides what a failure means, e.g. "unclear").
+ * turn that ends in text gets one nudge (one extra turn). Tool calls made on the last turn are not run: each gets a
+ * NOT_RUN_FINAL_TURN result and the model gets one more turn for the answer (once). A turn cut off at max_tokens is
+ * re-sent once with a bigger budget. Returns the parsed object, or a failure with its reason (the caller decides what a failure means, e.g. "unclear").
  * Errors from the provider (API errors) are not caught here: they propagate to the caller.
  */
 export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T>): Promise<GenerateJsonResult<z.infer<T>>> {
@@ -153,12 +156,15 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
   let nudged = false;
   /** Whether the history already ends in an answer-now instruction (no second one is stacked on it). */
   let asked = false;
+  /** Whether the one extra turn after tool calls on the final turn has been granted. */
+  let graced = false;
   const textBudget = o.toolTextBudget ?? TOOL_TEXT_BUDGET;
   let textUsed = 0;
   const fail = (reason: GenerateJsonFailure, error: string) => ({ ok: false as const, error, reason, model });
 
   for (let turn = 0; turn < limit; ) {
-    if (turn === limit - 1 && !asked) {
+    const final = turn === limit - 1;
+    if (final && !asked) {
       messages.push(answerNowMessage(answer, "last_turn"));
       asked = true;
     }
@@ -186,6 +192,16 @@ export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T
       messages.push(res.assistant, answerNowMessage(answer, "text_reply"));
       asked = true;
       limit = Math.max(limit, turn + 1);
+      continue;
+    }
+    if (final) {
+      // The final turn is for the answer: its tool calls are not run (so they never count as reads), each gets a
+      // not-run result in one tool message, and the model gets exactly one more turn to answer.
+      if (graced) return fail("turn_limit", "turn limit: the model called tools instead of answering on its final turn");
+      graced = true;
+      messages.push(res.assistant, { role: "tool", results: res.calls.map((u) => ({ callId: u.id, name: u.name, content: [{ type: "text", text: NOT_RUN_FINAL_TURN }] })) });
+      asked = true;
+      limit = turn + 1;
       continue;
     }
     asked = false;
