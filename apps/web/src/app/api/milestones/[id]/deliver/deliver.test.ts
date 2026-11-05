@@ -104,7 +104,7 @@ describe.skipIf(!e2e)("POST /api/milestones/[id]/deliver against Postgres", asyn
   process.env.MILESTONE_ALLOW_LOCAL_REPOS = "1";
   const core = await import("@milestone/core");
   const { eq, inArray } = await import("drizzle-orm");
-  const db = core.createDb();
+  const db = e2e ? core.createDb() : (undefined as unknown as ReturnType<typeof core.createDb>); // the suite body is collected even when skipped
   state.db = db;
   const { POST } = await import("./route");
   const tag = randomUUID().slice(0, 8);

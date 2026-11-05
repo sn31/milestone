@@ -43,7 +43,7 @@ describe.skipIf(!run)("advance job end to end", async () => {
   const { getDb } = await import("../src/lib/db.ts");
   const { advance } = await import("../src/jobs/advance.ts");
   const advanceLedgerRef = (await import("@milestone/core")).ledgerRefs.advanceFunding;
-  const db = getDb();
+  const db = run ? getDb() : (undefined as unknown as ReturnType<typeof getDb>); // the suite body is collected even when skipped
   const partner = new PayPalClient({ clientId: "partner-id", clientSecret: "partner-secret", env: "sandbox", fetchImpl: fakeFetch });
   const deps = { partner: () => partner };
 

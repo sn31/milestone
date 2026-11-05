@@ -58,7 +58,7 @@ try { process.loadEnvFile(new URL("../../../../../../../../.env", import.meta.ur
 describe.skipIf(!e2e)("upload and file routes against Postgres", async () => {
   const core = await import("@milestone/core");
   const { eq } = await import("drizzle-orm");
-  const db = core.createDb();
+  const db = e2e ? core.createDb() : (undefined as unknown as ReturnType<typeof core.createDb>); // the suite body is collected even when skipped
   state.db = db;
   const { POST } = await import("./route");
   const { GET } = await import("../../../files/[deliveryId]/[name]/route");

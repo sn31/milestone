@@ -56,7 +56,7 @@ describe.skipIf(!run)("release and settle end to end", async () => {
   const { getDb } = await import("../src/lib/db.ts");
   const { release } = await import("../src/jobs/release.ts");
   const { settle } = await import("../src/jobs/settle.ts");
-  const db = getDb();
+  const db = run ? getDb() : (undefined as unknown as ReturnType<typeof getDb>); // the suite body is collected even when skipped
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_rs_${tag}`;
   const clientId = `usr_e2e_c_${tag}`;
@@ -572,7 +572,7 @@ describe.skipIf(!run)("advance repayment: shortfall and carry-over end to end", 
   const { getDb } = await import("../src/lib/db.ts");
   const { release } = await import("../src/jobs/release.ts");
   const { settle } = await import("../src/jobs/settle.ts");
-  const db = getDb();
+  const db = run ? getDb() : (undefined as unknown as ReturnType<typeof getDb>); // the suite body is collected even when skipped
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_co_${tag}`;
   const clientId = `usr_e2e_co_c_${tag}`;

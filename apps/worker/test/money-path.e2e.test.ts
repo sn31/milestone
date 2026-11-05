@@ -101,7 +101,7 @@ describe.skipIf(!run)("money path: review route, release and settle against Post
   const routePath = new URL("../../web/src/app/api/milestones/[id]/review/route.ts", import.meta.url).pathname;
   const route = (await import(/* @vite-ignore */ routePath)) as { POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response> };
 
-  const db = getDb();
+  const db = run ? getDb() : (undefined as unknown as ReturnType<typeof getDb>); // the suite body is collected even when skipped
   const tag = randomUUID().slice(0, 8);
   const contractId = `ctr_e2e_mp_${tag}`;
   const clientId = `usr_e2e_mpc_${tag}`;
