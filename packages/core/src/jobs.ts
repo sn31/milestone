@@ -48,3 +48,20 @@ export async function enqueue(name: JobName, milestoneId: string, data: Record<s
   if (opts.delaySeconds !== undefined) options.startAfter = opts.delaySeconds;
   return b.send(name, { milestoneId, ...data }, options);
 }
+
+/** Seconds from `now` until a review window closes (0 once it has closed): the delay of the release job that closes it. */
+export function releaseDelaySeconds(reviewEndsAt: Date, now: Date = new Date()): number {
+  return Math.max(0, Math.ceil((reviewEndsAt.getTime() - now.getTime()) / 1000));
+}
+
+/**
+ * Deletes the jobs of one queue still waiting (created or retry, not yet running) for a milestone, and returns how many.
+ * The showcase seed uses it before scheduling a milestone's release, so a job left by an earlier seed cannot hold the
+ * dedupe key and leave the new review window without a job.
+ */
+export async function dropQueuedJobs(name: JobName, milestoneId: string): Promise<number> {
+  const b = await jobs();
+  const queued = await b.findJobs(name, { data: { milestoneId }, queued: true });
+  if (queued.length > 0) await b.deleteJob(name, queued.map((j) => j.id));
+  return queued.length;
+}

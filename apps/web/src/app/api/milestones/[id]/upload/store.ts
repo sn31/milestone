@@ -1,11 +1,66 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { UploadedFile } from "@milestone/core";
 import { MIME_BY_FORMAT, sniffFormat, uploadRoot } from "@milestone/verify";
 
 export const MAX_FILES = 10;
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
+/** Total size UPLOAD_DIR may reach before new uploads are refused (MILESTONE_UPLOAD_BUDGET_BYTES overrides it). */
+export const DEFAULT_UPLOAD_BUDGET_BYTES = 500 * 1024 * 1024;
+/** How long a measured UPLOAD_DIR size is reused before the directory is walked again. */
+export const UPLOAD_USAGE_TTL_MS = 30_000;
+
+/** MILESTONE_UPLOAD_BUDGET_BYTES as a positive whole number of bytes, else the default. */
+export function uploadBudgetBytes(raw: string | undefined = process.env.MILESTONE_UPLOAD_BUDGET_BYTES): number {
+  const n = Number(raw?.trim() || NaN);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_UPLOAD_BUDGET_BYTES;
+}
+
+/** Total bytes of the regular files under `root`, recursively, without following links. A missing directory is 0. */
+export async function dirBytes(root: string): Promise<number> {
+  const entries = await readdir(root, { withFileTypes: true }).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "ENOENT" || e.code === "ENOTDIR") return [];
+    throw e;
+  });
+  let total = 0;
+  for (const e of entries) {
+    const path = join(root, e.name);
+    if (e.isDirectory()) total += await dirBytes(path);
+    else if (e.isFile()) total += await lstat(path).then((st) => st.size, () => 0);
+  }
+  return total;
+}
+
+/**
+ * UPLOAD_DIR's size, measured at most once per `ttlMs` (concurrent callers share one walk). `add` counts bytes stored
+ * since the last walk, so a burst of uploads inside the cache window still adds up.
+ */
+export function createUploadUsage(ttlMs: number = UPLOAD_USAGE_TTL_MS, measure: (root: string) => Promise<number> = dirBytes) {
+  let cached: { root: string; at: number; bytes: Promise<number> } | null = null;
+  let added = 0;
+  return {
+    async bytes(root: string, now: number = Date.now()): Promise<number> {
+      if (!cached || cached.root !== root || now - cached.at >= ttlMs) {
+        const bytes = measure(root);
+        cached = { root, at: now, bytes };
+        added = 0;
+        bytes.catch(() => {
+          if (cached?.bytes === bytes) cached = null;
+        });
+      }
+      return (await cached.bytes) + added;
+    },
+    add(n: number): void {
+      added += n;
+    },
+  };
+}
+
+/** Whether `incoming` more bytes would take UPLOAD_DIR (currently `used`) past the budget. */
+export function overBudget(used: number, incoming: number, budget: number): boolean {
+  return used + Math.max(0, incoming) > budget;
+}
 
 /** A safe stored name: basename only, no leading dot, conservative characters, unique within the delivery. */
 export function safeName(raw: string, taken: Set<string>): string {

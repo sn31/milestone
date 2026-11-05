@@ -230,7 +230,7 @@ else {
 
 // ---------- Every env var the code reads ----------
 
-const PLATFORM = new Set(["PATH", "HOME", "NODE_ENV", "PORT", "RENDER_EXTERNAL_URL", "CI", "TMPDIR"]);
+const PLATFORM = new Set(["PATH", "HOME", "NODE_ENV", "PORT", "RENDER_EXTERNAL_URL", "CI", "TMPDIR", "NEXT_RUNTIME"]);
 function* walk(dir) {
   for (const name of readdirSync(dir)) {
     if (["node_modules", ".next", "dist", "test", "__tests__"].includes(name) || name.startsWith(".next")) continue;
@@ -246,8 +246,9 @@ for (const base of ["apps", "packages"]) {
     if (!existsSync(src)) continue;
     for (const f of walk(src)) {
       const text = readFileSync(f, "utf8");
-      for (const m of text.matchAll(/\benv\??\.([A-Z][A-Z0-9_]+)\b|\benv\[\s*["']([A-Z][A-Z0-9_]+)["']\s*\]/g)) {
-        const k = m[1] ?? m[2];
+      // process.env.X, env?.X, env["X"], and the envOr("X", env) helper from @milestone/core.
+      for (const m of text.matchAll(/\benv\??\.([A-Z][A-Z0-9_]+)\b|\benv\[\s*["']([A-Z][A-Z0-9_]+)["']\s*\]|\benvOr\(\s*["']([A-Z][A-Z0-9_]+)["']/g)) {
+        const k = m[1] ?? m[2] ?? m[3];
         if (!read.has(k)) read.set(k, relative(root, f));
       }
     }

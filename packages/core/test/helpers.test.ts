@@ -7,6 +7,7 @@ import { OP_KINDS } from "../src/ops.ts";
 import { RECORDED_VERDICT_MODEL, envOr, paypalMode, payoutReceiver, seedPaypalEmails, seedVerdictModel } from "../src/env.ts";
 // Read by path (core does not depend on verify) so the seed's copy of the default cannot drift from the real one.
 import { DEFAULT_ANTHROPIC_MODEL } from "../../verify/src/providers/config.ts";
+import { releaseDelaySeconds } from "../src/jobs.ts";
 import { MIN_REVIEW_WINDOW_SECONDS, RELEASABLE_STATUSES, reviewWindowSeconds, statusForDecision } from "../src/milestones.ts";
 
 describe("json helpers", () => {
@@ -267,5 +268,15 @@ describe("commit deliveries", () => {
     expect(CommitPayload.parse({ sha: "abc", clone_url: "u", title: 3, base_sha: "" })).toEqual({ sha: "abc", clone_url: "u", title: "", body: "", branch: "", base_sha: null });
     expect(CommitPayload.safeParse({ sha: "", clone_url: "u" }).success).toBe(false);
     expect(CommitPayload.safeParse({ sha: "abc" }).success).toBe(false);
+  });
+});
+
+describe("releaseDelaySeconds", () => {
+  it("delays the release job until the review window closes, rounding up, and never below 0", () => {
+    const now = new Date("2026-11-05T12:00:00Z");
+    expect(releaseDelaySeconds(new Date(now.getTime() + 172_800_000), now)).toBe(172_800);
+    expect(releaseDelaySeconds(new Date(now.getTime() + 1_500), now)).toBe(2);
+    expect(releaseDelaySeconds(now, now)).toBe(0);
+    expect(releaseDelaySeconds(new Date(now.getTime() - 60_000), now)).toBe(0);
   });
 });

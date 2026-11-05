@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { json, jsonError, noStore } from "@/lib/http";
 import { DEMO_NOTICE_COOKIE, demoMode } from "../_demo";
-import { clearUploads, createLimiter, runShowcaseSeed } from "./reset";
+import { clearSimulator, clearUploads, createLimiter, runShowcaseSeed } from "./reset";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,7 +36,7 @@ function back(req: Request, notice: string): Response {
 
 /**
  * POST /api/demo/reset: puts the hosted demo back to the showcase (core seed with --reset --showcase), then empties
- * UPLOAD_DIR; the simulator state file is kept. Exists only with DEMO_MODE=1 (404 otherwise) and runs at most once every 30 s (429 with Retry-After).
+ * the PayPal simulator's state and UPLOAD_DIR. Exists only with DEMO_MODE=1 (404 otherwise) and runs at most once every 30 s (429 with Retry-After).
  */
 export async function POST(req: Request) {
   if (!demoMode()) return jsonError("not found", 404);
@@ -51,6 +51,13 @@ export async function POST(req: Request) {
     console.error(`demo reset: ${result.error}`);
     if (form) return back(req, "failed");
     return jsonError("the demo could not be reset", 500);
+  }
+  // The simulator's orders, payouts and vault tokens belonged to the truncated rows; Casey's seeded saved PayPal is
+  // adopted again on first use. The data reset stands if this fails.
+  try {
+    clearSimulator();
+  } catch (e) {
+    console.error(`demo reset: could not clear the PayPal simulator: ${(e as Error).message}`);
   }
   // The tables no longer point at any upload: reclaim the disk. The data reset stands if this fails.
   await clearUploads().catch((e: Error) => console.error(`demo reset: could not clear uploads: ${e.message}`));

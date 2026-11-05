@@ -15,6 +15,7 @@ import {
   hasAudit,
   loadDeliveryContext,
   milestones,
+  releaseDelaySeconds,
   reviewWindowSeconds,
   statusForDecision,
   transition,
@@ -329,8 +330,7 @@ async function applyDecision(db: Db, ctx: DeliveryContext, decision: StoredDecis
     return endsAt;
   });
   if (reviewEndsAt) {
-    const delaySeconds = Math.max(0, Math.ceil((reviewEndsAt.getTime() - Date.now()) / 1000));
-    await enqueue("release", milestoneId, { deliveryId }, { delaySeconds, dedupe: deliveryId });
+    await enqueue("release", milestoneId, { deliveryId }, { delaySeconds: releaseDelaySeconds(reviewEndsAt), dedupe: deliveryId });
   }
 }
 

@@ -4,8 +4,10 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
 import { loadRootEnv, paypalMode, seedPaypalEmails, seedVerdictModel } from "./env.ts";
+import { dropQueuedJobs, enqueue, releaseDelaySeconds } from "./jobs.ts";
 import { ledgerRefs } from "./ledger.ts";
 import { createMandate } from "./mandates.ts";
+import { reviewWindowSeconds } from "./milestones.ts";
 import { advances, agentMandates, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paymentMethods, paypalOps, users } from "./schema.ts";
 import type { PolicyDecision } from "./schemas.ts";
 
@@ -171,7 +173,8 @@ for (let i = 1; i <= 5; i++) {
 // `pnpm db:seed -- --showcase` (combinable with --reset) puts the demo milestones into every state once, so each screen
 // has something to show without running the worker: funded, review (window open), released, needs_client (partial),
 // held after a failed payout (the operator case) and a second client's funded milestone with an open advance. Rows have fixed ids, so a rerun refreshes them in place. No PayPal simulator state is written: the showcase ids
-// are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator.
+// are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator. A payout
+// needs no order, so mst_2's review window gets a real release job (the seed queues it; the worker runs it when the window closes).
 let showcase = 0;
 let agentToken: string | null = null;
 let savedPayPal = false;
@@ -298,7 +301,7 @@ if (process.argv.includes("--showcase")) {
   await fund(m1, 50, 1);
   await advance(m1, { id: "adv_show_open", principalMinor: 4000, feeBpsPerDay: 10, days: 7, pFail: 0.12, expectedLossMinor: 240, acceptedAgo: 30, fundedAgo: 29 });
 
-  // mst_2: delivered as PR #7, verified pass, in review with the window closing in 20 minutes.
+  // mst_2: delivered as PR #7, verified pass, in review with the contract's window (48 h unless REVIEW_WINDOW_SECONDS) open.
   await fund(m2, 48, 2);
   const sha2 = sha("pr-7-head").slice(0, 40);
   const d2 = await deliver(m2, {
@@ -322,9 +325,16 @@ if (process.argv.includes("--showcase")) {
     result: "pass",
     decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
   });
-  const ends2 = min(20);
+  // The window opens when the verdict lands and lasts the contract's review window, as verify.ts sets it, and the release
+  // job that closes it is queued now, as verify.ts queues it: when the window runs out the worker releases mst_2 (or
+  // the client's Approve releases it first), so the ring never sits at "releasing" with no job behind it.
+  const [ctr2] = await db.select({ windowSeconds: contracts.reviewWindowSeconds }).from(contracts).where(eq(contracts.id, m2.contractId));
+  const ends2 = new Date(d2.verified.getTime() + reviewWindowSeconds(ctr2!.windowSeconds) * 1000);
   await setStatus(m2.id, "review", { reviewEndsAt: ends2 });
   await auditRow(m2, "policy", "milestone.review", d2.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_2", action: "release", ruleIds: ["P6"], reviewEndsAt: ends2.toISOString() });
+  // A release job an earlier seed queued for mst_2 would hold the dedupe key (and fire against this delivery's window), so drop it first.
+  await dropQueuedJobs("release", m2.id);
+  await enqueue("release", m2.id, { deliveryId: "dlv_show_2" }, { delaySeconds: releaseDelaySeconds(ends2, new Date()), dedupe: "dlv_show_2" });
 
   // mst_3: released, payout confirmed by webhook, ledger held -> freelancer.
   await fund(m3, 46, 3);

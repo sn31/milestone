@@ -6,7 +6,7 @@ The repository holds a Render Blueprint (`render.yaml`). It describes one web se
 
 ## What the hosted demo is
 
-- **Demo mode** (`DEMO_MODE=1`). Every page shows a thin band: "Demo: PayPal sandbox or simulated, test identities; reset any time". The band also says which judgment is live: "Judgment by Claude" when `ANTHROPIC_API_KEY` is set, "Judgment goes to the client: no model on this host" otherwise. The band's **Reset demo** button posts to `/api/demo/reset`, which puts the showcase back (the seed with `--reset --showcase`, then every uploaded file in `UPLOAD_DIR` is deleted; the simulator state file is kept). A reset runs at most once every 30 seconds, and the route answers 404 when `DEMO_MODE` is not `1`.
+- **Demo mode** (`DEMO_MODE=1`). Every page shows a thin band: "Demo: PayPal sandbox or simulated, test identities; reset any time". The band also says which judgment is live: "Judgment by Claude" when `ANTHROPIC_API_KEY` is set, "Judgment goes to the client: no model on this host" otherwise. The band's **Reset demo** button posts to `/api/demo/reset`, which puts the showcase back (the seed with `--reset --showcase`, then the PayPal simulator's state in `SIMULATED_PAYPAL_STATE_FILE` is emptied and every uploaded file in `UPLOAD_DIR` is deleted; Casey's seeded saved PayPal is a database row the simulator adopts again on first use). The seed also queues the release job for the showcase milestone in review, so when its window closes the worker releases it as it would any other. A reset runs at most once every 30 seconds, and the route answers 404 when `DEMO_MODE` is not `1`.
 - **PayPal simulated by default** (`PAYPAL_MODE=simulated`). A built-in simulator answers the same REST calls as the PayPal sandbox and posts its own signed webhooks to the service, so the demo needs no PayPal account. You can switch to the real sandbox (see below).
 - **Identities** come from a role switcher (client, freelancer, partner), not a sign-in.
 - **Deliveries come from public https repositories only.** The web app refuses local paths in production (`MILESTONE_ALLOW_LOCAL_REPOS` is unset). The start script also gives both processes a `git` restricted to https, so no other route can make the worker fetch a `file://`, local-path, ssh or `git://` repository.
@@ -87,6 +87,7 @@ Every variable the code reads is either set in `render.yaml` or listed here. `sc
 | `MILESTONE_ALLOW_LOCAL_REPOS` | Leave unset | `1` lets deliveries name local paths and `file://` URLs, and lifts the https-only `git`. Never on a public host. |
 | `MILESTONE_MCP_URL` | Optional | Where the agent console finds the MCP server. Defaults to `APP_URL`. |
 | `MILESTONE_PARTNER_ID` | Optional | The partner user new advances are booked to. Defaults to the first partner user. |
+| `MILESTONE_UPLOAD_BUDGET_BYTES` | Optional | Total size `UPLOAD_DIR` may reach before file deliveries are refused with 413 (default 524288000, 500 MB; measured at most every 30 s). Keeps visitors' uploads from filling the disk. |
 | `PAYPAL_PARTNER_CLIENT_ID` | Sandbox only | The capital partner's sandbox app, which pays advances. |
 | `PAYPAL_PARTNER_CLIENT_SECRET` | Sandbox only | Secret for the partner's sandbox app. |
 | `PAYPAL_FREELANCER_EMAIL` | Sandbox only | The seeded freelancer's payout receiver (a sandbox personal account). |

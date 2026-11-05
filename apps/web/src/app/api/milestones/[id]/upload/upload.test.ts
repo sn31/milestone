@@ -3,7 +3,7 @@
  * Postgres (opt in: MILESTONE_E2E=1). enqueue and the session are mocked; rows and files are removed afterwards.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ vi.mock("@milestone/core", async (orig) => ({
   enqueue: async (...args: unknown[]) => { state.enqueued.push(args); return "job"; },
 }));
 
-import { checkFiles, MAX_FILE_BYTES, safeName, storeFiles } from "./store";
+import { checkFiles, createUploadUsage, DEFAULT_UPLOAD_BUDGET_BYTES, dirBytes, MAX_FILE_BYTES, overBudget, safeName, storeFiles, uploadBudgetBytes } from "./store";
 
 let root: string;
 beforeAll(async () => {
@@ -49,6 +49,58 @@ describe("upload storage", () => {
     expect(stored[0]).toMatchObject({ name: "logo.png", size: PNG.length, path: "dlv_up_unit/logo.png", mime: "image/png", sha256: createHash("sha256").update(PNG).digest("hex") });
     expect(stored[1]!.mime).toMatch(/^text\/markdown/);
     expect(await readFile(join(root, "dlv_up_unit", "logo.png"))).toEqual(PNG);
+  });
+});
+
+describe("upload budget", () => {
+  it("reads MILESTONE_UPLOAD_BUDGET_BYTES, falling back to 500 MB", () => {
+    expect(DEFAULT_UPLOAD_BUDGET_BYTES).toBe(500 * 1024 * 1024);
+    expect(uploadBudgetBytes(undefined)).toBe(DEFAULT_UPLOAD_BUDGET_BYTES);
+    for (const bad of ["", " ", "0", "-5", "lots"]) expect(uploadBudgetBytes(bad)).toBe(DEFAULT_UPLOAD_BUDGET_BYTES);
+    expect(uploadBudgetBytes("1048576")).toBe(1_048_576);
+  });
+
+  it("refuses only what would go past the budget", () => {
+    expect(overBudget(90, 10, 100)).toBe(false);
+    expect(overBudget(90, 11, 100)).toBe(true);
+    expect(overBudget(101, 0, 100)).toBe(true);
+    expect(overBudget(50, -1, 100)).toBe(false);
+  });
+
+  it("sums file sizes recursively; a missing directory is 0", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "milestone-budget-"));
+    try {
+      await mkdir(join(dir, "dlv_a", "nested"), { recursive: true });
+      await writeFile(join(dir, "dlv_a", "a.bin"), new Uint8Array(100));
+      await writeFile(join(dir, "dlv_a", "nested", "b.bin"), new Uint8Array(23));
+      await writeFile(join(dir, "c.bin"), new Uint8Array(7));
+      expect(await dirBytes(dir)).toBe(130);
+      expect(await dirBytes(join(dir, "missing"))).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("measures once per window, counts what was added since, and measures again after it", async () => {
+    let size = 1000;
+    const measure = vi.fn(async () => size);
+    const usage = createUploadUsage(30_000, measure);
+    expect(await usage.bytes("/u", 0)).toBe(1000);
+    usage.add(50);
+    size = 9999;
+    expect(await usage.bytes("/u", 29_999)).toBe(1050);
+    expect(measure).toHaveBeenCalledTimes(1);
+    expect(await usage.bytes("/u", 30_000)).toBe(9999);
+    expect(measure).toHaveBeenCalledTimes(2);
+    expect(await usage.bytes("/other", 30_001)).toBe(9999);
+    expect(measure).toHaveBeenCalledTimes(3);
+  });
+
+  it("forgets a failed measurement so the next call tries again", async () => {
+    const measure = vi.fn().mockRejectedValueOnce(new Error("EIO")).mockResolvedValue(5);
+    const usage = createUploadUsage(30_000, measure);
+    await expect(usage.bytes("/u", 0)).rejects.toThrow("EIO");
+    expect(await usage.bytes("/u", 1)).toBe(5);
   });
 });
 

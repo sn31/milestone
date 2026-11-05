@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { paypalMode, resetSimulator } from "@milestone/money";
 import { uploadRoot } from "@milestone/verify";
 import { RESET_INTERVAL_S } from "../_demo";
 
@@ -44,9 +45,23 @@ export async function clearUploads(root: string = uploadRoot()): Promise<number>
 }
 
 /**
- * Re-seeds the showcase: the core seed with --reset --showcase (every table truncated, then the demo rebuilt). The
- * simulator state file is kept (--reset-files is not passed: it resolves var/ in the repo, not the hosted paths);
- * uploads are cleared separately by the route with clearUploads, so the disk does not grow with every visitor's files.
+ * Empties the PayPal simulator's state (SIMULATED_PAYPAL_STATE_FILE, or var/simulated-paypal.json) after a reseed: the
+ * orders, captures, payouts and vault tokens it holds belong to rows the reset truncated. Done through the simulator's
+ * own reset, under its cross-process lock, so the worker re-reads the empty state on its next call instead of keeping a
+ * cached copy. Nothing the showcase needs lives there: its PayPal ids are display data, and Casey's saved PayPal
+ * (pm_show_casey, vault id SIM-PMT-SHOW...) is a database row that the simulator adopts on first use. Only in simulated
+ * mode; returns whether it cleared anything.
+ */
+export function clearSimulator(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (paypalMode(env) !== "simulated") return false;
+  resetSimulator();
+  return true;
+}
+
+/**
+ * Re-seeds the showcase: the core seed with --reset --showcase (every table truncated, then the demo rebuilt).
+ * --reset-files is not passed (it resolves var/ in the repo, not the hosted paths): the route clears the simulator state
+ * with clearSimulator and the uploads with clearUploads, so neither outlives the rows it belonged to.
  * Runs the seed as its own process, the way `pnpm db:seed` does, because the seed is a script that exits when done.
  */
 export function runShowcaseSeed(env: NodeJS.ProcessEnv = process.env): Promise<{ ok: true } | { ok: false; error: string }> {

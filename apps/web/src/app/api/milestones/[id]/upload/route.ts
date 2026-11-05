@@ -6,13 +6,16 @@ import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
-import { checkFiles, MAX_FILE_BYTES, MAX_FILES, newUploadDeliveryId, storeFiles, type IncomingFile } from "./store";
+import { checkFiles, createUploadUsage, MAX_FILE_BYTES, MAX_FILES, newUploadDeliveryId, overBudget, storeFiles, uploadBudgetBytes, type IncomingFile } from "./store";
 import { RATE_RULES, limitResponse } from "@/lib/rate-limit";
+
+const usage = createUploadUsage();
 
 /**
  * File delivery by the contract's freelancer: multipart/form-data with up to 10 "files" (20 MB each). The files are
  * stored under UPLOAD_DIR/<deliveryId>/ with their sha256, a deliveries row (source upload) records them, and the
  * verify job runs the upload checks and the judge on them. Delivered files are untrusted evidence (CLAUDE.md rule 5).
+ * When UPLOAD_DIR already holds MILESTONE_UPLOAD_BUDGET_BYTES (default 500 MB), new uploads are refused with 413.
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   // Each delivery queues a worker judgment; deliver and upload share one per-IP bucket (DEMO_MODE only).
@@ -29,6 +32,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (declared > MAX_FILES * MAX_FILE_BYTES + 1024 * 1024) return jsonError(`upload too large (max ${MAX_FILES} files of ${MAX_FILE_BYTES / 1024 / 1024} MB)`, 413);
+  const root = uploadRoot();
+  const budget = uploadBudgetBytes();
+  if (overBudget(await usage.bytes(root), Number.isFinite(declared) ? declared : 0, budget)) return jsonError("upload storage is full: no new files are accepted until space is freed", 413);
   let form: FormData;
   try {
     form = await req.formData();
@@ -42,8 +48,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const problem = checkFiles(files);
   if (problem) return jsonError(problem, 400);
 
+  const totalBytes = files.reduce((n, f) => n + f.bytes.length, 0);
+  if (overBudget(await usage.bytes(root), totalBytes, budget)) return jsonError("upload storage is full: no new files are accepted until space is freed", 413);
+
   const deliveryId = newUploadDeliveryId();
-  const root = uploadRoot();
   const stored = await storeFiles(deliveryId, files, root);
   const note = form.get("note");
   try {
@@ -58,6 +66,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     await rm(join(root, deliveryId), { recursive: true, force: true });
     throw e;
   }
+  usage.add(totalBytes);
   await audit(db, { actor: actor.userId, event: AUDIT_EVENTS.deliveryUpload, milestoneId: m.id, contractId: c.id, detail: { deliveryId, files: stored.map((f) => ({ name: f.name, size: f.size, sha256: f.sha256 })) } });
   await enqueue("verify", m.id, { deliveryId }, { dedupe: deliveryId });
   return json({ ok: true, deliveryId, files: stored.map(({ name, size, sha256, mime }) => ({ name, size, sha256, mime })) });
