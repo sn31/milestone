@@ -5,7 +5,7 @@ import { jsonError, noStore } from "@/lib/http";
 import { getActor } from "@/lib/session";
 import { toSummary } from "@/lib/agent/data";
 import { runAgentTurn } from "@/lib/agent/loop";
-import { currentModel, isModelConfigured, providerName } from "@/lib/agent/model";
+import { currentModel, isModelConfigured } from "@/lib/agent/model";
 import type { ConsoleEvent, ConsoleMessage } from "@/lib/agent/protocol";
 import { connectMilestone, paypalTools, type AgentTool } from "@/lib/agent/servers";
 import { MAX_TOOLS } from "@/lib/agent/tools";
@@ -88,7 +88,7 @@ export async function POST(req: Request) {
           notes.push(`Milestone MCP unavailable: ${(e as Error).message}`);
         }
         tools.push(...pp.tools);
-        emit({ t: "start", model: `${providerName()} · ${currentModel()}`, tools: tools.map((t) => ({ server: t.server, name: t.name })), notes });
+        emit({ t: "start", model: `Claude · ${currentModel()}`, tools: tools.map((t) => ({ server: t.server, name: t.name })), notes });
         await runAgentTurn({ mandate, clientName: user?.name ?? actor.userId, messages, tools, origin, emit, signal: req.signal });
       } catch (e) {
         emit({ t: "error", error: (e as Error).message });

@@ -1,50 +1,30 @@
 /**
- * The only place the codebase talks to a model. The provider comes from MODEL_PROVIDER: "ollama" (a local model,
- * the default) or "anthropic" (Claude, used when ANTHROPIC_API_KEY is set and MODEL_PROVIDER is not "ollama").
- * modelConfig() is the one reading of the environment: isModelConfigured, getProvider and both providers use it.
+ * The only place the codebase talks to a model: Claude through the Anthropic SDK, available when ANTHROPIC_API_KEY is
+ * set. modelConfig() is the one reading of the environment: isModelConfigured, getProvider and the provider use it.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { stripRoots } from "./deterministic.ts";
 import { createAnthropicProvider, toAnthropicContent } from "./providers/anthropic.ts";
-import { modelSettings, providerName, type ModelSettings } from "./providers/config.ts";
-import { createOllamaProvider, ollamaReachable } from "./providers/ollama.ts";
+import { modelSettings, type ModelSettings } from "./providers/config.ts";
 import { wrapUntrusted, type Block, type Message, type Provider, type ToolResult } from "./providers/types.ts";
 
 export { anthropic } from "./providers/anthropic.ts";
-export { providerName } from "./providers/config.ts";
-export type { ProviderName } from "./providers/config.ts";
 export { wrapUntrusted } from "./providers/types.ts";
 export type { Provider } from "./providers/types.ts";
 
 export interface ModelConfig extends ModelSettings {
-  /**
-   * Whether a model can be called: the Anthropic key exists (anthropic), or the Ollama server answers GET /api/tags
-   * within 1 s and has the text model pulled (ollama; cached for 30 s). Callers fall back to deterministic-only.
-   */
+  /** Whether a model can be called: ANTHROPIC_API_KEY is set. Callers fall back to deterministic-only. */
   configured(): Promise<boolean>;
 }
 
-let reach: { at: number; key: string; ok: Promise<boolean> } | null = null;
-const REACH_TTL_MS = 30_000;
-
-/** The provider, models and server the environment selects, and whether that model can be called. */
+/** The model and server the environment selects, and whether that model can be called. */
 export function modelConfig(env: NodeJS.ProcessEnv = process.env): ModelConfig {
   const s = modelSettings(env);
-  return {
-    ...s,
-    async configured() {
-      if (s.provider === "anthropic") return Boolean(env.ANTHROPIC_API_KEY);
-      const key = `${s.baseUrl}|${s.textModel}`;
-      if (!reach || reach.key !== key || Date.now() - reach.at > REACH_TTL_MS) {
-        reach = { at: Date.now(), key, ok: ollamaReachable({ baseUrl: s.baseUrl, model: s.textModel }) };
-      }
-      return reach.ok;
-    },
-  };
+  return { ...s, configured: async () => Boolean(env.ANTHROPIC_API_KEY?.trim()) };
 }
 
-/** The model id text requests use under the current provider (MILESTONE_MODEL, else the provider's default). */
+/** The Claude model id requests use (MILESTONE_MODEL when it names a Claude model, else the default). */
 export function currentModel(env: NodeJS.ProcessEnv = process.env): string {
   return modelSettings(env).textModel;
 }
@@ -58,10 +38,10 @@ let override: Provider | null = null;
 export function getProvider(): Provider {
   if (override) return override;
   const c = modelConfig();
-  const key = `${c.provider}|${c.textModel}|${c.visionModel}|${c.baseUrl}`;
+  const key = `${c.textModel}|${c.baseUrl}`;
   let p = providers.get(key);
   if (!p) {
-    p = c.provider === "anthropic" ? createAnthropicProvider({ model: c.textModel }) : createOllamaProvider({ baseUrl: c.baseUrl, model: c.textModel, visionModel: c.visionModel });
+    p = createAnthropicProvider({ model: c.textModel });
     providers.set(key, p);
   }
   return p;
@@ -131,8 +111,7 @@ export interface GenerateJsonOptions<T extends z.ZodType> {
 }
 
 /**
- * Asks for an answer in the zod schema (Anthropic: a forced `emit_<schemaName>` tool; Ollama: a JSON-schema
- * "format" turn), running read-only tools in between. Returns the parsed object, or a parse failure (the caller
+ * Asks for an answer in the zod schema (a forced `emit_<schemaName>` tool), running read-only tools in between. Returns the parsed object, or a parse failure (the caller
  * decides what a failure means, e.g. "unclear").
  */
 export async function generateJson<T extends z.ZodType>(o: GenerateJsonOptions<T>): Promise<{ ok: true; value: z.infer<T>; model: string } | { ok: false; error: string; model: string }> {

@@ -80,8 +80,6 @@ describe.skipIf(!run)("verify job end to end", async () => {
     process.env.UPLOAD_DIR = uploads;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.GITHUB_TOKEN;
-    // The model is off: the anthropic provider without a key is "not configured" (a reachable Ollama would judge).
-    process.env.MODEL_PROVIDER = "anthropic";
     process.env.REVIEW_WINDOW_SECONDS = "60";
     repo = await mkdtemp(join(tmpdir(), "milestone-e2e-repo-"));
     // The client's repository: a function and the client's test for it.

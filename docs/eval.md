@@ -17,7 +17,7 @@ pnpm --filter @milestone/verify test
 Model set (opt-in, with the real model):
 
 ```sh
-ollama serve            # with MILESTONE_MODEL (default qwen3:14b) pulled
+export ANTHROPIC_API_KEY=...   # MILESTONE_MODEL picks the Claude model (default claude-sonnet-5-5)
 MILESTONE_MODEL_EVAL=1 pnpm --filter @milestone/verify exec vitest run test/model-eval.test.ts --silent=false
 ```
 
@@ -118,6 +118,8 @@ These are not fixed here, because `model-eval.test.ts` is outside this change:
 - The stub reader returns no file bytes. For upload cases the model sees only the evidence summaries.
 
 ## Model run, Oct 16
+
+This run used the local-model backend (Ollama, qwen3:14b) that Milestone shipped with until Nov 4, when it moved to Claude only. The labels and harness are unchanged; a Claude run replaces this section once it is recorded.
 
 Run on 2026-10-16 with provider ollama, model `qwen3:14b` (temperature 0, num_ctx 16384, think off), `test/model-eval.test.ts` over all 50 cases with the stub evidence reader, plus `test/demo-judge.model.test.ts` on the demo repo's m1-pass delivery. The vision model (qwen2.5vl:7b) is installed but not exercised: the stub reader returns no file bytes. Every row (per-criterion status, confidence, cited evidence, rule ids, timing) is in `fixtures/eval/model-run-2026-10-16.json`, written by the test through `MILESTONE_MODEL_EVAL_OUT`.
 

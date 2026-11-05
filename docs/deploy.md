@@ -6,7 +6,7 @@ The repository holds a Render Blueprint (`render.yaml`). It describes one web se
 
 ## What the hosted demo is
 
-- **Demo mode** (`DEMO_MODE=1`). Every page shows a thin band: "Demo: PayPal sandbox or simulated, test identities; reset any time". The band also says which judgment is live: "Judgment by Claude" when `ANTHROPIC_API_KEY` is set, "Judgment goes to the client: no model on this host" otherwise. Render has no Ollama, so "Judgment by the local model" never appears there. The band's **Reset demo** button posts to `/api/demo/reset`, which puts the showcase back (the seed with `--reset --showcase`; files on the disk are kept). A reset runs at most once every 30 seconds, and the route answers 404 when `DEMO_MODE` is not `1`.
+- **Demo mode** (`DEMO_MODE=1`). Every page shows a thin band: "Demo: PayPal sandbox or simulated, test identities; reset any time". The band also says which judgment is live: "Judgment by Claude" when `ANTHROPIC_API_KEY` is set, "Judgment goes to the client: no model on this host" otherwise. The band's **Reset demo** button posts to `/api/demo/reset`, which puts the showcase back (the seed with `--reset --showcase`; files on the disk are kept). A reset runs at most once every 30 seconds, and the route answers 404 when `DEMO_MODE` is not `1`.
 - **PayPal simulated by default** (`PAYPAL_MODE=simulated`). A built-in simulator answers the same REST calls as the PayPal sandbox and posts its own signed webhooks to the service, so the demo needs no PayPal account. You can switch to the real sandbox (see below).
 - **Identities** come from a role switcher (client, freelancer, partner), not a sign-in.
 - **Deliveries come from public https repositories only.** The web app refuses local paths in production (`MILESTONE_ALLOW_LOCAL_REPOS` is unset). The start script also gives both processes a `git` restricted to https, so no other route can make the worker fetch a `file://`, local-path, ssh or `git://` repository.
@@ -82,14 +82,8 @@ Every variable the code reads is either set in `render.yaml` or listed here. `sc
 | Variable | On Render | What it does |
 |---|---|---|
 | `APP_URL` | Set automatically | The public base URL, used for PayPal return links, the simulator's webhooks and agent links. The start script sets it from `RENDER_EXTERNAL_URL`; set it yourself only for a custom domain. |
-| `MODEL_PROVIDER` | Leave unset | `ollama` or `anthropic`. Unset, Claude is used when `ANTHROPIC_API_KEY` is set. Render has no Ollama. |
-| `MILESTONE_MODEL` | Optional | The model id (default `claude-sonnet-5-5` under Anthropic). The seed also writes it on showcase verdicts. |
-| `MILESTONE_VISION_MODEL` | Leave unset | The Ollama vision model. Not used on Render. |
+| `MILESTONE_MODEL` | Optional | The Claude model id (default `claude-sonnet-5-5`). The seed also writes it on showcase verdicts. |
 | `ANTHROPIC_BASE_URL` | Leave unset | Overrides the Anthropic API URL (a proxy). |
-| `OLLAMA_HOST` | Leave unset | The Ollama server. There is none on Render. |
-| `OLLAMA_NUM_CTX` | Leave unset | The Ollama context size. |
-| `OLLAMA_KEEP_ALIVE` | Leave unset | How long Ollama keeps the model loaded. |
-| `MILESTONE_OLLAMA_TIMEOUT_MS` | Leave unset | The Ollama request timeout. |
 | `MILESTONE_ALLOW_LOCAL_REPOS` | Leave unset | `1` lets deliveries name local paths and `file://` URLs, and lifts the https-only `git`. Never on a public host. |
 | `MILESTONE_MCP_URL` | Optional | Where the agent console finds the MCP server. Defaults to `APP_URL`. |
 | `MILESTONE_PARTNER_ID` | Optional | The partner user new advances are booked to. Defaults to the first partner user. |

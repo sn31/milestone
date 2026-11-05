@@ -79,7 +79,7 @@ describe("citableEvidence", () => {
 function scripted(answer: (seen: Message[]) => VerdictOutput): { provider: Provider; requests: GenerateRequest[] } {
   const requests: GenerateRequest[] = [];
   const provider: Provider = {
-    name: "ollama",
+    name: "fake",
     model: "scripted",
     async generate(req): Promise<GenerateResponse> {
       requests.push(structuredClone(req));

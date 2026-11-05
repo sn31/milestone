@@ -90,7 +90,7 @@ function cacheExplanation(key: string, text: string): void {
 const EXPLAIN_TIMEOUT_MS = 8_000;
 
 /**
- * The explanation shown with an offer: the model's two sentences when a model is configured (Ollama or Anthropic),
+ * The explanation shown with an offer: the model's two sentences when a model is configured (an Anthropic key),
  * otherwise, or on any failure, a sentence built from the numbers. Model text is cached by a hash of the numbers (LRU
  * of 100 per process); the rules sentence is cheap and never cached, so a model failure is retried on the next load.
  * explain() takes no AbortSignal, so the 8 s bound is a race: a slow model call is abandoned here (not cancelled)

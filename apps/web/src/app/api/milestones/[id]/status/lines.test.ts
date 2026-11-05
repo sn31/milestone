@@ -56,7 +56,7 @@ describe("verifierLines", () => {
   });
 
   it("prints a model's judgment with its confidence", () => {
-    const lines = verifierLines({ ...base, delivery: { ...base.delivery!, verifiedAt: "2026-10-08T14:00:03.000Z", result: "pass", model: "qwen3:14b", judged: [{ criterionId: "crt_j", status: "pass", confidence: 0.86 }] } }, crit);
+    const lines = verifierLines({ ...base, delivery: { ...base.delivery!, verifiedAt: "2026-10-08T14:00:03.000Z", result: "pass", model: "claude-sonnet-5-5", judged: [{ criterionId: "crt_j", status: "pass", confidence: 0.86 }] } }, crit);
     expect(lines.at(-1)).toMatchObject({ text: "pass    judgment Matches the brief · 86% confident", status: "pass" });
   });
 

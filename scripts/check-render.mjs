@@ -4,7 +4,7 @@
 //   1. only fields, types, runtimes and plans the spec lists; envVars in one of the spec's forms; no sync:false inside
 //      an environment group (the spec forbids it); fromDatabase names a database in this file;
 //   2. the hosted-demo settings: DEMO_MODE=1, PAYPAL_MODE, a generated SIMULATED_WEBHOOK_SECRET, the pre-deploy
-//      migrate + seed, no MODEL_PROVIDER and no MILESTONE_ALLOW_LOCAL_REPOS, no Key Value store;
+//      migrate + seed, no MILESTONE_ALLOW_LOCAL_REPOS, no Key Value store;
 //   3. every environment variable read in apps/*/src and packages/*/src (tests excluded) is set in the blueprint,
 //      provided by the platform, or listed in the "Optional environment variables" table of docs/deploy.md.
 // No dependencies: a small parser for the YAML subset render.yaml uses (block maps and lists, scalars, comments).
@@ -225,7 +225,7 @@ else {
   for (const secret of ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID", "GITHUB_WEBHOOK_SECRET", "GITHUB_TOKEN", "PAYPAL_PARTNER_CLIENT_SECRET"]) {
     if (webEnv.get(secret) && webEnv.get(secret).sync !== false) fail(`web service env ${secret}: a secret is sync: false, never a value`);
   }
-  for (const banned of ["MODEL_PROVIDER", "MILESTONE_ALLOW_LOCAL_REPOS", "OLLAMA_HOST"]) if (webEnv.has(banned)) fail(`web service env ${banned}: leave unset on Render (no Ollama; hosted deliveries are https only)`);
+  for (const banned of ["MILESTONE_ALLOW_LOCAL_REPOS"]) if (webEnv.has(banned)) fail(`web service env ${banned}: leave unset on Render (hosted deliveries are https only)`);
 }
 
 // ---------- Every env var the code reads ----------

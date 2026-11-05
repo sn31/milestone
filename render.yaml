@@ -55,7 +55,7 @@ services:
       - key: MILESTONE_NPM_CACHE
         value: /var/data/npm-cache
       # APP_URL is left unset on purpose: scripts/start-render.mjs sets it from RENDER_EXTERNAL_URL (the service URL).
-      # MODEL_PROVIDER is left unset: there is no Ollama on Render. With ANTHROPIC_API_KEY set, judgment is by Claude;
+      # With ANTHROPIC_API_KEY set, judgment is by Claude;
       # without it, judgment criteria go to the client (the banner says which).
       # MILESTONE_ALLOW_LOCAL_REPOS is left unset: hosted deliveries are public https repositories only.
       - key: ANTHROPIC_API_KEY

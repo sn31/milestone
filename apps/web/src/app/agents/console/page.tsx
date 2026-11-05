@@ -3,7 +3,7 @@ import { AgentConsole } from "@/components/agent-console";
 import { Button, PageHeader } from "@/components/ui";
 import { getDb } from "@/lib/db";
 import { loadMandates } from "@/lib/agent/data";
-import { currentModel, isModelConfigured, providerName } from "@/lib/agent/model";
+import { currentModel, isModelConfigured } from "@/lib/agent/model";
 import { ACTOR_NAMES, getActor } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -36,7 +36,7 @@ export default async function AgentConsolePage({ searchParams }: PageProps<"/age
           initialMandateId={initial}
           now={new Date().getTime()}
           modelReady={modelReady}
-          modelLabel={modelReady ? `${providerName()} · ${currentModel()}` : "no model reachable"}
+          modelLabel={modelReady ? `Claude · ${currentModel()}` : "no model reachable"}
           clientName={ACTOR_NAMES[actor.userId] ?? actor.userId}
         />
       </div>

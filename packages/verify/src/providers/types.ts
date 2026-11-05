@@ -61,7 +61,7 @@ export type GenerateResponse =
   | { type: "stop"; reason: string; model: string };
 
 export interface Provider {
-  name: "anthropic" | "ollama";
+  name: string;
   /** The model a text-only request would use; reported when no turn ran. */
   model: string;
   generate(req: GenerateRequest): Promise<GenerateResponse>;

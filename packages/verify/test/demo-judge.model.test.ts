@@ -12,7 +12,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CriterionSpec } from "@milestone/core";
 import { run, runDeterministicStage, type DeterministicOutput } from "../src/deterministic.ts";
-import { currentModel, isModelConfigured, providerName } from "../src/llm.ts";
+import { currentModel, isModelConfigured } from "../src/llm.ts";
 import { judge, type EvidenceReader } from "../src/verifier.ts";
 
 const ENABLED = process.env.MILESTONE_MODEL_EVAL === "1";
@@ -66,8 +66,7 @@ describe.runIf(ENABLED)("demo m1-pass judgment (real model)", () => {
   });
 
   it(`passes the judgment criterion with cited evidence in at least 80% of ${RUNS} runs`, async () => {
-    if (!process.env.MODEL_PROVIDER) process.env.MODEL_PROVIDER = "ollama";
-    expect(await isModelConfigured(), `${providerName()} model ${currentModel()} is not reachable`).toBe(true);
+    expect(await isModelConfigured(), `ANTHROPIC_API_KEY is not set (model ${currentModel()})`).toBe(true);
     expect(stage.evidence.map((e) => e.id)).toEqual(expect.arrayContaining(["evd_tamper_check", "evd_diff", "evd_tree", "evd_commit", "evd_crt_1_tests", "evd_crt_1_file"]));
 
     const commitMessage = (await run(["git", "log", "-1", "--format=%B", sha], stage.workdir, { PATH: process.env.PATH ?? "" }, 30_000)).output;
@@ -94,7 +93,7 @@ describe.runIf(ENABLED)("demo m1-pass judgment (real model)", () => {
       rows.push({ ok, line });
     }
     const passes = rows.filter((r) => r.ok).length;
-    console.log(`\ndemo m1-pass judgment: ${passes}/${RUNS} pass with cited evidence (provider ${providerName()}, model ${currentModel()})`);
+    console.log(`\ndemo m1-pass judgment: ${passes}/${RUNS} pass with cited evidence (model ${currentModel()})`);
     expect(passes / RUNS).toBeGreaterThanOrEqual(0.8);
   }, 60 * 60 * 1000);
 });

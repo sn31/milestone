@@ -147,8 +147,8 @@ describe("compileEvidencePack", () => {
 describe("templated draft", () => {
   it("writes two paragraphs from the pack, citing only ids the pack has, within PayPal's limit", async () => {
     const pack = compileEvidencePack(fixture());
-    // Anthropic with no key: never configured, so the template is used whether or not Ollama is running.
-    const draft = await draftResponse(pack, { env: { MODEL_PROVIDER: "anthropic" } });
+    // No Anthropic key: never configured, so the template is used.
+    const draft = await draftResponse(pack, { env: {} });
     expect(draft.source).toBe("template");
     expect(draft).toEqual(templateResponse(pack));
     expect(draft.paragraphs).toHaveLength(2);

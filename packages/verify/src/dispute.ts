@@ -6,8 +6,7 @@
  * clock says. Every item carries a citation id (T timeline, C criterion, D decision, L ledger, F file) that the draft
  * cites in square brackets, so a reader can check each sentence against the record.
  *
- * draftResponse writes two paragraphs. When isModelConfigured() says a model can be called (Ollama reachable with the
- * model pulled, or an Anthropic key), the model writes them through generateJson, with the pack wrapped as untrusted
+ * draftResponse writes two paragraphs. When isModelConfigured() says a model can be called (an Anthropic key is set), the model writes them through generateJson, with the pack wrapped as untrusted
  * data (it holds PR titles, file names and verifier rationale); a draft that cites ids the pack does not have, or runs
  * past PayPal's 2000-character limit, is discarded for the template. Without a model the template writes them. The
  * model never decides anything here: the freelancer edits and sends the text.

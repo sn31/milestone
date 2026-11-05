@@ -6,15 +6,10 @@
  * reads it back instead of paying for it again.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { DEFAULT_ANTHROPIC_MODEL, textModelFor } from "./config.ts";
+import { anthropicModel, DEFAULT_ANTHROPIC_MODEL } from "./config.ts";
 import type { Block, GenerateRequest, GenerateResponse, Message, Provider } from "./types.ts";
 
-export { DEFAULT_ANTHROPIC_MODEL };
-
-/** MILESTONE_MODEL when it names a Claude model, else the default (see textModelFor in config.ts). */
-export function anthropicModel(env: NodeJS.ProcessEnv = process.env): string {
-  return textModelFor("anthropic", env);
-}
+export { anthropicModel, DEFAULT_ANTHROPIC_MODEL };
 
 const EPHEMERAL = { type: "ephemeral" } as const;
 

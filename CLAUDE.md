@@ -35,5 +35,5 @@ Partial = payout of the released share + `POST /v2/payments/captures/{id}/refund
 ## Conventions
 - TypeScript strict, ESM, no build step for packages (consumers import `src/index.ts`; Next.js uses `transpilePackages`).
 - Tests: vitest; property tests with fast-check for policy and ledger invariants.
-- Model calls go through `packages/verify/src/llm.ts` only, which picks a provider in `src/providers/`: a local Ollama model by default (`MILESTONE_MODEL`, default `qwen3:14b`; `MILESTONE_VISION_MODEL` for requests with images), Claude when `MODEL_PROVIDER=anthropic` or `ANTHROPIC_API_KEY` is set and `MODEL_PROVIDER` is not `ollama`. Ask `isModelConfigured()` whether a model is available, never the key.
+- Model calls go through `packages/verify/src/llm.ts` only: Claude through the Anthropic SDK (`src/providers/anthropic.ts`), `MILESTONE_MODEL` (default `claude-sonnet-5-5`), available when `ANTHROPIC_API_KEY` is set. There is no local-model backend. Ask `isModelConfigured()` whether a model is available, never the key.
 - Jobs: `enqueue(name, milestoneId, data, { dedupe, delaySeconds })` from `@milestone/core`; the dedupe key makes a repeat a no-op.

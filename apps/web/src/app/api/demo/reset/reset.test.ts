@@ -36,8 +36,8 @@ describe("demo reset", () => {
   });
 
   it("names the model mode from the environment", async () => {
-    expect(await modelMode(env({ MODEL_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "k" }))).toBe("claude");
-    expect(await modelMode(env({ MODEL_PROVIDER: "anthropic" }))).toBe("none");
+    expect(await modelMode(env({ ANTHROPIC_API_KEY: "k" }))).toBe("claude");
+    expect(await modelMode(env({}))).toBe("none");
   });
 
   it("answers 404 without DEMO_MODE=1, then resets once and refuses a second reset within 30 s", async () => {
