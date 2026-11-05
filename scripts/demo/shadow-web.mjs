@@ -22,10 +22,10 @@ export function makeShadowWeb(root, dir = join(root, "var", "demo-web")) {
   transpilePackages: ["@milestone/core", "@milestone/money", "@milestone/verify"],
   serverExternalPackages: ["pg", "pg-boss"],
   agentRules: false,
-  // Next 16.4 defaults agentUpgrade to "security": under a coding agent, with an advisory against the installed
-  // version, \`next dev\` exits 1 right after "Ready" and only a retry within 5 minutes (a receipt in .next/cache)
-  // continues. The shadow's .next is new every run, so the recorder's server would die on each one.
-  // The upgrade itself is the app's decision (apps/web), not the recorder's.
+  // Recorder workaround only. Next 16.4 defaults agentUpgrade to "security": when a coding agent starts \`next dev\`
+  // and an advisory applies to the installed version, it exits 1 right after "Ready" and only a retry within
+  // 5 minutes (a receipt in .next/cache) continues. The shadow's .next is fresh every run, so the recorder's server
+  // would die on each one. apps/web keeps the default; an advisory is fixed by upgrading Next there.
   experimental: { agentUpgrade: false },
   turbopack: {
     rules: { "*.css": { loaders: ["@tailwindcss/turbopack"], as: "*.css" } },
