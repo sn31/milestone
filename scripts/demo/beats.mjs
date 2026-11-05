@@ -75,6 +75,8 @@ const verified = (ctx, id) => Number(ctx.db(`select count(*) from deliveries whe
 /** Waits for the next verdict on `id` (one more verified delivery than `before`) and a settled status. */
 async function waitVerdict(ctx, id, before, timeout = 180_000) {
   await waitDb(ctx, `select count(*) from deliveries where milestone_id='${id}' and verified_at is not null`, (n) => Number(n) > before, { timeout, what: `verdict on ${id}` });
+  // For timing the takes: who judged, how long the verification took, and each criterion's status with its evidence count.
+  ctx.note(`verified ${id}: ${ctx.db(`select coalesce(d.model, '?') || ' in ' || round(extract(epoch from d.verified_at - d.created_at)::numeric, 1) || 's, ' || d.result || ': ' || coalesce((select string_agg((c->>'criterion_id') || '=' || (c->>'status') || '[' || jsonb_array_length(c->'evidence_ids') || ' ev]', ' ') from jsonb_array_elements(d.verdict->'criteria') c), '') from deliveries d where d.milestone_id='${id}' and d.verified_at is not null order by d.created_at desc limit 1`)}`);
   return waitStatus(ctx, id, DONE_STATES, 30_000);
 }
 

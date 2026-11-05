@@ -594,7 +594,7 @@ paths:
       description: |
         Either party. Body: { milestoneId, operations: [{ op: add | remove | update | reorder, ... }] }. Validated with
         the compiler's rules and audited before and after; an edit after one party approved clears both approvals. With
-        DEMO_MODE=1, test and build commands are limited to npm test, npm run <script> and node <relative .js/.mjs>.
+        DEMO_MODE=1, test and build commands are limited to npm test and npm run <script>, with no options or shell characters.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: ctr_demo }
       requestBody:

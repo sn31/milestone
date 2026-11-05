@@ -214,11 +214,14 @@ try {
     log(`beat ${beat.id}: ${beat.title}`);
     const t = Date.now();
     try {
+      // A dead server shows up as a selector timeout otherwise; name the cause.
+      for (const p of [web, worker]) if (p.exited) throw new Error(`${p.name} exited; see ${p.logFile}`);
       await beat.run(ctx);
       await sleep(holdMs); // the pause on each beat
       rec.ok = true;
     } catch (e) {
-      rec.error = e.message;
+      const dead = [web, worker].filter((p) => p.exited).map((p) => `${p.name} exited, see ${p.logFile}`);
+      rec.error = dead.length && !e.message.includes(" exited; see ") ? `${e.message} (${dead.join("; ")})` : e.message;
       log(`  FAILED: ${e.message}`);
     }
     rec.wallMs = Date.now() - t;
@@ -255,7 +258,8 @@ const meta = {
   appUrl,
   database: opt.db,
   reviewWindowSeconds: reviewSeconds,
-  model: process.env.ANTHROPIC_API_KEY ? process.env.MILESTONE_MODEL ?? dotenv.MILESTONE_MODEL ?? "default" : null,
+  // The worker gets .env merged in, so a key in .env counts (MILESTONE_MODEL unset: the provider's default).
+  model: env.ANTHROPIC_API_KEY?.trim() ? env.MILESTONE_MODEL?.trim() || "default" : null,
   ok: !failure,
   failure,
   video: videos
