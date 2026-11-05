@@ -79,7 +79,7 @@ describe("run: output cap, process tree and pipes", () => {
     expect(r.timedOut).toBe(true);
     expect(r.code).toBeNull();
     expect(pid).toBeGreaterThan(0);
-    expect(gone(pid)).toBe(true);
+    await expect.poll(() => gone(pid), { timeout: 2000, interval: 20 }).toBe(true);
   });
 
   it("returns when the command exits even though a grandchild holds the pipes, and the grandchild dies with it", async () => {
@@ -87,7 +87,8 @@ describe("run: output cap, process tree and pipes", () => {
     const pid = pidOf(r.output);
     strays.push(pid);
     expect(r).toMatchObject({ code: 0, timedOut: false });
-    expect(gone(pid)).toBe(true);
+    // The group kill races process reaping under load: poll instead of a single instant check.
+    await expect.poll(() => gone(pid), { timeout: 2000, interval: 20 }).toBe(true);
   });
 
   it("returns after the grace period when a process outside the group still holds the pipes", async () => {
