@@ -21,9 +21,21 @@ pnpm dev                      # web on http://localhost:3000, worker in the same
 Notes:
 - `PAYPAL_MODE=simulated` is the default no-credentials path: a local simulator stands in for PayPal, shares its state between web and worker in `var/simulated-paypal.json` (delete it to reset) and posts its own webhooks. For the real sandbox set `PAYPAL_MODE=sandbox` with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and the partner app's credentials; see `docs/runbook.md`.
 - A model is optional. It judges judgment criteria, compiles a scope into a contract, phrases advance explanations and drives the agent console: set `ANTHROPIC_API_KEY` for Claude. Without a key the contract form builds a fixed three-milestone demo contract titled from the scope's first sentence, and a delivery that passes every checkable criterion goes to "needs client" instead of the review window, because the judgment criteria stay unclear.
-- Set `PAYPAL_FREELANCER_EMAIL` and `PAYPAL_PARTNER_EMAIL` before `pnpm db:seed`; advances need both receivers.
+- In simulated mode the seed gives the freelancer and partner test payout receivers, so releases and advances work with no setup. For the real sandbox, set `PAYPAL_FREELANCER_EMAIL` and `PAYPAL_PARTNER_EMAIL` (sandbox accounts) before `pnpm db:seed`.
 - Build the demo repository with `scripts/make-demo-repo.sh <dir>`. Its branches are `m1-pass` (all tests pass), `m2-partial` (the annual-discount test fails and an existing test file was edited, so the milestone is held) and `m2-injection` (same code, commit message tries to instruct the reviewer; flagged). Deliver a branch from the milestone's Deliver form (repository path and branch) or by merging a pull request with the GitHub webhook set up.
 - Check everything with `pnpm typecheck`, `pnpm test` and `pnpm check:boundaries`. Postgres-backed end-to-end suites are opt-in with `MILESTONE_E2E=1 pnpm test`.
+
+## Ten-minute tour
+
+The fastest way to see what Milestone is. Set `REVIEW_WINDOW_SECONDS=120` in `.env` first so review windows run at demo pace.
+
+1. `scripts/make-demo-repo.sh /tmp/milestone-demo` builds the demo repository and its three delivery branches.
+2. As **client** (role switcher, top right), open the signup-flow contract and fund milestone 1. In simulated mode the PayPal checkout is one click.
+3. As **freelancer**, deliver milestone 1: repository `/tmp/milestone-demo`, branch `m1-pass`. Watch the verifying log: the client's own test suite is restored over the delivery and grades it, then (with `ANTHROPIC_API_KEY` set) Claude judges the rest and must cite evidence. Open the receipt: every verdict cites its evidence, and the release stamp names the policy rule, not the model.
+4. As client, approve inside the review window. The milestone is released only when PayPal's (simulated) webhook confirms the payout; the contract ledger shows every entry summing to zero.
+5. Fund milestone 2, then deliver `m2-partial`: an edited test file is restored, the client's discount test fails, the money stays held. Deliver `m2-injection`: the commit message that tries to instruct the reviewer is struck through as untrusted evidence, flagged, and sent to the client.
+6. `/agents` as client: save a PayPal once, create a mandate with caps, and connect an MCP client or the built-in console ([Agent quick start](#agent-quick-start) below). Every agent call, refused ones included, lands in the audit log.
+7. `pnpm db:seed -- --reset --showcase` re-seeds with every milestone state at once: advances and the lender's book at `/lender`, an operator case at `/ops`, and a ready-made mandate whose token it prints.
 
 ## Demo roles
 
@@ -39,7 +51,7 @@ Seed data: three active contracts. "Signup flow for a SaaS landing page" (`ctr_d
 
 1. Run the app, pick the client (Casey) in the role switcher and open `/agents`. Save a PayPal once (the saved-PayPal card; in simulated mode the approval is one click). Then create a mandate: the actions the agent may take (for example read, fund, approve, hold), an approval cap, fund caps (per milestone and in total) and an expiry; tick auto-fund to have the next milestone funded after each release. Copy the `msa_...` token; it is shown once. (`pnpm db:seed -- --reset --showcase` also creates one for Casey and prints its token.)
 2. Connect an MCP client with that token, as described in [docs/mcp.md](docs/mcp.md). For Claude Desktop, add `scripts/milestone-mcp.mjs` as a stdio server with `MILESTONE_URL` and `MILESTONE_AGENT_TOKEN`; for Cursor, point it at `http://localhost:3000/api/mcp` with an `Authorization: Bearer msa_...` header.
-3. Or use the built-in console at `/agents/console` (needs a model): pick the mandate, paste its token, and talk to your agent. It uses the same MCP server, plus PayPal's MCP server read-only.
+3. Or use the built-in console at `/agents/console` (needs `ANTHROPIC_API_KEY`): pick the mandate, paste its token, and talk to your agent. It uses the same MCP server, plus PayPal's MCP server read-only.
 
 An agent funds only the next draft milestone of an approved contract, for exactly its amount and currency, within the mandate's fund caps, from a saved PayPal that belongs to its user; the funding guarantee is in [docs/mcp.md](docs/mcp.md). An agent's approve is accepted only when the policy already decided release for the latest delivery, every required criterion passed and the amount is within the mandate's cap. No agent tool pays out or refunds. Every call, accepted or refused, is in the audit log as `agent:<name> for <user>`, and `/agents` shows it. Revoking the mandate stops the agent on its next call.
 
