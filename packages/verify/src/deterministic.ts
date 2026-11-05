@@ -82,9 +82,11 @@ export interface DeterministicInput {
    */
   onEvidence?: (item: EvidenceSummary) => void | Promise<void>;
   /**
-   * Test and build commands must be on the demo allowlist (isAllowedDemoCommand) and run without a shell; one that is
-   * not is never run and its criterion is recorded unclear. Default: DEMO_MODE=1 (commandsRestricted). Defense in depth
-   * behind the criteria editor, which refuses such commands at edit time.
+   * Test and build commands must be on the demo allowlist (isAllowedDemoCommand); one that is not is never run and
+   * its criterion is recorded unclear. Default: DEMO_MODE=1 (commandsRestricted). Defense in depth behind the criteria
+   * editor, which refuses such commands at edit time. The worker invokes an allowed command without a shell, but npm
+   * still runs the named script's body through one — the graded run is safe because the overlay restores the
+   * baseline's scripts first, and the informational delivered-tests rerun is skipped on the restricted host.
    */
   restrictCommands?: boolean;
 }
@@ -1307,7 +1309,9 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
     }
 
     // The delivery's own tests, as delivered: shown to the client, never decide (no status, no criterion).
-    if (overlay && touched(overlay)) {
+    // Skipped on the restricted host: this run puts the delivery's own package.json back, so npm would hand its
+    // script bodies to a shell — the allowlist only vets the command itself, not what the delivery's scripts say.
+    if (overlay && touched(overlay) && !restricted) {
       const tests = input.criteria.filter((c) => c.kind === "test");
       try {
         await showDelivery(workdir, head, env, overlay);

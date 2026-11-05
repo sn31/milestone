@@ -57,13 +57,14 @@ export function commandsRestricted(env: Record<string, string | undefined> = pro
 
 /** A script name for `npm run`: letters, digits, ":", "_" and "-", not starting with "-". */
 const SCRIPT_NAME = /^[A-Za-z0-9:_][A-Za-z0-9:_-]*$/;
-/** A relative .js/.mjs path for `node`: segments of letters, digits, ".", "_" and "-", none starting with "." or "-". */
-const NODE_SCRIPT = /^(?:\.\/)?(?:[A-Za-z0-9_][A-Za-z0-9._-]*\/)*[A-Za-z0-9_][A-Za-z0-9._-]*\.m?js$/;
 
 /**
- * Whether a test or build command is on the hosted demo's allowlist: exactly `npm test`, `npm run build`,
- * `npm run <script>` or `node <relative .js/.mjs path>`, single-spaced, with no shell metacharacters, options, absolute
- * or parent paths. An allowed command is its own argv split on single spaces, so the worker runs it without a shell.
+ * Whether a test or build command is on the hosted demo's allowlist: exactly `npm test`, `npm run build` or
+ * `npm run <script>`, single-spaced, with no shell metacharacters or options. An allowed command is its own argv
+ * split on single spaces, so the worker invokes it without a shell. `node <file>` is deliberately NOT allowed: it
+ * names a delivered file directly, so the baseline overlay (which replaces `scripts` in package.json) has nothing to
+ * substitute, and a delivered `process.exit(0)` would earn a trusted pass that never ran the client's suite. npm
+ * commands are grounded in the baseline's own `scripts`, which the overlay restores before the graded run.
  */
 export function isAllowedDemoCommand(command: string): boolean {
   const parts = command.split(" ");
@@ -72,7 +73,6 @@ export function isAllowedDemoCommand(command: string): boolean {
   if (rest.length) return false;
   if (bin === "npm" && a === "test" && b === undefined) return true;
   if (bin === "npm" && a === "run" && b !== undefined) return SCRIPT_NAME.test(b);
-  if (bin === "node" && a !== undefined && b === undefined) return NODE_SCRIPT.test(a);
   return false;
 }
 
@@ -89,7 +89,7 @@ export function specErrors(kind: string, spec: Record<string, unknown>, opts: { 
       if (/[\r\n]/.test(String(spec.command))) return ["The command must fit on one line."];
       if (command.length > SPEC_TEXT_MAX) return [`The command is longer than ${SPEC_TEXT_MAX} characters.`];
       if ((opts.restrictCommands ?? commandsRestricted()) && !isAllowedDemoCommand(command)) {
-        return ["On this demo a check can only run npm test, npm run <script> or node <file>.js, with no options or shell characters."];
+        return ["On this demo a check can only run npm test or npm run <script>, with no options or shell characters."];
       }
       return [];
     }

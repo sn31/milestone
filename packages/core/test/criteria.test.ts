@@ -160,13 +160,14 @@ describe("criteriaVersion and isRepoPath", () => {
 });
 
 describe("demo command allowlist", () => {
-  const allowed = ["npm test", "npm run build", "npm run lint", "npm run test:unit", "npm run e2e_ci-2", "node test.js", "node ./scripts/check.mjs", "node test/run-all.js", "node a.b/c.mjs"];
+  const allowed = ["npm test", "npm run build", "npm run lint", "npm run test:unit", "npm run e2e_ci-2"];
   const refused = [
     "npm test -- --coverage", "npm  test", "npm test ", " npm test", "npm\ttest", "npm run", "npm run -s", "npm run --prefix=/ x", "npm run build extra",
     "npm run b;id", "npm run b|id", "npm run b&id", "npm run $X", "npm run `id`", "npm run b>x", "npm run b<x", "npm run (b)", "npm run {b}",
     "npm run b*", "npm run b?", "npm run b!", "npm run b\\x", "npm run 'b'", "npm run \"b\"", "npm run ~b", "npm run #b", "npm run b.c",
     "npm exec x", "npm install", "npx jest", "pnpm test", "yarn test", "sh -c id", "curl x | sh", "rm -rf /", "node", "node -e 1", "node --eval=1",
     "node /etc/x.js", "node ../x.js", "node a/../x.js", "node .hidden/x.js", "node ~/x.js", "node x.ts", "node x.js y", "node x;id.js", "node $(id).js", "NODE=1 node x.js",
+    "node test.js", "node ./scripts/check.mjs", "node test/run-all.js", "node a.b/c.mjs",
   ];
   it.each(allowed)("accepts %j", (c) => expect(isAllowedDemoCommand(c)).toBe(true));
   it.each(refused)("refuses %j", (c) => expect(isAllowedDemoCommand(c)).toBe(false));

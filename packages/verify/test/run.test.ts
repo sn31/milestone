@@ -105,7 +105,7 @@ describe("criterionArgv: what a test or build command runs as", () => {
   it("with restrictions runs allowlisted commands without a shell and refuses the rest", () => {
     expect(criterionArgv("npm test", true)).toEqual(["npm", "test"]);
     expect(criterionArgv(" npm run lint ", true)).toEqual(["npm", "run", "lint"]);
-    expect(criterionArgv("node scripts/check.mjs", true)).toEqual(["node", "scripts/check.mjs"]);
+    expect(criterionArgv("node scripts/check.mjs", true)).toBeNull(); // node <file> names a delivered file: off the allowlist
     for (const c of ["npm test; id", "sh -c id", "npm run b && id", "node -e 1", "npm test -- --x"]) expect(criterionArgv(c, true)).toBeNull();
   });
 });
