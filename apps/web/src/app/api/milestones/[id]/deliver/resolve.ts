@@ -72,19 +72,42 @@ export function pickSha(lsRemote: string, ref: string): string | null {
   return null;
 }
 
+/** Names only the repository's owner can point: the default branch, branches and tags (not refs/pull/*, refs/changes/*...). */
+const TIP_NAME = /^(?:HEAD|refs\/heads\/.+|refs\/tags\/.+)$/;
+
+/**
+ * pickSha restricted to branch and tag tips, for DEMO_MODE. Anyone can open a pull request against a public GitHub
+ * repository, and its head is then served by that repository (refs/pull/N/head, and fork-network commits by id), so
+ * the demo lock's "this repository only" would otherwise admit a stranger's code. A commit id is accepted only when it
+ * is the tip of a branch or tag (or HEAD).
+ */
+export function pickTipSha(lsRemote: string, ref: string): string | null {
+  const tips = lsRemote
+    .split("\n")
+    .filter((line) => TIP_NAME.test(line.trim().split(/\s+/)[1] ?? ""))
+    .join("\n");
+  if (SHA.test(ref)) return tips.split("\n").some((line) => line.trim().split(/\s+/)[0] === ref) ? ref : null;
+  return pickSha(tips, ref);
+}
+
 const GIT_ENV = { PATH: process.env.PATH ?? "", HOME: tmpdir(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false" };
 
 /**
  * Resolves `ref` in the repository to a 40-hex commit id with `git ls-remote`. A full sha is accepted as given once
  * the repository answers (ls-remote cannot list arbitrary commits; the verifier's fetch fails if it is not there).
+ * With `tipsOnly` (DEMO_MODE) the commit must be the tip of a branch or tag the repository advertises; see pickTipSha.
  */
-export async function resolveRef(repoUrl: string, ref: string): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
+export async function resolveRef(repoUrl: string, ref: string, opts: { tipsOnly?: boolean } = {}): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
   // Only the transports normaliseRepoUrl allows, even through redirects or submodule-style indirection.
   const cmd = ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=always", "ls-remote", "--", repoUrl];
   // ls-remote patterns match whole trailing path components, so an annotated tag's peeled commit needs its own pattern.
   if (!SHA.test(ref)) cmd.push(ref, `${ref}^{}`);
   const r = await run(cmd, tmpdir(), GIT_ENV, 20_000);
   if (r.code !== 0) return { ok: false, error: `git ls-remote failed${r.timedOut ? " (timed out)" : ""}: ${r.output.split("\n").slice(-3).join(" ").trim().slice(0, 300)}` };
+  if (opts.tipsOnly) {
+    const tip = pickTipSha(r.output, ref);
+    return tip ? { ok: true, sha: tip } : { ok: false, error: `ref ${ref} is not a branch, tag or HEAD of the repository (this demo accepts only branch and tag tips)` };
+  }
   if (SHA.test(ref)) return { ok: true, sha: ref };
   const sha = pickSha(r.output, ref);
   if (!sha || !SHA.test(sha)) return { ok: false, error: `ref ${ref} not found in the repository` };

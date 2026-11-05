@@ -19,11 +19,12 @@ vi.mock("@milestone/core", async (orig) => ({
   enqueue: async (...args: unknown[]) => { state.enqueued.push(args); return "job"; },
 }));
 
-import { LOCAL_REPO_REFUSED, checkRepoUrl, commitDeliveryId, localReposAllowed, normaliseRepoUrl, pickSha, resolveRef, validRef } from "./resolve";
+import { LOCAL_REPO_REFUSED, checkRepoUrl, commitDeliveryId, localReposAllowed, normaliseRepoUrl, pickSha, pickTipSha, resolveRef, validRef } from "./resolve";
 
 let repo: string;
 let main: string;
 let feature: string;
+let stranger: string;
 
 beforeAll(async () => {
   repo = await mkdtemp(join(tmpdir(), "milestone-deliver-test-"));
@@ -36,6 +37,12 @@ beforeAll(async () => {
   g("add", "."); g("commit", "-qm", "feature");
   feature = g("rev-parse", "HEAD");
   g("tag", "-a", "v1", "-m", "v1");
+  // A stranger's pull request: served by the repository as refs/pull/1/head, but on no branch or tag.
+  g("checkout", "-q", "--detach", "main");
+  await writeFile(join(repo, "evil.txt"), "x\n");
+  g("add", "."); g("commit", "-qm", "stranger");
+  stranger = g("rev-parse", "HEAD");
+  g("update-ref", "refs/pull/1/head", stranger);
   g("checkout", "-q", "main");
 });
 afterAll(async () => { if (repo) await rm(repo, { recursive: true, force: true }); });
@@ -98,6 +105,35 @@ describe("manual delivery ref resolution", () => {
     expect(await resolveRef(pathToFileURL(repo).href, "HEAD")).toEqual({ ok: true, sha: main });
     expect((await resolveRef(pathToFileURL(repo).href, "missing")).ok).toBe(false);
     expect((await resolveRef(pathToFileURL(join(repo, "nope")).href, "main")).ok).toBe(false);
+  });
+  it("pickTipSha takes only branch, tag and HEAD names, and a commit id only when it is one of their tips", () => {
+    const [a, b, c] = ["a", "b", "c"].map((x) => x.repeat(40)) as [string, string, string];
+    const out = `${a}\tHEAD\n${a}\trefs/heads/main\n${b}\trefs/tags/v1^{}\n${c}\trefs/pull/1/head\n${c}\trefs/pull/1/merge\n`;
+    expect(pickTipSha(out, "main")).toBe(a);
+    expect(pickTipSha(out, "HEAD")).toBe(a);
+    expect(pickTipSha(out, "v1")).toBe(b);
+    expect(pickTipSha(out, a)).toBe(a);
+    expect(pickTipSha(out, b)).toBe(b);
+    expect(pickTipSha(out, "refs/pull/1/head")).toBeNull();
+    expect(pickTipSha(out, "refs/pull/1/merge")).toBeNull();
+    expect(pickTipSha(out, "pull/1/head")).toBeNull();
+    expect(pickTipSha(out, c)).toBeNull();
+    expect(pickSha(out, "refs/pull/1/head")).toBe(c); // without tipsOnly (outside DEMO_MODE) unchanged
+  });
+  it("tipsOnly (DEMO_MODE) refuses a pull request's head and a commit on no branch or tag, by name or by id", async () => {
+    const url = pathToFileURL(repo).href;
+    expect(await resolveRef(url, "main", { tipsOnly: true })).toEqual({ ok: true, sha: main });
+    expect(await resolveRef(url, "v1", { tipsOnly: true })).toEqual({ ok: true, sha: feature });
+    expect(await resolveRef(url, "HEAD", { tipsOnly: true })).toEqual({ ok: true, sha: main });
+    expect(await resolveRef(url, feature, { tipsOnly: true })).toEqual({ ok: true, sha: feature });
+    for (const ref of ["refs/pull/1/head", "pull/1/head", stranger]) {
+      const r = await resolveRef(url, ref, { tipsOnly: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/not a branch, tag or HEAD/);
+    }
+    // Outside DEMO_MODE the old behaviour stands.
+    expect(await resolveRef(url, "refs/pull/1/head")).toEqual({ ok: true, sha: stranger });
+    expect(await resolveRef(url, stranger)).toEqual({ ok: true, sha: stranger });
   });
 });
 

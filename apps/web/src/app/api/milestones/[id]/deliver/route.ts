@@ -1,4 +1,4 @@
-import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, checkDemoRepo, commitDeliveryId, deliveries, enqueue, type CommitPayload } from "@milestone/core";
+import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, checkDemoRepo, commitDeliveryId, demoModeOn, deliveries, enqueue, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
 import { getActor, isContractFreelancer } from "@/lib/session";
@@ -41,7 +41,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const ref = typeof body?.ref === "string" && body.ref.trim() ? body.ref.trim() : "HEAD";
   if (!validRef(ref)) return jsonError("ref must be a branch, tag, HEAD or a 40-character commit id", 400);
 
-  const resolved = await resolveRef(repoUrl, ref);
+  // DEMO_MODE: a branch or tag tip only. A pull request's head (refs/pull/N/head) or a fork's commit id is served by the
+  // demo repository too, but it is a stranger's code.
+  const resolved = await resolveRef(repoUrl, ref, { tipsOnly: demoModeOn() });
   if (!resolved.ok) return jsonError(resolved.error, 422);
   const sha = resolved.sha;
 

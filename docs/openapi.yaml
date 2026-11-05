@@ -341,7 +341,8 @@ paths:
         milestone and commit give the same delivery id, so a repeat returns `duplicate: true`. With DEMO_MODE=1 (the
         hosted demo) only DEMO_REPO_URL is accepted (https, compared after normalising); any other repository, or every
         repository when DEMO_REPO_URL is unset, gets 403 with `reason: demo_repo_only` and a delivery.refused audit row,
-        before ls-remote or a job.
+        before ls-remote or a job. In DEMO_MODE the ref must also resolve to a branch or tag tip (or HEAD) of that
+        repository: a pull request head (refs/pull/N/head) or any other commit id is 422, nothing stored or queued.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
       requestBody:
@@ -367,7 +368,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "422":
-          description: git ls-remote failed or the ref was not found
+          description: git ls-remote failed, the ref was not found, or (DEMO_MODE) it is not a branch or tag tip
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
   /api/milestones/{id}/upload:
     post:
