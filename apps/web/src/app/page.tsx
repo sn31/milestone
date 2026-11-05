@@ -28,7 +28,7 @@ const URGENCY: Record<Role, readonly Urgent[]> = {
 
 /**
  * The row's status for this viewer: the most urgent milestone state with a count, worded for the role ("1 needs you" to
- * the client, "1 to deliver" to the freelancer), or the contract's own status when nothing is waiting (Review 3, item 3).
+ * the client, "1 to deliver" to the freelancer), or the contract's own status when nothing is waiting.
  */
 function rowStatus(contractStatus: string, states: string[], role: Role): { state: string; label?: string } {
   if (contractStatus !== "active") return { state: contractStatus };

@@ -13,7 +13,7 @@ export function Eyebrow({ children, className }: { children: ReactNode; classNam
 
 export interface PageHeaderProps {
   eyebrow?: ReactNode;
-  /** Serif display title. Plain text; the italic <em> accent is kept for the 404 only (DESIGN.md Review 1). */
+  /** Serif display title. Plain text; the italic <em> accent is kept for the 404 only. */
   title: ReactNode;
   description?: ReactNode;
   /** Buttons, right-aligned on desktop, below the title on mobile. */

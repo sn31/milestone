@@ -3,7 +3,7 @@ import type { GlyphKey, ToneKey } from "@/components/ui/states";
 /**
  * Dispute events by name (the patterns below would leave most of them neutral). An open dispute waits on an answer
  * (needs), the drafted pack is a record of that wait, evidence sent waits on PayPal's review, an accepted claim is a
- * refund, and the outcome itself is not in the event name. Review 3, item 14: violet stays with the verifier at work.
+ * refund, and the outcome itself is not in the event name. Violet stays with the verifier at work.
  */
 const DISPUTE_EVENTS: Record<string, { tone: ToneKey; glyph?: GlyphKey }> = {
   "dispute.opened": { tone: "needs" },

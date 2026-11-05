@@ -4,7 +4,7 @@ import { Button } from "@/components/ui";
 
 /**
  * Fills the composer with the placeholder brief, so a first-time visitor can draft the demo contract in one click instead
- * of mistaking the placeholder for text that is already there (Review 3, composer pass).
+ * of mistaking the placeholder for text that is already there.
  */
 export function UseExample({ title, scope }: { title: string; scope: string }) {
   const fill = () => {

@@ -1,7 +1,6 @@
 # Milestone
 
 AI escrow agent for freelance work, built for the PayPal AI Hackathon (deadline Nov 12 2026, 12:00 pm Pacific).
-The plan lives in the Claude Doc "Milestone — Build Plan" (tabs: Build Plan, Implementation). Keep this file and that doc in step.
 
 ## Non-negotiable rules
 1. **Only `packages/money` talks to PayPal, and only `packages/money/src/policy/execute.ts` moves money** (imports `./paypal/money.ts`). `packages/verify` never imports `@milestone/money`. `pnpm check:boundaries` enforces both; CI fails otherwise.
@@ -15,7 +14,7 @@ The plan lives in the Claude Doc "Milestone — Build Plan" (tabs: Build Plan, I
 9. **The client's suite grades the work:** the deterministic stage runs the baseline's tests, runner config, scripts and dev dependencies against the delivered code, removes test files the delivery added, and flags source changes that sniff the test environment (including non-env signals such as `process.argv`, `require.main`, `process.mainModule`, `module.parent` or a stack trace matched against a runner name) or patch assertions. A delivery that adds a new dependency, or re-points an existing one at a non-registry source (`file:`, `link:`, git, URL, tarball or a registry alias), is recorded as unclear on the test criterion because its unreviewed code would run with the client's suite, so the client decides (P3) rather than a pass being trusted. Setup runs with `--ignore-scripts` after removing committed `node_modules`.
 
 ## Known limitation (accepted for the hackathon)
-Delivered code runs on the worker host under the worker's user with network access; only the child environment is cleaned. The demo repo is ours. A real deployment needs a container or microVM per verification. Say so in the submission.
+Delivered code is not sandboxed: it runs on the worker host under the worker's user with network access; only the child environment is cleaned. To keep that safe enough for the hackathon, the hosted demo only accepts deliveries from the demo repository (DEMO_MODE), and criterion test/build commands are allowlisted. A real deployment needs a container or microVM per verification. Say so in the submission.
 
 ## The one money route
 Client pays into Milestone's platform sandbox account (`POST /v2/checkout/orders` + capture). Release = `POST /v1/payments/payouts`.

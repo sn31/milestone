@@ -10,7 +10,7 @@ export interface MoneyProps {
   /** s 14px (inline), m 20px (row totals), l 32px (stats), xl 48px (instrument panel). */
   size?: "s" | "m" | "l" | "xl";
   /** Count the whole units from the old figure to the new one when the amount changes while the page is open. The first
-   *  paint always shows the final amount (Review 3, item 8). */
+   *  paint always shows the final amount. */
   animate?: boolean;
   /** Colours the integer part in a state's colour. */
   tone?: ToneKey;
@@ -30,7 +30,7 @@ export function Money({ minor, currency, size = "s", animate = false, tone, sign
   const whole = Math.trunc(Math.abs(minor) / 10 ** minorDigits(currency));
   const sign = p.sign || (signed && minor > 0 ? "+" : "");
   // Inline amounts (14px, often smaller in grids, sometimes dimmed by a row) keep the symbol and decimals at muted ink so
-  // they stay readable (Review 3, item 17); m and up keep them faint so the eye lands on the whole units.
+  // they stay readable; m and up keep them faint so the eye lands on the whole units.
   const quiet = size === "s" ? "text-fg-muted" : "text-fg-faint";
   const symbol = <span className={cx(quiet, "text-[0.78em]")}>{p.symbol}</span>;
   return (

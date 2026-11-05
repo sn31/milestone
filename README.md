@@ -80,15 +80,15 @@ Known limitation: delivered code runs on the worker host with network access; a 
 
 ![A delivery being verified: the client's suite runs against the delivered commit and the checks fill in live](docs/images/03-verifying.png)
 
-Verifying live: the client's own tests grade the delivered commit, and each check fills in as the log streams.
+Verifying live (simulated PayPal): the client's own tests grade the delivered commit, and each check fills in as the log streams.
 
 ![An opened receipt: every criterion with its confidence and cited evidence ids, and the policy's release stamp](docs/images/04-receipt.png)
 
-The receipt: each verdict cites its evidence, and the release stamp names the policy rule (P6) that decided it, not the model.
+The receipt (simulated PayPal): each verdict cites its evidence, and the release stamp names the policy rule (P6) that decided it, not the model.
 
 ![A released milestone: the payout repays the partner's advance first and pays the freelancer the rest](docs/images/05-release.png)
 
-The release split: one payout repays Parker's $50 advance plus fee and pays Frankie the rest, marked final once PayPal confirms.
+The release split (simulated PayPal): one payout repays Parker's $50 advance plus fee and pays Frankie the rest, marked final once PayPal confirms.
 
 ![The agents page: Casey's mandate and the audit of what the agent did, including a refused approval](docs/images/06-agents.png)
 

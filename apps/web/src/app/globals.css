@@ -34,7 +34,7 @@
   --state-held: #9b5408;
   --state-needs: #875f00;
   --state-danger: #c02d40;
-  /* state inks: the state colour darkened for small text on its own 10% wash (pills, danger buttons). Review 3, item 17. */
+  /* state inks: the state colour darkened for small text on its own 10% wash (pills, danger buttons). */
   --ink-draft: #525867;
   --ink-funded: #1656a7;
   --ink-verifying: #5d3bc5;
@@ -263,7 +263,7 @@ button:not(:disabled),
 }
 
 /*
- * Route loading skeletons fade in after 250ms, so a fast navigation or a role switch never flashes one (Review 3, item 19).
+ * Route loading skeletons fade in after 250ms, so a fast navigation or a role switch never flashes one.
  * Reduced motion zeroes the delay below, which shows the skeleton at once with no fade.
  */
 .loading-delayed {

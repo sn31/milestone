@@ -1,6 +1,6 @@
 /**
  * Milestone Advance pricing. Deterministic; the model only explains the numbers it is handed.
- * Every parameter is a placeholder to tune (see the Build Plan, "Milestone Advance").
+ * Every parameter is a placeholder to tune; none of them is calibrated against real repayment data yet.
  */
 export interface PricingParams {
   rMax: number; // ceiling advance rate, e.g. 0.8

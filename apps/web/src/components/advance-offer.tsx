@@ -213,7 +213,7 @@ export function AdvanceOffer({ milestoneId, showIneligible = false, compact = fa
         <Button variant="secondary" size="sm" onClick={accept} disabled={busy} aria-busy={busy} className="self-start">
           {busy ? "Working..." : "Get paid now"}
         </Button>
-        <span className="text-[12.5px] text-fg-faint">Paid by our capital partner via PayPal, repaid automatically out of the release.</span>
+        <span className="text-[12.5px] text-fg-faint">Paid by the capital partner via PayPal, repaid automatically out of the release.</span>
       </div>
       {error ? <p role="alert" className="px-4 pb-3 text-[13px] text-state-danger sm:px-5">{error}</p> : null}
     </section>

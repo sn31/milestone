@@ -19,7 +19,7 @@ export interface CountUpProps {
 
 /**
  * A number that is always readable. The server renders the final value and the first paint shows it, so a page load, a
- * screenshot or a video frame never catches blank or half-counted digits (Review 3, item 8). While the page is open, a new
+ * screenshot or a video frame never catches blank or half-counted digits. While the page is open, a new
  * value counts from the one on screen to the new one; reduced motion, a hidden tab or an off-screen figure jump straight
  * to it. For money use <Money animate>, which counts the whole units and keeps the decimals still.
  */
