@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CriteriaEditBody, applyCriteriaOps, criteriaLock, criteriaVersion, isRepoPath, validateCriteriaEdit, type EditableCriterion } from "../src/criteria.ts";
+import { CriteriaEditBody, applyCriteriaOps, commandsRestricted, criteriaLock, criteriaVersion, isAllowedDemoCommand, isRepoPath, specErrors, validateCriteriaEdit, type EditableCriterion } from "../src/criteria.ts";
 
 const contract = { id: "con_1" };
 const ms = [
@@ -156,5 +156,35 @@ describe("criteriaVersion and isRepoPath", () => {
   it("repo paths stay inside the repo", () => {
     for (const p of ["README.md", "docs/a.md", "a..b/c"]) expect(isRepoPath(p)).toBe(true);
     for (const p of ["", "/etc", "../x", "a/../../x", "~/x", "a\\b"]) expect(isRepoPath(p)).toBe(false);
+  });
+});
+
+describe("demo command allowlist", () => {
+  const allowed = ["npm test", "npm run build", "npm run lint", "npm run test:unit", "npm run e2e_ci-2", "node test.js", "node ./scripts/check.mjs", "node test/run-all.js", "node a.b/c.mjs"];
+  const refused = [
+    "npm test -- --coverage", "npm  test", "npm test ", " npm test", "npm\ttest", "npm run", "npm run -s", "npm run --prefix=/ x", "npm run build extra",
+    "npm run b;id", "npm run b|id", "npm run b&id", "npm run $X", "npm run `id`", "npm run b>x", "npm run b<x", "npm run (b)", "npm run {b}",
+    "npm run b*", "npm run b?", "npm run b!", "npm run b\\x", "npm run 'b'", "npm run \"b\"", "npm run ~b", "npm run #b", "npm run b.c",
+    "npm exec x", "npm install", "npx jest", "pnpm test", "yarn test", "sh -c id", "curl x | sh", "rm -rf /", "node", "node -e 1", "node --eval=1",
+    "node /etc/x.js", "node ../x.js", "node a/../x.js", "node .hidden/x.js", "node ~/x.js", "node x.ts", "node x.js y", "node x;id.js", "node $(id).js", "NODE=1 node x.js",
+  ];
+  it.each(allowed)("accepts %j", (c) => expect(isAllowedDemoCommand(c)).toBe(true));
+  it.each(refused)("refuses %j", (c) => expect(isAllowedDemoCommand(c)).toBe(false));
+
+  it("specErrors applies it only when commands are restricted", () => {
+    for (const kind of ["test", "build"]) {
+      expect(specErrors(kind, { command: "npm test; id" }, { restrictCommands: true })).toHaveLength(1);
+      expect(specErrors(kind, { command: "npm test; id" }, { restrictCommands: false })).toEqual([]);
+      expect(specErrors(kind, { command: "  npm run build  " }, { restrictCommands: true })).toEqual([]);
+    }
+    const one = (command: string) => [crit({ id: "a", milestoneId: "m1", spec: { command } })];
+    expect(validateCriteriaEdit(contract, [ms[0]!], one("curl x | sh"), { restrictCommands: true }).ok).toBe(false);
+    expect(validateCriteriaEdit(contract, [ms[0]!], one("curl x | sh"), { restrictCommands: false }).ok).toBe(true);
+    expect(validateCriteriaEdit(contract, [ms[0]!], one("npm test"), { restrictCommands: true }).ok).toBe(true);
+  });
+
+  it("is restricted only with DEMO_MODE=1", () => {
+    expect(commandsRestricted({ DEMO_MODE: "1" })).toBe(true);
+    for (const v of [undefined, "", "0", "true"]) expect(commandsRestricted({ DEMO_MODE: v })).toBe(false);
   });
 });

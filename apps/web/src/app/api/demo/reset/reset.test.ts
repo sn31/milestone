@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { demoMode, modelMode } from "../_demo";
 import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLimiter, repoRoot } from "./reset";
 
 /** A plain record as a ProcessEnv (Next.js types NODE_ENV as required). */
 const env = (o: Record<string, string | undefined>) => o as unknown as NodeJS.ProcessEnv;
 
-vi.mock("./reset", async (orig) => ({ ...(await orig<typeof import("./reset")>()), runShowcaseSeed: vi.fn(async () => ({ ok: true })) }));
+// The route's seed and upload clearing are stubbed (the real clearUploads would empty this checkout's var/uploads);
+// clearUploads itself is tested on a temporary directory through the original export.
+const clearMock = vi.hoisted(() => vi.fn(async () => 0));
+vi.mock("./reset", async (orig) => ({ ...(await orig<typeof import("./reset")>()), runShowcaseSeed: vi.fn(async () => ({ ok: true })), clearUploads: clearMock }));
 
 describe("demo reset", () => {
   const prev = process.env.DEMO_MODE;
@@ -44,9 +49,11 @@ describe("demo reset", () => {
     const { POST } = await import("./route");
     delete process.env.DEMO_MODE;
     expect((await POST(new Request("http://x/api/demo/reset", { method: "POST" }))).status).toBe(404);
+    expect(clearMock).not.toHaveBeenCalled();
     process.env.DEMO_MODE = "1";
     const first = await POST(new Request("http://x/api/demo/reset", { method: "POST" }));
     expect(first.status).toBe(200);
+    expect(clearMock).toHaveBeenCalledTimes(1);
     const second = await POST(new Request("http://x/api/demo/reset", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", referer: "http://x/contracts/ctr_demo" } }));
     expect(second.status).toBe(303);
     expect(second.headers.get("location")).toBe("http://x/contracts/ctr_demo");
@@ -54,5 +61,21 @@ describe("demo reset", () => {
     const third = await POST(new Request("http://x/api/demo/reset", { method: "POST" }));
     expect(third.status).toBe(429);
     expect(Number(third.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(clearMock).toHaveBeenCalledTimes(1); // refused resets clear nothing
+  });
+
+  it("clearUploads empties the upload directory but keeps it, and a missing one is fine", async () => {
+    const { clearUploads } = await vi.importActual<typeof import("./reset")>("./reset");
+    const root = await mkdtemp(join(tmpdir(), "milestone-uploads-"));
+    try {
+      await mkdir(join(root, "dlv_1"));
+      await writeFile(join(root, "dlv_1", "a.pdf"), "x");
+      await writeFile(join(root, "stray.txt"), "y");
+      expect(await clearUploads(root)).toBe(2);
+      expect(await readdir(root)).toEqual([]);
+      expect(await clearUploads(join(root, "missing"))).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

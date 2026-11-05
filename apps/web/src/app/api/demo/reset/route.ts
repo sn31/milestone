@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { json, jsonError, noStore } from "@/lib/http";
 import { DEMO_NOTICE_COOKIE, demoMode } from "../_demo";
-import { createLimiter, runShowcaseSeed } from "./reset";
+import { clearUploads, createLimiter, runShowcaseSeed } from "./reset";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -35,8 +35,8 @@ function back(req: Request, notice: string): Response {
 }
 
 /**
- * POST /api/demo/reset: puts the hosted demo back to the showcase (core seed with --reset --showcase; var/ files are
- * kept). Exists only with DEMO_MODE=1 (404 otherwise) and runs at most once every 30 s (429 with Retry-After).
+ * POST /api/demo/reset: puts the hosted demo back to the showcase (core seed with --reset --showcase), then empties
+ * UPLOAD_DIR; the simulator state file is kept. Exists only with DEMO_MODE=1 (404 otherwise) and runs at most once every 30 s (429 with Retry-After).
  */
 export async function POST(req: Request) {
   if (!demoMode()) return jsonError("not found", 404);
@@ -52,6 +52,8 @@ export async function POST(req: Request) {
     if (form) return back(req, "failed");
     return jsonError("the demo could not be reset", 500);
   }
+  // The tables no longer point at any upload: reclaim the disk. The data reset stands if this fails.
+  await clearUploads().catch((e: Error) => console.error(`demo reset: could not clear uploads: ${e.message}`));
   if (form) return back(req, "done");
   return json({ ok: true });
 }

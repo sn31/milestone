@@ -323,6 +323,15 @@ describe("runDeterministicStage: the client's suite grades the delivery (local g
     expect(out.evidence.find((e) => e.id === "evd_own_test")).toMatchObject({ status: "pass" }); // delivered, though not in the graded run
   });
 
+  it("with restricted commands (the hosted demo) an allowlisted command runs and any other is never run, recorded unclear", { timeout: 60_000 }, async () => {
+    const evil: CriterionSpec = { id: "evil", kind: "build", description: "builds", spec: { command: "npm test; touch PWNED" }, required: true };
+    const { out, tests } = await stage(shas.adds!, { restrictCommands: true, criteria: [...criteria, evil] }, async (wd) => {
+      await expect(readFile(join(wd, "PWNED"))).rejects.toThrow();
+    });
+    expect(tests).toMatchObject({ status: "pass" });
+    expect(out.evidence.find((e) => e.id === "evd_evil")).toMatchObject({ criterion_id: "evil", status: "unclear" });
+  });
+
   it("a rewritten test script is put back: the client's script runs and the regression fails, whatever a model says", { timeout: 60_000 }, async () => {
     const { out, tests, tamper, delivered, verdict } = await stage(shas.script!);
     expect(out.overlay!.manifests).toEqual([{ path: "package.json", keys: ["scripts"] }]);

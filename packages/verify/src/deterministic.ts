@@ -48,13 +48,13 @@
  * npm's cache (npm_config_cache) is a persistent worker directory, MILESTONE_NPM_CACHE or <repo>/var/npm-cache, so
  * setup does not download every dependency again for each verification. HOME stays the throwaway workdir.
  */
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
-import type { CriterionSpec, EvidenceSummary } from "@milestone/core";
+import { commandsRestricted, isAllowedDemoCommand, type CriterionSpec, type EvidenceSummary } from "@milestone/core";
 import { describeHit, scanForGaming, type GamingHit } from "./gaming.ts";
 import { repoPath } from "./paths.ts";
 
@@ -81,6 +81,12 @@ export interface DeterministicInput {
    * stage, so callers that only report progress should catch their own errors. The returned `evidence` is unchanged by it.
    */
   onEvidence?: (item: EvidenceSummary) => void | Promise<void>;
+  /**
+   * Test and build commands must be on the demo allowlist (isAllowedDemoCommand) and run without a shell; one that is
+   * not is never run and its criterion is recorded unclear. Default: DEMO_MODE=1 (commandsRestricted). Defense in depth
+   * behind the criteria editor, which refuses such commands at edit time.
+   */
+  restrictCommands?: boolean;
 }
 
 /** What the baseline overlay did to the delivered checkout before the graded run. */
@@ -906,6 +912,19 @@ interface Overlay extends OverlayReport {
 }
 
 const commandOf = (c: CriterionSpec) => String(c.spec.command ?? (c.kind === "test" ? "npm test" : "npm run build"));
+
+/** What the evidence says about a criterion whose command the host refuses to run. */
+export const COMMAND_NOT_ALLOWED = "command not allowed on this host";
+
+/**
+ * The argv a criterion's command runs as: `sh -c <command>` normally; with `restricted`, the allowlisted command split
+ * on spaces (no shell), or null when it is not on the allowlist and must not run.
+ */
+export function criterionArgv(command: string, restricted: boolean): string[] | null {
+  if (!restricted) return ["sh", "-c", command];
+  const trimmed = command.trim();
+  return isAllowedDemoCommand(trimmed) ? trimmed.split(" ") : null;
+}
 const touched = (o: OverlayReport) => o.restored.length + o.removed.length + o.manifests.length + o.lockfilesDropped.length + o.newDependencies.length > 0;
 
 /** Resolves the baseline, then makes the checkout run the client's suite (see the header). Throws BaselineError. */
@@ -1255,10 +1274,18 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
       return inCommit || (await access(join(workdir, path)).then(() => true, () => false));
     };
 
+    const restricted = input.restrictCommands ?? commandsRestricted();
     for (const c of input.criteria) {
       if (c.kind === "test" || c.kind === "build") {
         const command = commandOf(c);
-        const r = await run(["sh", "-c", command], workdir, env, input.timeoutMs ?? 300_000);
+        const argv = criterionArgv(command, restricted);
+        if (!argv) {
+          // Never run: the criterion editor refuses such commands on this host, so one here came in some other way.
+          logs[c.id] = COMMAND_NOT_ALLOWED;
+          await record({ id: `evd_${c.id}`, criterion_id: c.id, kind: "log", status: "unclear", summary: `${COMMAND_NOT_ALLOWED}: only npm test, npm run <script> and node <file>.js run here` });
+          continue;
+        }
+        const r = await run(argv, workdir, env, input.timeoutMs ?? 300_000);
         logs[c.id] = r.output;
         const ran = `${command} exited ${r.code}${r.timedOut ? " (timed out)" : ""}`;
         const status = r.timedOut ? "unclear" : r.code === 0 ? "pass" : "fail";
@@ -1286,7 +1313,9 @@ export async function runDeterministicStage(input: DeterministicInput): Promise<
         await showDelivery(workdir, head, env, overlay);
         for (const c of tests) {
           const command = commandOf(c);
-          const r = await run(["sh", "-c", command], workdir, env, input.timeoutMs ?? 300_000);
+          const argv = criterionArgv(command, restricted);
+          if (!argv) continue;
+          const r = await run(argv, workdir, env, input.timeoutMs ?? 300_000);
           logs[`${c.id}:delivered`] = r.output;
           await record({ id: `evd_${c.id}_delivered`, kind: "log", summary: `informational, does not decide: ${command} with the delivery's own tests, scripts and test config (${c.id}) exited ${r.code}${r.timedOut ? " (timed out)" : ""}; last lines:\n${tail(r.output)}`, sha256: sha256(r.output) });
         }
@@ -1322,19 +1351,81 @@ function tail(s: string, n = 20): string {
   return s.split("\n").slice(-n).join("\n");
 }
 
-/** Runs a command; `output` is stdout+stderr, keeping the last `maxOutput` characters (`truncated` says when it cut). */
-export function run(cmd: string[], cwd: string, env: Record<string, string>, timeoutMs: number, maxOutput = 200_000): Promise<{ code: number | null; output: string; timedOut: boolean; truncated: boolean }> {
+/**
+ * The last `max` characters of a stream, in bounded memory: at most about twice `max` is held while text arrives, so a
+ * command printing gigabytes cannot exhaust the host. `truncated` says whether more than `max` characters arrived.
+ */
+export function tailBuffer(max: number) {
+  let buf = "";
+  let total = 0;
+  const keep = Math.max(0, max);
+  return {
+    push(s: string) {
+      total += s.length;
+      buf += s;
+      if (buf.length > 2 * keep + 65_536) buf = keep === 0 ? "" : buf.slice(-keep);
+    },
+    get text() { return keep === 0 ? "" : buf.slice(-keep); },
+    get truncated() { return total > keep; },
+    get length() { return total; },
+  };
+}
+
+/** How long run() waits after the command exits for its last output when something it started still holds the pipes. */
+const EXIT_GRACE_MS = 1_000;
+
+/** SIGKILL to the command's whole process group; a group that is already gone (ESRCH) is fine. Never throws. */
+function killGroup(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch (e) {
+    // ESRCH: nothing left. Anything else: at least the command itself.
+    if ((e as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL");
+  }
+}
+
+/**
+ * Runs a command; `output` is stdout+stderr, keeping the last `maxOutput` characters (`truncated` says when it cut).
+ * The command leads its own process group: on timeout the whole group is killed, and once the command exits whatever it
+ * left behind in the group is killed too. It resolves on close, or `graceMs` after exit when a process that escaped
+ * the group still holds the output pipes (those are then closed on our side).
+ */
+export function run(cmd: string[], cwd: string, env: Record<string, string>, timeoutMs: number, maxOutput = 200_000, graceMs = EXIT_GRACE_MS): Promise<{ code: number | null; output: string; timedOut: boolean; truncated: boolean }> {
   return new Promise((resolve, reject) => {
     const [bin, ...args] = cmd;
     if (!bin) return reject(new Error("empty command"));
     // Cast: Next.js augments ProcessEnv with a required NODE_ENV, which a plain record does not carry.
-    const child = spawn(bin, args, { cwd, env: env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
+    const child = spawn(bin, args, { cwd, env: env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const output = tailBuffer(maxOutput);
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
-    child.stdout.on("data", (d) => (output += d));
-    child.stderr.on("data", (d) => (output += d));
-    child.on("error", (e) => { clearTimeout(timer); reject(e); });
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code, output: output.slice(-maxOutput), timedOut, truncated: output.length > maxOutput }); });
+    let settled = false;
+    let grace: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => { timedOut = true; killGroup(child); }, timeoutMs);
+    child.stdout.setEncoding("utf8").on("data", (d: string) => output.push(d));
+    child.stderr.setEncoding("utf8").on("data", (d: string) => output.push(d));
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve({ code, output: output.text, timedOut, truncated: output.truncated });
+    };
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      reject(e);
+    });
+    child.on("exit", (code) => {
+      // Leftovers in the group (a test's background server, a hung grandchild) die with the command.
+      clearTimeout(timer);
+      killGroup(child);
+      grace = setTimeout(() => finish(code), graceMs);
+    });
+    child.on("close", (code) => finish(code));
   });
 }

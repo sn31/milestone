@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { uploadRoot } from "@milestone/verify";
 import { RESET_INTERVAL_S } from "../_demo";
 
 /** The monorepo root: the nearest directory at or above `from` holding pnpm-workspace.yaml. */
@@ -29,9 +31,23 @@ export function createLimiter(intervalS: number = RESET_INTERVAL_S) {
 }
 
 /**
- * Re-seeds the showcase: the core seed with --reset --showcase (every table truncated, then the demo rebuilt). var/
- * files (simulator state, uploads) are kept: --reset-files is never passed. Runs the seed as its own process, the way
- * `pnpm db:seed` does, because the seed is a script that exits when done.
+ * Removes everything inside the upload directory (UPLOAD_DIR, see uploadRoot), keeping the directory itself (on Render it
+ * sits on the persistent disk). A missing directory is fine. Returns how many entries were removed.
+ */
+export async function clearUploads(root: string = uploadRoot()): Promise<number> {
+  const entries = await readdir(root).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "ENOENT") return [] as string[];
+    throw e;
+  });
+  for (const name of entries) await rm(join(root, name), { recursive: true, force: true });
+  return entries.length;
+}
+
+/**
+ * Re-seeds the showcase: the core seed with --reset --showcase (every table truncated, then the demo rebuilt). The
+ * simulator state file is kept (--reset-files is not passed: it resolves var/ in the repo, not the hosted paths);
+ * uploads are cleared separately by the route with clearUploads, so the disk does not grow with every visitor's files.
+ * Runs the seed as its own process, the way `pnpm db:seed` does, because the seed is a script that exits when done.
  */
 export function runShowcaseSeed(env: NodeJS.ProcessEnv = process.env): Promise<{ ok: true } | { ok: false; error: string }> {
   const root = repoRoot();

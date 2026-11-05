@@ -47,8 +47,40 @@ export function isRepoPath(p: string): boolean {
   return !p.split("/").some((seg) => seg === "..");
 }
 
-/** The spec problems of one criterion, in plain words; empty when the spec is checkable for its kind. */
-export function specErrors(kind: string, spec: Record<string, unknown>): string[] {
+/**
+ * Whether test and build commands are limited to the hosted demo's allowlist: on only with DEMO_MODE=1 (the public demo
+ * on Render), where anyone can edit a contract's criteria and the worker would otherwise run any line with `sh -c`.
+ */
+export function commandsRestricted(env: Record<string, string | undefined> = process.env): boolean {
+  return env.DEMO_MODE?.trim() === "1";
+}
+
+/** A script name for `npm run`: letters, digits, ":", "_" and "-", not starting with "-". */
+const SCRIPT_NAME = /^[A-Za-z0-9:_][A-Za-z0-9:_-]*$/;
+/** A relative .js/.mjs path for `node`: segments of letters, digits, ".", "_" and "-", none starting with "." or "-". */
+const NODE_SCRIPT = /^(?:\.\/)?(?:[A-Za-z0-9_][A-Za-z0-9._-]*\/)*[A-Za-z0-9_][A-Za-z0-9._-]*\.m?js$/;
+
+/**
+ * Whether a test or build command is on the hosted demo's allowlist: exactly `npm test`, `npm run build`,
+ * `npm run <script>` or `node <relative .js/.mjs path>`, single-spaced, with no shell metacharacters, options, absolute
+ * or parent paths. An allowed command is its own argv split on single spaces, so the worker runs it without a shell.
+ */
+export function isAllowedDemoCommand(command: string): boolean {
+  const parts = command.split(" ");
+  if (parts.some((p) => p === "")) return false;
+  const [bin, a, b, ...rest] = parts;
+  if (rest.length) return false;
+  if (bin === "npm" && a === "test" && b === undefined) return true;
+  if (bin === "npm" && a === "run" && b !== undefined) return SCRIPT_NAME.test(b);
+  if (bin === "node" && a !== undefined && b === undefined) return NODE_SCRIPT.test(a);
+  return false;
+}
+
+/**
+ * The spec problems of one criterion, in plain words; empty when the spec is checkable for its kind. With
+ * `restrictCommands` (default: DEMO_MODE=1, see commandsRestricted) a test or build command must be on the demo allowlist.
+ */
+export function specErrors(kind: string, spec: Record<string, unknown>, opts: { restrictCommands?: boolean } = {}): string[] {
   switch (kind) {
     case "test":
     case "build": {
@@ -56,6 +88,9 @@ export function specErrors(kind: string, spec: Record<string, unknown>): string[
       if (!command) return [`Give the command to run, such as ${kind === "test" ? "npm test" : "npm run build"}.`];
       if (/[\r\n]/.test(String(spec.command))) return ["The command must fit on one line."];
       if (command.length > SPEC_TEXT_MAX) return [`The command is longer than ${SPEC_TEXT_MAX} characters.`];
+      if ((opts.restrictCommands ?? commandsRestricted()) && !isAllowedDemoCommand(command)) {
+        return ["On this demo a check can only run npm test, npm run <script> or node <file>.js, with no options or shell characters."];
+      }
       return [];
     }
     case "file": {
@@ -93,6 +128,7 @@ export function validateCriteriaEdit(
   contract: { id: string },
   milestones: ReadonlyArray<{ id: string; seq: number; contractId?: string }>,
   criteria: ReadonlyArray<EditableCriterion>,
+  opts: { restrictCommands?: boolean } = {},
 ): CriteriaEditResult {
   const errors: CriteriaEditError[] = [];
   const known = new Map(milestones.filter((m) => m.contractId === undefined || m.contractId === contract.id).map((m) => [m.id, m]));
@@ -112,7 +148,7 @@ export function validateCriteriaEdit(
     if (!description) errors.push({ ...at, field: "description", message: "Say what this check confirms." });
     else if (description.length > DESCRIPTION_MAX) errors.push({ ...at, field: "description", message: `Keep the description under ${DESCRIPTION_MAX} characters.` });
     if (!c.spec || typeof c.spec !== "object" || Array.isArray(c.spec)) errors.push({ ...at, field: "spec", message: "The check's settings are missing." });
-    else for (const message of specErrors(c.kind, c.spec)) errors.push({ ...at, field: "spec", message });
+    else for (const message of specErrors(c.kind, c.spec, opts)) errors.push({ ...at, field: "spec", message });
     if (typeof c.required !== "boolean") errors.push({ ...at, field: "spec", message: "Say whether the check is required." });
   }
   for (const m of [...known.values()].sort((a, b) => a.seq - b.seq)) {
