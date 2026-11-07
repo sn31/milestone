@@ -1,8 +1,10 @@
 # Milestone
 
-Milestone holds a client's payment for a piece of freelance work and pays the freelancer once the delivery is checked against the acceptance criteria both sides agreed. The model never moves money: it reads the work and writes verdicts, a fixed policy decides what happens, and a milestone counts as released only when PayPal's webhook confirms the payout. PayPal holds and moves every dollar: the client pays through PayPal Checkout, the funds wait in the platform account, and PayPal Payouts pays the freelancer, with a refund of the rest when only part of the work passed.
+Milestone holds a client's PayPal payment for freelance work and pays the freelancer on its own only when the evidence shows the delivery meets the criteria both sides signed; anything less is held or goes to the client. Claude judges the work but never decides: a fixed policy does, PayPal's webhook confirms every payout, and the client's AI agents act only within the limits the client set.
 
-Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) on the PayPal sandbox. Judgment criteria are judged by Claude (`claude-sonnet-5-5` by default) through the Anthropic SDK when `ANTHROPIC_API_KEY` is set. A client can also hand bounded actions to an AI agent (Claude Desktop, Cursor, or the built-in console) through Milestone's MCP server; an agent can only make a release happen sooner, never one the policy would not.
+PayPal holds and moves every dollar: the client pays through PayPal Checkout or from a PayPal saved once, the funds wait in the platform account, and PayPal Payouts pays the freelancer, with a refund of the rest when only part of the work passed. Judgment criteria are judged by Claude (`claude-sonnet-5-5` by default) through the Anthropic SDK when `ANTHROPIC_API_KEY` is set. A client can hand bounded actions to an AI agent (Claude Desktop, Cursor, or the built-in console) through Milestone's MCP server: it funds only the next milestone within the mandate's caps, and can only make a release happen sooner, never one the policy would not.
+
+Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). The hosted demo and the demo video use a built-in PayPal simulator that answers the same REST calls and posts its own webhooks; the same money route ran against the real PayPal sandbox on Nov 5 (capture, payout, a retried payout that did not pay twice, and a partial payout plus refund: `fixtures/paypal-recordings/spike-2026-11-05.json`).
 
 ## Quick start
 
