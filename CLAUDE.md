@@ -1,6 +1,6 @@
 # Milestone
 
-AI escrow agent for freelance work, built for the PayPal AI Hackathon (deadline Nov 12 2026, 12:00 pm Pacific).
+AI escrow agent for freelance work, built for the PayPal AI Hackathon.
 
 ## Non-negotiable rules
 1. **Only `packages/money` talks to PayPal, and only `packages/money/src/policy/execute.ts` moves money** (imports `./paypal/money.ts`). `packages/verify` never imports `@milestone/money`. `pnpm check:boundaries` enforces both; CI fails otherwise.

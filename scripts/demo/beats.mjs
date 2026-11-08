@@ -1,4 +1,4 @@
-// The demo beats from docs/video-script.md, driven through the real UI. Each beat gets a short hold at the end so the
+// The demo beats (the demo video's storyline), driven through the real UI. Each beat gets a short hold at the end so the
 // state it reached is on screen long enough to cut. Off-camera setup (funding a milestone the script funds "off
 // camera", arming the payout failure) runs with the recorder paused, so it is not in the video.
 import { sleep } from "./cdp.mjs";

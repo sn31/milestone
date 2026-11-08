@@ -105,17 +105,12 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 - **Sponsor tools:** AG Grid Community (four grids), Render (`render.yaml`), Postman (collection), and an OpenAPI spec ready for APIMatic.
 - **Claude Code** was the coding assistant; **Kokoro TTS** was used only to time and voice the demo video's narration.
 
-The full list, with how each is used, is under "Tools used" in [docs/submission.md](docs/submission.md#tools-used).
-
 ## Documentation
 
-- [docs/submission.md](docs/submission.md): the Devpost text.
-- [docs/judging.md](docs/judging.md): the judges' testing guide (hosted demo, local run, the agent surface, what is simulated).
 - [docs/architecture.md](docs/architecture.md): components, state machine, money route, jobs, the agent layer, data model.
 - [docs/mcp.md](docs/mcp.md): the Milestone MCP server, mandates and the agent guarantee.
 - [docs/eval.md](docs/eval.md): the model eval set and runs.
 - [fixtures/real-repos/README.md](fixtures/real-repos/README.md): 29 deliveries against real repositories, including red-team attacks.
-- [docs/video-script.md](docs/video-script.md): the demo video script.
 - [docs/openapi.yaml](docs/openapi.yaml) and [docs/apimatic.md](docs/apimatic.md): the OpenAPI spec and how to generate an SDK from it with APIMatic (no generated SDK is committed).
 - [fixtures/postman/milestone.postman_collection.json](fixtures/postman/milestone.postman_collection.json): Postman collection.
 - [docs/deploy.md](docs/deploy.md): deploying the hosted demo to Render.

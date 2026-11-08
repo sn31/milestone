@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Records the demo "backup run": drives the beats of docs/video-script.md through the real UI in headless Chrome,
+// Records the demo "backup run": drives the demo beats (scripts/demo/beats.mjs) through the real UI in headless Chrome,
 // captures it with CDP's Page.startScreencast and writes an MJPEG AVI and a Photo-JPEG MOV without ffmpeg.
 // Everything runs against a throwaway database (recreated each run) and its own web server, worker and Chrome,
-// so the data behind a running dev server is never touched. See docs/demo-recording.md.
+// so the data behind a running dev server is never touched.
 //
 //   node scripts/record-demo.mjs [--out <dir>] [--port 3012] [--cdp-port 9452] [--db milestone_demo]
 //                                [--fps 10] [--quality 72] [--hold 2500] [--review-seconds 30] [--keep-db]
@@ -214,7 +214,7 @@ try {
     if (only && !only.has(beat.id)) continue;
     const rec = { id: beat.id, title: beat.title, script: beat.script, videoStart: recorder.videoMs() / 1000, wallStart: new Date().toISOString(), notes: [], marks: [], ok: false };
     ctx.note = (n) => { rec.notes.push(n); log(`  note: ${n}`); };
-    // Named moments in the video (seconds), for the narrated cut: scripts/video/build-video.mjs speeds up the waits between them.
+    // Named moments in the video (seconds), for cutting the video (the waits between them can be sped up).
     ctx.mark = (label) => rec.marks.push({ label, t: Math.round(recorder.videoMs()) / 1000 });
     log(`beat ${beat.id}: ${beat.title}`);
     const t = Date.now();

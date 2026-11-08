@@ -11,3 +11,6 @@ fixtures/paypal-recordings/*.local.json
 .DS_Store
 var/
 .next-*/
+
+# Owner-only material (submission text, video and voice-over scripts, judging guide): kept locally, never published.
+private/
