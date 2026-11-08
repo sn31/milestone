@@ -32,3 +32,6 @@ export const PAYPAL_MODE_TEXT: Record<PayPalMode, string> = {
   sandbox: "real PayPal sandbox (test accounts, no real money), test identities; Reset demo resets this app's data, not PayPal's sandbox",
   simulated: "simulated PayPal (no real money), test identities; reset any time",
 };
+
+/** Shown next to the fund button and in the client's first-run guide when the hosted demo talks to the real sandbox. */
+export const SANDBOX_BUYER_HINT = "PayPal's checkout here is the real sandbox: log in with the sandbox buyer account from the Devpost testing instructions.";

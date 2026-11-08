@@ -1,13 +1,15 @@
 import { Button, Eyebrow, Panel, StateGlyph, type GlyphKey, type ToneKey } from "@/components/ui";
+import { paypalMode } from "@milestone/core";
 import type { Role } from "@/lib/session";
+import { SANDBOX_BUYER_HINT, demoMode } from "@/app/api/demo/_demo";
 import { IntroToggle } from "./intro-toggle";
 
 /** The story in three stations, drawn in the rail's vocabulary: a node in the state's colour, a 2px connector. */
 const STEPS: { tone: ToneKey; glyph: GlyphKey; title: string; body: string }[] = [
-  { tone: "funded", glyph: "dot", title: "Fund", body: "The client pays one milestone into escrow." },
+  { tone: "funded", glyph: "dot", title: "Fund", body: "The client pays one milestone into escrow; the freelancer can take an advance on it." },
   // A still ring, not the live pulse: nothing is being verified on this page.
   { tone: "verifying", glyph: "ring", title: "Agent verifies", body: "Tests, tamper check and criteria, on a receipt." },
-  { tone: "released", glyph: "check", title: "PayPal releases", body: "A fixed policy pays out, final once PayPal confirms." },
+  { tone: "released", glyph: "check", title: "PayPal releases", body: "A fixed policy pays for what passed and refunds the rest, final once PayPal confirms." },
 ];
 
 const GUIDE: Record<Role, (name: string) => string> = {
@@ -46,6 +48,9 @@ export function FirstRun({ role, name, start, secondary }: FirstRunProps) {
               Milestone holds a client&rsquo;s payment and pays the freelancer only when an agent has verified the work.
             </h2>
             <p className="mt-3 max-w-[60ch] text-[14px] leading-relaxed text-fg-muted">{GUIDE[role](name)}</p>
+            {role === "client" && demoMode() && paypalMode() === "sandbox" ? (
+              <p className="mt-2 max-w-[60ch] text-[13px] leading-relaxed text-fg-faint">{SANDBOX_BUYER_HINT}</p>
+            ) : null}
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <Button href={start.href} variant="primary">
                 {start.label}

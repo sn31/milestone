@@ -10,6 +10,7 @@ import { formatMoney, humanize, truncateMiddle } from "@/lib/format";
 import { AdvanceOffer } from "@/components/advance-offer";
 import { DeliverForm } from "@/components/deliver-form";
 import { FundButton } from "@/components/fund-button";
+import { SANDBOX_BUYER_HINT, demoMode } from "@/app/api/demo/_demo";
 import { ReviewCard } from "@/components/review-card";
 import { VerdictView, type VerdictDelivery } from "@/components/verdict-view";
 import { VerifyingPanel } from "@/components/live-refresh";
@@ -266,14 +267,18 @@ export function MilestoneActions({
       else if (!("ok" in aupGate(contract))) action = <Note tone="held">Funding is paused by the PayPal AUP check (see above).</Note>;
       else if (isClient)
         action = (
-          <FundButton
-            milestoneId={milestone.id}
-            currency={contract.currency}
-            amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
-            paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
-            mode={paypalMode()}
-            quiet={!firstDraft}
-          />
+          <>
+            <FundButton
+              milestoneId={milestone.id}
+              currency={contract.currency}
+              amountLabel={formatMoney(milestone.amountMinor, contract.currency)}
+              paypalEnv={process.env.PAYPAL_ENV === "live" ? "live" : "sandbox"}
+              mode={paypalMode()}
+              quiet={!firstDraft}
+            />
+            {/* The hosted demo's checkout is PayPal's real sandbox: say which login it wants. */}
+            {firstDraft && demoMode() && paypalMode() === "sandbox" ? <Note>{SANDBOX_BUYER_HINT}</Note> : null}
+          </>
         );
       else action = <Note>Waiting for {names.client} to fund this milestone.</Note>;
       body = (
