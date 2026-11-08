@@ -223,6 +223,7 @@ paths:
       tags: [paypal]
       operationId: getClientToken
       summary: Browser token for PayPal JS SDK v6
+      description: Returns a short-lived token the browser passes to the PayPal JS SDK v6 to render the PayPal button.
       responses:
         "200":
           description: Short-lived token
@@ -270,7 +271,7 @@ paths:
                   duplicate: { type: boolean }
                   outcome: { type: string, description: "funded, already, pending, mismatch, rejected, enqueued, stored or ignored" }
         "400": { description: Bad signature (or a missing simulated header in simulated mode) }
-        "500": { description: Not processed yet, or PAYPAL_WEBHOOK_ID not set }
+        "500": { description: "Not processed yet, or PAYPAL_WEBHOOK_ID not set" }
   /api/webhooks/github:
     post:
       tags: [webhooks]
@@ -439,9 +440,9 @@ paths:
               required: [files]
               properties:
                 files:
-                  type: array
-                  maxItems: 10
-                  items: { type: string, format: binary }
+                  type: string
+                  format: binary
+                  description: "A delivered file. The route reads every `files` field, so repeat the field to send up to 10 files in one delivery (described as one field because SDK generators do not support file arrays)."
                 note: { type: string, description: Optional note to the reviewer, maxLength: 10000 }
       responses:
         "200":
@@ -485,7 +486,7 @@ paths:
             "*/*":
               schema: { type: string, format: binary }
         "403": { description: Not a party to the contract, content: { text/plain: { schema: { type: string } } } }
-        "404": { description: Unknown delivery, not an upload delivery, or unknown file name, content: { text/plain: { schema: { type: string } } } }
+        "404": { description: "Unknown delivery, not an upload delivery, or unknown file name", content: { text/plain: { schema: { type: string } } } }
   /api/advances/offer:
     get:
       tags: [advances]
@@ -509,7 +510,7 @@ paths:
     post:
       tags: [advances]
       operationId: acceptAdvance
-      summary: Accept the advance offer ("Get paid now")
+      summary: Accept the advance offer
       description: |
         The contract's freelancer only. Under row locks the offer is re-priced from the database and stored as an
         advance with status `offered`, `advance.accepted` is audited, and the `advance` job is queued; the job pays the
@@ -624,6 +625,7 @@ paths:
       tags: [dev]
       operationId: listArmedFailures
       summary: List armed simulated payout failures
+      description: Simulated PayPal only. Lists the payout failures armed for the next payouts, used to demonstrate a held release.
       security: []
       responses:
         "200":
@@ -769,7 +771,7 @@ paths:
                 milestoneId: { type: string, example: mst_3 }
                 reason: { type: string, example: MERCHANDISE_OR_SERVICE_NOT_RECEIVED }
       responses:
-        "200": { description: The simulated dispute, with milestoneId }
+        "200": { description: "The simulated dispute, with milestoneId" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -888,7 +890,8 @@ paths:
     get:
       tags: [agents]
       operationId: mcpGet
-      summary: Not supported by this stateless server (405)
+      summary: Open an MCP event stream
+      description: Not supported. The MCP server is stateless (Streamable HTTP without sessions), so GET answers 405.
       security:
         - mandateToken: []
       responses:
@@ -896,7 +899,8 @@ paths:
     delete:
       tags: [agents]
       operationId: mcpDelete
-      summary: Not supported by this stateless server (405)
+      summary: End an MCP session
+      description: Not supported. The MCP server is stateless (Streamable HTTP without sessions), so DELETE answers 405.
       security:
         - mandateToken: []
       responses:
@@ -905,8 +909,8 @@ paths:
     get:
       tags: [vault]
       operationId: getSavedPayPal
-      summary: "The signed-in client's saved PayPal, or { paymentMethod: null }"
-      description: Clients only; agents are refused.
+      summary: Get the saved PayPal
+      description: "The signed-in client's saved PayPal, or paymentMethod null when none is saved. Clients only; agents are refused."
       responses:
         "200": { description: "{ paymentMethod }" }
         "403": { $ref: "#/components/responses/Error" }
@@ -950,7 +954,7 @@ paths:
       description: The setup token must belong to the signed-in user. Redirects to /agents?vault=<outcome>.
       parameters:
         - { name: approval_token_id, in: query, required: false, schema: { type: string } }
-        - { name: cancelled, in: query, required: false, schema: { type: string, enum: ["1"] } }
+        - { name: cancelled, in: query, required: false, description: "Set to 1 when the payer cancelled the approval", schema: { type: string } }
       responses:
         "303":
           description: Redirect to /agents
@@ -1027,14 +1031,14 @@ components:
         scope: { type: string, description: Plain-English scope }
         title: { type: string, maxLength: 120, description: Optional; defaults to the compiled title }
         currency: { type: string, minLength: 3, maxLength: 3, default: USD }
-        total: { type: number, description: Total in major units, for example 300.00 }
+        total: { type: number, description: "Total in major units, for example 300.00" }
         repo: { type: string, description: "owner/name of the delivery repository" }
     ManualDeliveryRequest:
       type: object
       required: [repoUrl]
       properties:
         repoUrl: { type: string, description: "https URL, file:// URL or absolute local path; ssh, git:// and credentials in the URL are refused", example: /tmp/milestone-demo }
-        ref: { type: string, default: HEAD, description: Branch, tag, HEAD or a 40-character commit id, example: m1-pass }
+        ref: { type: string, default: HEAD, description: "Branch, tag, HEAD or a 40-character commit id", example: m1-pass }
         title: { type: string, maxLength: 200 }
         note: { type: string, maxLength: 10000 }
     StoredFile:
@@ -1111,7 +1115,7 @@ components:
         principalMinor: { type: integer }
         feeBpsPerDay: { type: number }
         feeMinor: { type: integer }
-        repaymentMinor: { type: integer, description: Principal plus the quoted fee, deducted from the release }
+        repaymentMinor: { type: integer, description: "Principal plus the quoted fee, deducted from the release" }
         fundedAt: { type: [string, "null"], format: date-time }
         repaidAt: { type: [string, "null"], format: date-time }
         explanation: { type: [string, "null"] }
