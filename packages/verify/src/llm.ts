@@ -21,7 +21,49 @@ export interface ModelConfig extends ModelSettings {
 /** The model and server the environment selects, and whether that model can be called. */
 export function modelConfig(env: NodeJS.ProcessEnv = process.env): ModelConfig {
   const s = modelSettings(env);
-  return { ...s, configured: async () => Boolean(env.ANTHROPIC_API_KEY?.trim()) };
+  return { ...s, configured: async () => Boolean(env.ANTHROPIC_API_KEY?.trim()) && modelBudgetLeft(env) };
+}
+
+/**
+ * Daily model-call budget for a public host: MILESTONE_MODEL_DAILY_CALLS caps the model requests this process makes per
+ * UTC day (unset or not a positive integer: no cap). Past it, isModelConfigured() answers false until the next UTC day,
+ * so every caller takes its existing no-model path (judgment goes to the client, the AUP check runs keyword-only, the
+ * console says no model is configured) instead of visitors spending the API key's whole limit. Counted per process
+ * (the web app and the worker each have their own), in memory.
+ */
+const spent = { day: "", calls: 0 };
+
+function dailyCallLimit(env: NodeJS.ProcessEnv): number {
+  const n = Number(env.MILESTONE_MODEL_DAILY_CALLS?.trim());
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+function rollDay(now: Date): void {
+  const day = now.toISOString().slice(0, 10);
+  if (spent.day !== day) {
+    spent.day = day;
+    spent.calls = 0;
+  }
+}
+
+/** Whether today's budget has room (always true without MILESTONE_MODEL_DAILY_CALLS). */
+export function modelBudgetLeft(env: NodeJS.ProcessEnv = process.env, now: Date = new Date()): boolean {
+  const limit = dailyCallLimit(env);
+  if (!limit) return true;
+  rollDay(now);
+  return spent.calls < limit;
+}
+
+/** Records one model request (getProvider does this for every request). */
+export function countModelCall(now: Date = new Date()): void {
+  rollDay(now);
+  spent.calls++;
+}
+
+/** Tests: forget today's count. */
+export function resetModelBudgetForTests(): void {
+  spent.day = "";
+  spent.calls = 0;
 }
 
 /** The Claude model id requests use (MILESTONE_MODEL when it names a Claude model, else the default). */
@@ -41,7 +83,9 @@ export function getProvider(): Provider {
   const key = `${c.textModel}|${c.baseUrl}`;
   let p = providers.get(key);
   if (!p) {
-    p = createAnthropicProvider({ model: c.textModel });
+    const inner = createAnthropicProvider({ model: c.textModel });
+    // Every request counts against the daily budget (modelBudgetLeft), whichever caller made it.
+    p = { name: inner.name, model: inner.model, generate: (req) => (countModelCall(), inner.generate(req)) };
     providers.set(key, p);
   }
   return p;

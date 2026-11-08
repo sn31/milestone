@@ -150,6 +150,7 @@ Every variable the code reads is either set in `render.yaml` or listed here. `sc
 |---|---|---|
 | `APP_URL` | Set automatically | The public base URL, used for PayPal return links, the simulator's webhooks and agent links. The start script sets it from `RENDER_EXTERNAL_URL`; set it yourself only for a custom domain. |
 | `MILESTONE_MODEL` | Optional | The Claude model id (default `claude-sonnet-5-5`). The seed also writes it on showcase verdicts. |
+| `MILESTONE_MODEL_DAILY_CALLS` | Set in `render.yaml` (150) | Model requests each process (web app, worker) may make per UTC day. Past it the app runs without a model until the next UTC day: judgment criteria go to the client, the AUP check runs keyword-only, the console says no model is configured. Unset locally: no cap. |
 | `ANTHROPIC_BASE_URL` | Leave unset | Overrides the Anthropic API URL (a proxy). |
 | `MILESTONE_ALLOW_LOCAL_REPOS` | Leave unset | `1` lets deliveries name local paths and `file://` URLs, and lifts the https-only `git`. Never on a public host. |
 | `MILESTONE_MCP_URL` | Optional | Where the agent console finds the MCP server. Defaults to `APP_URL`. |

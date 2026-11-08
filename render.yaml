@@ -73,6 +73,11 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Model requests each process (web, worker) may make per UTC day; past it the demo runs without a model until the
+      # next day (judgment goes to the client), so visitors cannot spend the key's whole limit. Raise it on the
+      # Environment page if judges hit it.
+      - key: MILESTONE_MODEL_DAILY_CALLS
+        value: "150"
       # PayPal sandbox, all required with PAYPAL_MODE=sandbox (asked for once, on Blueprint creation; docs/deploy.md).
       # The platform app (Payouts and Vault enabled): checkout, captures, payouts, refunds, receipts, webhook checks.
       - key: PAYPAL_CLIENT_ID
