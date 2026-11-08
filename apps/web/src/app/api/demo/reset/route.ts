@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { json, jsonError, noStore } from "@/lib/http";
+import { json, jsonError, noStore, publicUrl } from "@/lib/http";
 import { DEMO_NOTICE_COOKIE, demoMode } from "../_demo";
 import { clearSimulator, clearUploads, createLimiter, runShowcaseSeed } from "./reset";
 
@@ -18,7 +18,7 @@ function wantsRedirect(req: Request): boolean {
  * the same-origin page it came from.
  */
 function backTo(req: Request, notice: string): URL {
-  const home = new URL("/", req.url);
+  const home = publicUrl("/", req);
   if (notice === "done") return home;
   try {
     const from = new URL(req.headers.get("referer") ?? "");

@@ -4,7 +4,7 @@ import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, 
 import { compileContract, isModelConfigured } from "@milestone/verify";
 import { ensureAup } from "@/lib/aup";
 import { getDb } from "@/lib/db";
-import { jsonError } from "@/lib/http";
+import { jsonError, publicUrl } from "@/lib/http";
 import { RATE_RULES, rateLimited } from "@/lib/rate-limit";
 import { getActor } from "@/lib/session";
 
@@ -54,7 +54,7 @@ const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** A browser form post gets a redirect back to the form with the message; API callers get JSON. */
 function fail(req: Request, error: string, status: number) {
   if ((req.headers.get("accept") ?? "").includes("text/html")) {
-    const url = new URL("/contracts/new", req.url);
+    const url = publicUrl("/contracts/new", req);
     url.searchParams.set("error", error);
     return NextResponse.redirect(url, 303);
   }
@@ -129,5 +129,5 @@ export async function POST(req: Request) {
   });
   // The PayPal Acceptable Use Policy check, before anyone can sign or fund: keywords here, the model in the worker.
   await ensureAup(db, contractId, actor.userId);
-  return NextResponse.redirect(new URL(`/contracts/${contractId}`, req.url), 303);
+  return NextResponse.redirect(publicUrl(`/contracts/${contractId}`, req), 303);
 }

@@ -3,7 +3,7 @@ import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { AUDIT_EVENTS, AUP_REFUSAL_TEXT, audit, auditAupRefusal, aupGateNow, contracts, criteria, criteriaVersion, milestones, type AupRefusal } from "@milestone/core";
 import { ensureAup } from "@/lib/aup";
 import { getDb } from "@/lib/db";
-import { jsonError } from "@/lib/http";
+import { jsonError, publicUrl } from "@/lib/http";
 import { getActor } from "@/lib/session";
 
 /**
@@ -59,9 +59,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (result === "missing") return jsonError("contract not found", 404);
   if (typeof result === "object") {
     await auditAupRefusal(db, { actor: actor.userId, contractId: id, action: "sign", reason: result.aup, via: "approve_route" });
-    if ((req.headers.get("accept") ?? "").includes("text/html")) return NextResponse.redirect(new URL(`/contracts/${id}?aup=${result.aup}`, req.url), 303);
+    if ((req.headers.get("accept") ?? "").includes("text/html")) return NextResponse.redirect(publicUrl(`/contracts/${id}?aup=${result.aup}`, req), 303);
     return jsonError(`cannot sign: ${AUP_REFUSAL_TEXT[result.aup]}`, 409, { reason: result.aup });
   }
 
-  return NextResponse.redirect(new URL(`/contracts/${id}`, req.url), 303);
+  return NextResponse.redirect(publicUrl(`/contracts/${id}`, req), 303);
 }
