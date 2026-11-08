@@ -1,16 +1,57 @@
 import { randomBytes } from "node:crypto";
+import { isSimulatorId } from "@milestone/core";
 
 export interface PayPalConfig {
   clientId: string;
   clientSecret: string;
   env: "sandbox" | "live";
   fetchImpl?: typeof fetch;
+  /**
+   * Refuse, before anything is sent, a request whose path or JSON body names a simulator id ("SIM-..."): PayPal has
+   * never seen one, so the call could only fail, or worse, half-succeed (a payout sent, then the refund of a capture
+   * that never existed). On for clients made from the environment (the real sandbox or live); the simulator's own
+   * client never sets it.
+   */
+  refuseSimulatorIds?: boolean;
 }
 
 export class PayPalError extends Error {
   constructor(public status: number, public body: unknown, public debugId?: string) {
     super(`PayPal ${status}${debugId ? ` (debug_id ${debugId})` : ""}: ${JSON.stringify(body).slice(0, 500)}`);
   }
+}
+
+/**
+ * Thrown before a request leaves the process when it names a simulator id on a real PayPal client. A 422 PayPalError,
+ * so every caller treats it as a definite refusal (nothing moved, no retry): an op claimed for it is recorded failed.
+ */
+export class SimulatorIdError extends PayPalError {
+  constructor(public readonly path: string, public readonly ids: string[]) {
+    super(422, { name: "SIMULATOR_ID", message: `refused before sending: ${ids.join(", ")} ${ids.length === 1 ? "is a simulator id" : "are simulator ids"} (recorded for the showcase), which the real PayPal has never seen`, path, ids });
+    this.name = "SimulatorIdError";
+  }
+}
+
+/** Simulator ids named in a request: path segments and string values of a JSON body (depth-limited). */
+export function simulatorIdsIn(path: string, body: unknown): string[] {
+  const out = new Set<string>();
+  for (const seg of path.split("?")[0]!.split("/")) {
+    let s = seg;
+    try { s = decodeURIComponent(seg); } catch { /* keep raw */ }
+    if (isSimulatorId(s)) out.add(s);
+  }
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 8 || v === null || v === undefined) return;
+    if (typeof v === "string") {
+      if (isSimulatorId(v)) out.add(v);
+    } else if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+    } else if (typeof v === "object") {
+      for (const x of Object.values(v as Record<string, unknown>)) walk(x, depth + 1);
+    }
+  };
+  walk(body, 0);
+  return [...out];
 }
 
 export interface RequestOptions {
@@ -33,7 +74,7 @@ export class PayPalClient {
     const clientId = env[`${prefix}CLIENT_ID`];
     const clientSecret = env[`${prefix}CLIENT_SECRET`];
     if (!clientId || !clientSecret) throw new Error(`${prefix}CLIENT_ID and ${prefix}CLIENT_SECRET are required`);
-    const cfg: PayPalConfig = { clientId, clientSecret, env: env.PAYPAL_ENV === "live" ? "live" : "sandbox" };
+    const cfg: PayPalConfig = { clientId, clientSecret, env: env.PAYPAL_ENV === "live" ? "live" : "sandbox", refuseSimulatorIds: true };
     return new PayPalClient(cfg);
   }
 
@@ -68,11 +109,19 @@ export class PayPalClient {
   }
 
   async request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
+    if (this.cfg.refuseSimulatorIds) {
+      const ids = simulatorIdsIn(path, body);
+      if (ids.length > 0) throw new SimulatorIdError(path, ids);
+    }
     return this.send<T>(method, path, body === undefined ? null : JSON.stringify(body), "application/json", opts);
   }
 
   /** A multipart/form-data POST (e.g. dispute evidence) with the same token, PayPal-Request-Id and error handling. */
   async requestMultipart<T>(path: string, parts: MultipartPart[], opts: RequestOptions = {}): Promise<T> {
+    if (this.cfg.refuseSimulatorIds) {
+      const ids = simulatorIdsIn(path, null);
+      if (ids.length > 0) throw new SimulatorIdError(path, ids);
+    }
     const { body, contentType } = multipartBody(parts);
     return this.send<T>("POST", path, body, contentType, opts);
   }

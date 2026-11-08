@@ -116,6 +116,8 @@ export function eventSentence(event: string, raw: unknown, names: Record<string,
     }
     case "release.blocked_by_dispute":
       return "Release stopped: the payment is disputed";
+    case "release.refused_recorded":
+      return "Release refused: recorded for the showcase with simulator PayPal ids, nothing sent to PayPal";
     case "paypal.payout":
       return `Payout sent to PayPal${amt ? `: ${amt}` : ""}`;
     case "paypal.payout_failed": {

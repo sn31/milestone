@@ -1,6 +1,6 @@
 // PayPal (read side and non-money calls). The money-moving calls stay in ./paypal/money.ts and are
 // reachable only through ./policy/execute.ts — scripts/check-boundaries.mjs enforces it.
-export { PayPalClient, PayPalError, isMoneyPath, multipartBody } from "./paypal/client.ts";
+export { PayPalClient, PayPalError, SimulatorIdError, simulatorIdsIn, isMoneyPath, multipartBody } from "./paypal/client.ts";
 export type { PayPalConfig, RequestOptions, MultipartPart } from "./paypal/client.ts";
 export { createOrder, getOrder, approveLink } from "./paypal/orders.ts";
 export type { CreateOrderInput, Order } from "./paypal/orders.ts";

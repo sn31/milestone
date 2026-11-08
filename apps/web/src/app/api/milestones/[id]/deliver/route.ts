@@ -1,6 +1,7 @@
 import { AUDIT_EVENTS, DELIVERABLE_STATUSES, audit, checkDemoRepo, commitDeliveryId, demoModeOn, deliveries, enqueue, type CommitPayload } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
+import { recordedRefusal } from "@/lib/recorded";
 import { getActor, isContractFreelancer } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
 import { checkRepoUrl, resolveRef, validRef } from "./resolve";
@@ -22,6 +23,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!found) return jsonError("milestone not found", 404);
   const { milestone: m, contract: c } = found;
   if (!isContractFreelancer(actor, c)) return jsonError("only the contract's freelancer can deliver", 403);
+  const recorded = recordedRefusal(m);
+  if (recorded) return recorded;
   if (!DELIVERABLE_STATUSES.has(m.status)) return jsonError(`cannot deliver while milestone is ${m.status}`, 409);
 
   const body = (await req.json().catch(() => null)) as { repoUrl?: unknown; ref?: unknown; title?: unknown; note?: unknown } | null;

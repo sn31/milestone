@@ -226,3 +226,13 @@ describe("simulated PayPal through the same client", () => {
     }
   });
 });
+
+describe("recorded showcase ops on the real sandbox", () => {
+  it("are recognised by a simulator id on the op or in its stored response", async () => {
+    const { isRecordedOp } = await import("../src/jobs/reconcile.ts");
+    expect(isRecordedOp({ paypalId: "SIM-CAP-SHOW410K2F", response: null })).toBe(true);
+    expect(isRecordedOp({ paypalId: null, response: { batch_header: { payout_batch_id: "SIM-BATCH-SHOWB2F7K" } } })).toBe(true);
+    expect(isRecordedOp({ paypalId: "3C679366HH908993F", response: { id: "3C679366HH908993F", status: "COMPLETED" } })).toBe(false);
+    expect(isRecordedOp({ paypalId: null, response: null })).toBe(false);
+  });
+});

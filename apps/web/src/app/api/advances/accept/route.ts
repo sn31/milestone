@@ -4,6 +4,7 @@ import { AUDIT_EVENTS, advances, audit, enqueue, loadMilestone, milestones, payo
 import { describeOffer, loadUnderwriting } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
+import { recordedRefusal } from "@/lib/recorded";
 import { getActor } from "@/lib/session";
 import { advanceView, partnerIdFor } from "../_shared";
 
@@ -42,6 +43,8 @@ export async function POST(req: Request) {
   if (!found) return jsonError("milestone not found", 404);
   const { contract: c } = found;
   if (c.freelancerId !== actor.userId) return jsonError("not your milestone", 403);
+  const recorded = recordedRefusal(found.milestone);
+  if (recorded) return recorded;
 
   const outcome = await db.transaction(async (tx): Promise<Outcome> => {
     const refuse = (error: string, status = 409, reason?: string): Outcome => ({ refused: { error, status, ...(reason ? { reason } : {}) } });

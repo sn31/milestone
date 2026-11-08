@@ -3,8 +3,9 @@
 // against what the app reads in production:
 //   1. only fields, types, runtimes and plans the spec lists; envVars in one of the spec's forms; no sync:false inside
 //      an environment group (the spec forbids it); fromDatabase names a database in this file;
-//   2. the hosted-demo settings: DEMO_MODE=1, DEMO_REPO_URL, PAYPAL_MODE, a generated SIMULATED_WEBHOOK_SECRET, the pre-deploy
-//      migrate + seed, no MILESTONE_ALLOW_LOCAL_REPOS, no Key Value store;
+//   2. the hosted-demo settings: DEMO_MODE=1, DEMO_REPO_URL, PAYPAL_MODE=sandbox with every variable sandbox mode needs
+//      declared sync: false (the list start-render.mjs enforces, which must match packages/core's SANDBOX_REQUIRED_ENV),
+//      a generated SIMULATED_WEBHOOK_SECRET, the pre-deploy migrate + seed, no MILESTONE_ALLOW_LOCAL_REPOS, no Key Value store;
 //   3. every environment variable read in apps/*/src and packages/*/src (tests excluded) is set in the blueprint,
 //      provided by the platform, or listed in the "Optional environment variables" table of docs/deploy.md.
 // No dependencies: a small parser for the YAML subset render.yaml uses (block maps and lists, scalars, comments).
@@ -213,17 +214,26 @@ if (!web) fail("render.yaml: no web service");
 else {
   if (!/predeploy/.test(web.preDeployCommand ?? "")) fail("web service: preDeployCommand must run migrate + seed (scripts/start-render.mjs predeploy)");
   const pre = readFileSync(join(root, "scripts/start-render.mjs"), "utf8");
-  for (const needle of ["migrate", "--showcase", "--if-empty"]) if (!pre.includes(needle)) fail(`scripts/start-render.mjs: predeploy must use ${needle}`);
-  if (!readFileSync(join(root, "packages/core/src/seed.ts"), "utf8").includes('"--if-empty"')) fail("packages/core/src/seed.ts: no --if-empty flag");
+  for (const needle of ["migrate", "--showcase", "--if-empty", "--reset-if-other-mode"]) if (!pre.includes(needle)) fail(`scripts/start-render.mjs: predeploy must use ${needle}`);
+  const seedSrc = readFileSync(join(root, "packages/core/src/seed.ts"), "utf8");
+  for (const flag of ["--if-empty", "--reset-if-other-mode"]) if (!seedSrc.includes(`"${flag}"`)) fail(`packages/core/src/seed.ts: no ${flag} flag`);
+  // The variables sandbox mode needs: the core list, the start script's list and the blueprint agree.
+  const listIn = (text, name) => [.../\[([^\]]*)\]/.exec(text.slice(text.indexOf(name)))?.[1].matchAll(/"([A-Z][A-Z0-9_]+)"/g) ?? []].map((m) => m[1]);
+  const coreRequired = listIn(readFileSync(join(root, "packages/core/src/env.ts"), "utf8"), "SANDBOX_REQUIRED_ENV =");
+  const startRequired = listIn(pre, "SANDBOX_REQUIRED =");
+  if (!coreRequired.length) fail("packages/core/src/env.ts: SANDBOX_REQUIRED_ENV not found");
+  if (coreRequired.join() !== startRequired.join()) fail(`scripts/start-render.mjs SANDBOX_REQUIRED (${startRequired.join(", ")}) differs from packages/core SANDBOX_REQUIRED_ENV (${coreRequired.join(", ")})`);
+  for (const k of coreRequired) if (webEnv.get(k)?.sync !== false) fail(`web service env ${k}: required with PAYPAL_MODE=sandbox; declare it with sync: false (the owner fills it in)`);
   const expect = (key, check, why) => { if (!check(webEnv.get(key))) fail(`web service env ${key}: ${why}`); };
   expect("DATABASE_URL", (v) => v?.fromDatabase?.property === "connectionString", "fromDatabase connectionString");
   expect("DEMO_MODE", (v) => v?.value === "1", 'must be "1" on the hosted demo');
   expect("DEMO_REPO_URL", (v) => v?.sync === false || /^https:\/\//.test(v?.value ?? ""), "the demo lock's repository: sync: false (set by the owner) or an https URL");
-  expect("PAYPAL_MODE", (v) => v?.value === "simulated" || v?.value === "sandbox", "simulated or sandbox");
+  expect("PAYPAL_MODE", (v) => v?.value === "sandbox", 'must be "sandbox": the hosted demo runs on the real PayPal sandbox (simulated is the no-keys local option)');
+  expect("PAYPAL_ENV", (v) => !v || v.value === "sandbox", 'unset or "sandbox", never live');
   expect("SIMULATED_WEBHOOK_SECRET", (v) => v?.generateValue === true, "generateValue: true (required in production)");
   expect("NODE_VERSION", (v) => typeof v?.value === "string" && /^24(\.|$)/.test(v.value), "Node 24 (package.json engines)");
   expect("ANTHROPIC_API_KEY", (v) => !v || v.sync === false, "a secret: sync: false, never a value");
-  for (const secret of ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID", "GITHUB_WEBHOOK_SECRET", "GITHUB_TOKEN", "PAYPAL_PARTNER_CLIENT_SECRET"]) {
+  for (const secret of ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID", "GITHUB_WEBHOOK_SECRET", "GITHUB_TOKEN", "PAYPAL_PARTNER_CLIENT_ID", "PAYPAL_PARTNER_CLIENT_SECRET"]) {
     if (webEnv.get(secret) && webEnv.get(secret).sync !== false) fail(`web service env ${secret}: a secret is sync: false, never a value`);
   }
   for (const banned of ["MILESTONE_ALLOW_LOCAL_REPOS"]) if (webEnv.has(banned)) fail(`web service env ${banned}: leave unset on Render (hosted deliveries are https only)`);

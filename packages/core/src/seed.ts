@@ -19,9 +19,40 @@ const db = createDb();
 const simulated = paypalMode() === "simulated";
 const paypalEmails = seedPaypalEmails();
 
+// Milestones the sandbox showcase records with simulator ids on purpose (display only there, core recordedForShowcase).
+const RECORDED_IN_SANDBOX = ["mst_brand_1", "mst_brand_2", "mst_dash_1"];
+
+/**
+ * Whether the data belongs to the other PayPal mode: on the real sandbox, simulator ids outside the recorded showcase
+ * (a simulated showcase, or milestones visitors funded through the simulator) or a simulator vault token; in simulated
+ * mode, real PayPal ids, which the simulator has never seen. Either way acting on those rows would fail at PayPal.
+ */
+async function dataFromOtherMode(): Promise<string | null> {
+  const recorded = sql.join(RECORDED_IN_SANDBOX.map((id) => sql`${id}`), sql`, `);
+  const q = simulated
+    ? sql`select (select count(*)::int from milestones where (paypal_order_id is not null and paypal_order_id not like 'SIM-%') or (paypal_capture_id is not null and paypal_capture_id not like 'SIM-%'))
+        + (select count(*)::int from payment_methods where removed_at is null and paypal_payment_token_id not like 'SIM-%') as n`
+    : sql`select (select count(*)::int from milestones where (paypal_order_id like 'SIM-%' or paypal_capture_id like 'SIM-%') and id not in (${recorded}))
+        + (select count(*)::int from payment_methods where removed_at is null and paypal_payment_token_id like 'SIM-%') as n`;
+  const [row] = (await db.execute(q)).rows as { n: number }[];
+  if (!row?.n) return null;
+  return simulated ? `${row.n} row(s) with real PayPal ids, which the simulator has never seen` : `${row.n} row(s) with simulator ids outside the recorded showcase, which the real PayPal sandbox has never seen`;
+}
+
+// `--reset-if-other-mode` (Render's pre-deploy passes it): when the data was made in the other PayPal mode (PAYPAL_MODE
+// changed since the last seed), the database is reset and the showcase rebuilt for this mode.
+let forceReset = false;
+if (process.argv.includes("--reset-if-other-mode")) {
+  const why = await dataFromOtherMode();
+  if (why) {
+    console.log(`seed: PAYPAL_MODE=${paypalMode()} and the database holds ${why}; resetting it and seeding the ${paypalMode()} showcase`);
+    forceReset = true;
+  }
+}
+
 // `--if-empty` (Render's pre-deploy runs `seed --showcase --if-empty` on every deploy) seeds only a database whose users
 // table is empty, so the first deploy gets the demo and later deploys leave whatever the demo has become alone.
-if (process.argv.includes("--if-empty")) {
+if (process.argv.includes("--if-empty") && !forceReset) {
   const [existing] = (await db.execute(sql`select count(*)::int as n from users`)).rows as { n: number }[];
   if ((existing?.n ?? 0) > 0) {
     console.log(`seed skipped: --if-empty and the users table has ${existing!.n} rows`);
@@ -29,9 +60,13 @@ if (process.argv.includes("--if-empty")) {
   }
 }
 
+if (!simulated && (!paypalEmails.freelancer || !paypalEmails.partner)) {
+  console.warn("seed: PAYPAL_MODE=sandbox without PAYPAL_FREELANCER_EMAIL and PAYPAL_PARTNER_EMAIL: the demo freelancer and partner get no PayPal receiver, so payouts to them are refused");
+}
+
 // `pnpm db:seed -- --reset` wipes every table before seeding (`--reset-files` also clears var/ simulator state and uploads), so a demo
 // never starts with stale payout rows that would send a milestone to needs_operator.
-if (process.argv.includes("--reset")) {
+if (process.argv.includes("--reset") || forceReset) {
   const { sql } = await import("drizzle-orm");
   await db.execute(sql`truncate table payment_methods, vault_setups, agent_mandates, audit_log, ledger_entries, webhook_events, paypal_ops, advances, deliveries, criteria, milestones, contracts, users restart identity cascade`);
   // Shared files (simulator state, uploaded deliveries) live in the repo's var/ and belong to whichever database uses them,
@@ -231,7 +266,11 @@ for (let i = 1; i <= 5; i++) {
 }
 
 // `pnpm db:seed -- --showcase` (combinable with --reset) puts the demo milestones into every state once, so each screen
-// has something to show without running the worker: funded, review (window open), released, needs_client (partial),
+// has something to show without running the worker. On the real PayPal sandbox (PAYPAL_MODE=sandbox) the signup
+// contract's three milestones stay drafts, funded for real through PayPal's checkout, and only the other showcase
+// states are written: they carry simulator ids and are display only there (core recordedForShowcase: the page marks
+// them "recorded for the showcase", the routes refuse actions on them and the jobs never send their ids to PayPal).
+// In simulated mode every state is written: funded, review (window open), released, needs_client (partial),
 // held after a failed payout (the operator case) and a second client's funded milestone with an open advance. Rows have fixed ids, so a rerun refreshes them in place. No PayPal simulator state is written: the showcase ids
 // are display data, not live orders, so acting on them (e.g. confirming the partial) will not reach the simulator. A payout
 // needs no order, so mst_2's review window gets a real release job (the seed queues it; the worker runs it when the window closes).
@@ -357,92 +396,104 @@ if (process.argv.includes("--showcase")) {
   const [m1, m2, m3, b1, b2, h1] = all as [Ms, Ms, Ms, Ms, Ms, Ms, Ms];
   const repo = `${demoRepoUrl() ?? `https://github.com/${demoRepo}`}.git`;
 
-  // mst_1: funded, waiting for a delivery.
-  await fund(m1, 50, 1);
-  await advance(m1, { id: "adv_show_open", principalMinor: 4000, feeBpsPerDay: 10, days: 7, pFail: 0.12, expectedLossMinor: 240, acceptedAgo: 30, fundedAgo: 29 });
+  // The live path on the real sandbox: the signup contract's milestones are drafts with nothing left from an earlier
+  // run, and no release job is queued for them.
+  const live = [m1, m2, m3];
+  if (!simulated) {
+    for (const m of live) {
+      await db.update(milestones).set({ status: "draft", paypalOrderId: null, paypalCaptureId: null, baselineSha: null, decision: null, decidedAt: null, reviewEndsAt: null, clientResponse: null }).where(eq(milestones.id, m.id));
+      await dropQueuedJobs("release", m.id);
+    }
+  }
 
-  // mst_2: delivered as PR #7, verified pass, in review with the contract's window (48 h unless REVIEW_WINDOW_SECONDS) open.
-  await fund(m2, 48, 2);
-  const sha2 = sha("pr-7-head").slice(0, 40);
-  const d2 = await deliver(m2, {
-    deliveryId: "dlv_show_2",
-    ago: 9,
-    source: "github_pr",
-    ref: `${demoRepo}#7`,
-    payload: { sha: sha2, title: "Account creation API and confirmation page", body: "Adds POST /api/accounts, the confirmation page and tests.", branch: "feat/accounts", clone_url: repo, base_sha: sha("baseline-mst_2").slice(0, 40), pr: 7 },
-    evidence: [
-      { id: "ev_2_tests", criterion_id: "crt_2_tests", kind: "log", status: "pass", summary: "npm test: 14 passed, 0 failed in 2.8 s", text: "> landing@1.2.0 test\n> node --test\n\n# tests 14\n# suites 4\n# pass 14\n# fail 0\n# duration_ms 2811" },
-      { id: "ev_2_tamper", criterion_id: "crt_2_tests", kind: "diff", status: "pass", summary: "No changes to existing tests, package.json scripts, lockfile or CI config since the baseline" },
-      { id: "ev_2_file", criterion_id: "crt_2_file", kind: "file", status: "pass", summary: "public/pricing.html exists (3.1 KB)", uri: "public/pricing.html", sha256: sha("pricing.html") },
-      { id: "ev_2_diff", criterion_id: "crt_2_judge", kind: "diff", summary: "+212 -18 across 6 files: src/accounts.js, src/routes.js, public/confirm.html, public/pricing.html, test/accounts.test.js, README.md" },
-      { id: "ev_2_shot", criterion_id: "crt_2_judge", kind: "screenshot", summary: "Confirmation page at 1280 px: heading, account email echoed, link back to the dashboard" },
-    ],
-    criteria: [
-      { criterion_id: "crt_2_tests", status: "pass", confidence: 0.98, evidence_ids: ["ev_2_tests", "ev_2_tamper"], rationale: "All 14 tests pass, including the 5 new account tests; no existing test or script was modified." },
-      { criterion_id: "crt_2_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_2_file"], rationale: "The expected file is present and non-empty." },
-      { criterion_id: "crt_2_judge", status: "pass", confidence: 0.91, evidence_ids: ["ev_2_diff", "ev_2_shot"], rationale: "The PR adds the account endpoint and a confirmation page that matches the milestone description." },
-    ],
-    result: "pass",
-    decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
-  });
-  // The window opens when the verdict lands and lasts the contract's review window, as verify.ts sets it, and the release
-  // job that closes it is queued now, as verify.ts queues it: when the window runs out the worker releases mst_2 (or
-  // the client's Approve releases it first), so the ring never sits at "releasing" with no job behind it.
-  const [ctr2] = await db.select({ windowSeconds: contracts.reviewWindowSeconds }).from(contracts).where(eq(contracts.id, m2.contractId));
-  const ends2 = new Date(d2.verified.getTime() + reviewWindowSeconds(ctr2!.windowSeconds) * 1000);
-  await setStatus(m2.id, "review", { reviewEndsAt: ends2 });
-  await auditRow(m2, "policy", "milestone.review", d2.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_2", action: "release", ruleIds: ["P6"], reviewEndsAt: ends2.toISOString() });
-  // A release job an earlier seed queued for mst_2 would hold the dedupe key (and fire against this delivery's window), so drop it first.
-  await dropQueuedJobs("release", m2.id);
-  await enqueue("release", m2.id, { deliveryId: "dlv_show_2" }, { delaySeconds: releaseDelaySeconds(ends2, new Date()), dedupe: "dlv_show_2" });
+  if (simulated) {
+    // mst_1: funded, waiting for a delivery.
+    await fund(m1, 50, 1);
+    await advance(m1, { id: "adv_show_open", principalMinor: 4000, feeBpsPerDay: 10, days: 7, pFail: 0.12, expectedLossMinor: 240, acceptedAgo: 30, fundedAgo: 29 });
 
-  // mst_3: released, payout confirmed by webhook, ledger held -> freelancer.
-  await fund(m3, 46, 3);
-  const adv3 = await advance(m3, { id: "adv_show_repaid", principalMinor: 5000, feeBpsPerDay: 10, days: 8, pFail: 0.1, expectedLossMinor: 250, acceptedAgo: 44, fundedAgo: 43 });
-  const fee3 = adv3.expectedFeeMinor;
-  const partner3 = 5000 + fee3;
-  const freelancer3 = m3.amountMinor - partner3;
-  const d3 = await deliver(m3, {
-    deliveryId: "dlv_show_3",
-    ago: 40,
-    source: "github_pr",
-    ref: `${demoRepo}#9`,
-    payload: { sha: sha("pr-9-head").slice(0, 40), title: "Polish, accessibility and docs", body: "Labels, focus order, contrast fixes and a README.", branch: "chore/a11y-docs", clone_url: repo, base_sha: sha("baseline-mst_3").slice(0, 40), pr: 9 },
-    evidence: [
-      { id: "ev_3_tests", criterion_id: "crt_3_tests", kind: "log", status: "pass", summary: "npm test: 17 passed, 0 failed in 3.1 s", text: "# tests 17\n# pass 17\n# fail 0" },
-      { id: "ev_3_file", criterion_id: "crt_3_file", kind: "file", status: "pass", summary: "README.md exists (4.6 KB) with Setup and Accessibility sections", uri: "README.md", sha256: sha("README.md") },
-      { id: "ev_3_note", criterion_id: "crt_3_judge", kind: "note", summary: "Every form control has a label; tab order follows the visual order" },
-    ],
-    criteria: [
-      { criterion_id: "crt_3_tests", status: "pass", confidence: 0.97, evidence_ids: ["ev_3_tests"], rationale: "The suite passes and no existing test changed." },
-      { criterion_id: "crt_3_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_3_file"], rationale: "README.md is present with setup steps." },
-      { criterion_id: "crt_3_judge", status: "pass", confidence: 0.88, evidence_ids: ["ev_3_note"], rationale: "The accessibility fixes and docs match the milestone description." },
-    ],
-    result: "pass",
-    decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
-  });
-  const ends3 = min(-12);
-  await setStatus(m3.id, "review", { reviewEndsAt: ends3 });
-  await auditRow(m3, "policy", "milestone.review", d3.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_3", action: "release", ruleIds: ["P6"], reviewEndsAt: ends3.toISOString() });
-  const batchId = "SIM-BATCH-SHOW3X9QZ";
-  const itemId = "SIM-ITEM-SHOW3L4MW";
-  await op("payout", m3.id, batchId, min(-11), { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" }, items: { partner: { status: "succeeded", amountMinor: partner3, payoutItemId: `${itemId}P`, eventId: "WH-SHOW3P" }, freelancer: { status: "succeeded", amountMinor: freelancer3, payoutItemId: itemId, eventId: "WH-SHOW3F" } } });
-  await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: freelancer3, partnerShareMinor: partner3, refundMinor: 0, advanceId: "adv_show_repaid" });
-  await auditRow(m3, "paypal", "paypal.payout", min(-11), { deliveryId: "dlv_show_3", payoutBatchId: batchId, amountMinor: 10000, currency: "USD" });
-  // settle.ts books one transaction per paid item: the partner's (principal to receivable, fee to fees), then the freelancer's.
-  await post("txn_show_release_mst_3_partner", ledgerRefs.release("mst_3", "partner"), min(-10), [
-    { account: "held:mst_3", amountMinor: partner3, direction: "debit" },
-    { account: "partner:usr_partner:receivable", amountMinor: 5000, direction: "credit" },
-    { account: "partner:usr_partner:fees", amountMinor: fee3, direction: "credit" },
-  ]);
-  await post("txn_show_release_mst_3", ledgerRefs.release("mst_3"), min(-10), [
-    { account: "held:mst_3", amountMinor: freelancer3, direction: "debit" },
-    { account: "freelancer:usr_freelancer", amountMinor: freelancer3, direction: "credit" },
-  ]);
-  await db.update(advances).set({ status: "repaid", repaidAt: min(-10) }).where(sql`id = 'adv_show_repaid'`);
-  await auditRow(m3, "paypal", "advance.repaid", min(-10), { advanceId: "adv_show_repaid", advanceMilestoneId: "mst_3", carried: false, partnerId: "usr_partner", owedMinor: partner3, paidMinor: partner3, principalPaidMinor: 5000, feePaidMinor: fee3, remainingMinor: 0, payoutBatchId: batchId });
-  await setStatus(m3.id, "released");
-  await auditRow(m3, "paypal", "milestone.released", min(-10), { from: "review", to: "released", eventType: "PAYMENT.PAYOUTS-ITEM.SUCCEEDED", payoutBatchId: batchId, payoutItemId: itemId, amountMinor: 10000, refundMinor: 0, currency: "USD", freelancerId: "usr_freelancer", verifiedPass: true });
+    // mst_2: delivered as PR #7, verified pass, in review with the contract's window (48 h unless REVIEW_WINDOW_SECONDS) open.
+    await fund(m2, 48, 2);
+    const sha2 = sha("pr-7-head").slice(0, 40);
+    const d2 = await deliver(m2, {
+      deliveryId: "dlv_show_2",
+      ago: 9,
+      source: "github_pr",
+      ref: `${demoRepo}#7`,
+      payload: { sha: sha2, title: "Account creation API and confirmation page", body: "Adds POST /api/accounts, the confirmation page and tests.", branch: "feat/accounts", clone_url: repo, base_sha: sha("baseline-mst_2").slice(0, 40), pr: 7 },
+      evidence: [
+        { id: "ev_2_tests", criterion_id: "crt_2_tests", kind: "log", status: "pass", summary: "npm test: 14 passed, 0 failed in 2.8 s", text: "> landing@1.2.0 test\n> node --test\n\n# tests 14\n# suites 4\n# pass 14\n# fail 0\n# duration_ms 2811" },
+        { id: "ev_2_tamper", criterion_id: "crt_2_tests", kind: "diff", status: "pass", summary: "No changes to existing tests, package.json scripts, lockfile or CI config since the baseline" },
+        { id: "ev_2_file", criterion_id: "crt_2_file", kind: "file", status: "pass", summary: "public/pricing.html exists (3.1 KB)", uri: "public/pricing.html", sha256: sha("pricing.html") },
+        { id: "ev_2_diff", criterion_id: "crt_2_judge", kind: "diff", summary: "+212 -18 across 6 files: src/accounts.js, src/routes.js, public/confirm.html, public/pricing.html, test/accounts.test.js, README.md" },
+        { id: "ev_2_shot", criterion_id: "crt_2_judge", kind: "screenshot", summary: "Confirmation page at 1280 px: heading, account email echoed, link back to the dashboard" },
+      ],
+      criteria: [
+        { criterion_id: "crt_2_tests", status: "pass", confidence: 0.98, evidence_ids: ["ev_2_tests", "ev_2_tamper"], rationale: "All 14 tests pass, including the 5 new account tests; no existing test or script was modified." },
+        { criterion_id: "crt_2_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_2_file"], rationale: "The expected file is present and non-empty." },
+        { criterion_id: "crt_2_judge", status: "pass", confidence: 0.91, evidence_ids: ["ev_2_diff", "ev_2_shot"], rationale: "The PR adds the account endpoint and a confirmation page that matches the milestone description." },
+      ],
+      result: "pass",
+      decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
+    });
+    // The window opens when the verdict lands and lasts the contract's review window, as verify.ts sets it, and the release
+    // job that closes it is queued now, as verify.ts queues it: when the window runs out the worker releases mst_2 (or
+    // the client's Approve releases it first), so the ring never sits at "releasing" with no job behind it.
+    const [ctr2] = await db.select({ windowSeconds: contracts.reviewWindowSeconds }).from(contracts).where(eq(contracts.id, m2.contractId));
+    const ends2 = new Date(d2.verified.getTime() + reviewWindowSeconds(ctr2!.windowSeconds) * 1000);
+    await setStatus(m2.id, "review", { reviewEndsAt: ends2 });
+    await auditRow(m2, "policy", "milestone.review", d2.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_2", action: "release", ruleIds: ["P6"], reviewEndsAt: ends2.toISOString() });
+    // A release job an earlier seed queued for mst_2 would hold the dedupe key (and fire against this delivery's window), so drop it first.
+    await dropQueuedJobs("release", m2.id);
+    await enqueue("release", m2.id, { deliveryId: "dlv_show_2" }, { delaySeconds: releaseDelaySeconds(ends2, new Date()), dedupe: "dlv_show_2" });
+
+    // mst_3: released, payout confirmed by webhook, ledger held -> freelancer.
+    await fund(m3, 46, 3);
+    const adv3 = await advance(m3, { id: "adv_show_repaid", principalMinor: 5000, feeBpsPerDay: 10, days: 8, pFail: 0.1, expectedLossMinor: 250, acceptedAgo: 44, fundedAgo: 43 });
+    const fee3 = adv3.expectedFeeMinor;
+    const partner3 = 5000 + fee3;
+    const freelancer3 = m3.amountMinor - partner3;
+    const d3 = await deliver(m3, {
+      deliveryId: "dlv_show_3",
+      ago: 40,
+      source: "github_pr",
+      ref: `${demoRepo}#9`,
+      payload: { sha: sha("pr-9-head").slice(0, 40), title: "Polish, accessibility and docs", body: "Labels, focus order, contrast fixes and a README.", branch: "chore/a11y-docs", clone_url: repo, base_sha: sha("baseline-mst_3").slice(0, 40), pr: 9 },
+      evidence: [
+        { id: "ev_3_tests", criterion_id: "crt_3_tests", kind: "log", status: "pass", summary: "npm test: 17 passed, 0 failed in 3.1 s", text: "# tests 17\n# pass 17\n# fail 0" },
+        { id: "ev_3_file", criterion_id: "crt_3_file", kind: "file", status: "pass", summary: "README.md exists (4.6 KB) with Setup and Accessibility sections", uri: "README.md", sha256: sha("README.md") },
+        { id: "ev_3_note", criterion_id: "crt_3_judge", kind: "note", summary: "Every form control has a label; tab order follows the visual order" },
+      ],
+      criteria: [
+        { criterion_id: "crt_3_tests", status: "pass", confidence: 0.97, evidence_ids: ["ev_3_tests"], rationale: "The suite passes and no existing test changed." },
+        { criterion_id: "crt_3_file", status: "pass", confidence: 0.99, evidence_ids: ["ev_3_file"], rationale: "README.md is present with setup steps." },
+        { criterion_id: "crt_3_judge", status: "pass", confidence: 0.88, evidence_ids: ["ev_3_note"], rationale: "The accessibility fixes and docs match the milestone description." },
+      ],
+      result: "pass",
+      decision: { action: "release", amountMinor: 10000, ruleIds: ["P6"], reason: "Every criterion passed at or above the confidence threshold." },
+    });
+    const ends3 = min(-12);
+    await setStatus(m3.id, "review", { reviewEndsAt: ends3 });
+    await auditRow(m3, "policy", "milestone.review", d3.verified, { from: "verifying", to: "review", deliveryId: "dlv_show_3", action: "release", ruleIds: ["P6"], reviewEndsAt: ends3.toISOString() });
+    const batchId = "SIM-BATCH-SHOW3X9QZ";
+    const itemId = "SIM-ITEM-SHOW3L4MW";
+    await op("payout", m3.id, batchId, min(-11), { batch_header: { payout_batch_id: batchId, batch_status: "SUCCESS" }, items: { partner: { status: "succeeded", amountMinor: partner3, payoutItemId: `${itemId}P`, eventId: "WH-SHOW3P" }, freelancer: { status: "succeeded", amountMinor: freelancer3, payoutItemId: itemId, eventId: "WH-SHOW3F" } } });
+    await auditRow(m3, "system", "release.claimed", min(-11.5), { deliveryId: "dlv_show_3", action: "release", freelancerShareMinor: freelancer3, partnerShareMinor: partner3, refundMinor: 0, advanceId: "adv_show_repaid" });
+    await auditRow(m3, "paypal", "paypal.payout", min(-11), { deliveryId: "dlv_show_3", payoutBatchId: batchId, amountMinor: 10000, currency: "USD" });
+    // settle.ts books one transaction per paid item: the partner's (principal to receivable, fee to fees), then the freelancer's.
+    await post("txn_show_release_mst_3_partner", ledgerRefs.release("mst_3", "partner"), min(-10), [
+      { account: "held:mst_3", amountMinor: partner3, direction: "debit" },
+      { account: "partner:usr_partner:receivable", amountMinor: 5000, direction: "credit" },
+      { account: "partner:usr_partner:fees", amountMinor: fee3, direction: "credit" },
+    ]);
+    await post("txn_show_release_mst_3", ledgerRefs.release("mst_3"), min(-10), [
+      { account: "held:mst_3", amountMinor: freelancer3, direction: "debit" },
+      { account: "freelancer:usr_freelancer", amountMinor: freelancer3, direction: "credit" },
+    ]);
+    await db.update(advances).set({ status: "repaid", repaidAt: min(-10) }).where(sql`id = 'adv_show_repaid'`);
+    await auditRow(m3, "paypal", "advance.repaid", min(-10), { advanceId: "adv_show_repaid", advanceMilestoneId: "mst_3", carried: false, partnerId: "usr_partner", owedMinor: partner3, paidMinor: partner3, principalPaidMinor: 5000, feePaidMinor: fee3, remainingMinor: 0, payoutBatchId: batchId });
+    await setStatus(m3.id, "released");
+    await auditRow(m3, "paypal", "milestone.released", min(-10), { from: "review", to: "released", eventType: "PAYMENT.PAYOUTS-ITEM.SUCCEEDED", payoutBatchId: batchId, payoutItemId: itemId, amountMinor: 10000, refundMinor: 0, currency: "USD", freelancerId: "usr_freelancer", verifiedPass: true });
+  } // simulated: mst_1 to mst_3
 
   // mst_brand_1: logo and guide pass, the optional judgment fails: partial (P5), waiting for the client.
   await fund(b1, 120, 4);
@@ -560,11 +611,12 @@ if (process.argv.includes("--showcase")) {
   });
   agentToken = token;
 
-  showcase = all.length;
+  showcase = simulated ? all.length : all.length - live.length;
 }
 
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
-console.log(`seed ok: ${userRows.length} users, 4 contracts (ctr_aup flagged by the PayPal AUP check), ${3 + brandMilestones.length + dashMilestones.length + 1} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held after a failed payout, second client funded, draft)` : ""}`);
+const placed = simulated ? "funded, review, released, needs_client, held after a failed payout, second client funded, draft" : "recorded for the showcase (simulator ids, display only on the real sandbox): needs_client, held after a failed payout, second client funded; the signup contract's three milestones are drafts to fund through PayPal";
+console.log(`seed ok (PAYPAL_MODE=${paypalMode()}): ${userRows.length} users, 4 contracts (ctr_aup flagged by the PayPal AUP check), ${3 + brandMilestones.length + dashMilestones.length + 1} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (${placed})` : ""}`);
 if (agentToken) console.log(`showcase agent mandate mdt_show_casey (Casey's agent, approve up to 200.00 USD, fund up to 200.00 USD a milestone and 500.00 USD in all${savedPayPal ? " from saved PayPal pm_show_casey" : ", no saved PayPal outside simulated mode"}, 30 days). Bearer token, shown once: ${agentToken}`);
 process.exit(0);

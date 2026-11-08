@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AUDIT_EVENTS, UploadPayload, aupGate, advances, suggestedRepoUrl, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { AUDIT_EVENTS, UploadPayload, aupGate, advances, recordedForShowcase, suggestedRepoUrl, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { advanceRepayment, paypalMode } from "@milestone/money";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db";
@@ -80,6 +80,19 @@ function Note({ tone, children }: { tone?: ToneKey; children: ReactNode }) {
     <p data-tone={tone ?? "neutral"} className="flex items-baseline gap-2.5 text-[13.5px] leading-relaxed text-fg-muted">
       <span aria-hidden className="size-1.5 shrink-0 translate-y-[-1px] rounded-full bg-tone" />
       <span className="min-w-0">{children}</span>
+    </p>
+  );
+}
+
+/**
+ * A milestone the showcase seed recorded with simulator PayPal ids, on a host that talks to the real PayPal sandbox:
+ * shown as it was recorded, with no actions (the routes refuse them too; core recordedForShowcase).
+ */
+function RecordedNote() {
+  return (
+    <p data-testid="recorded-showcase" className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-[13px] leading-relaxed text-fg-muted">
+      <span className="rounded-chip border border-dashed border-hairline-strong px-1.5 py-0.5 font-mono text-[10.5px] tracking-[0.1em] text-fg-faint uppercase">Recorded for the showcase</span>
+      <span className="min-w-0">Simulator PayPal ids, display only on the real sandbox. Fund a draft milestone with PayPal to run this step for real.</span>
     </p>
   );
 }
@@ -215,8 +228,10 @@ export function MilestoneActions({
   injection,
 }: MilestoneActionsProps) {
   const status = view ?? milestone.status;
-  const isClient = isContractClient(actor, contract);
-  const isFreelancer = isContractFreelancer(actor, contract);
+  // Recorded showcase rows on the real sandbox: no fund, deliver, advance or review actions (RecordedNote instead).
+  const recorded = recordedForShowcase(milestone);
+  const isClient = isContractClient(actor, contract) && !recorded;
+  const isFreelancer = isContractFreelancer(actor, contract) && !recorded;
   const decision = milestone.decision ?? null;
   // The decision belongs to the delivery it was made for: once a new delivery is in, its receipt carries no stamp yet.
   const decidedId = decisionDeliveryId(decision);
@@ -270,7 +285,7 @@ export function MilestoneActions({
       break;
     }
     case "funded": {
-      const form = deliverFor(milestone, contract, actor, crit);
+      const form = recorded ? null : deliverFor(milestone, contract, actor, crit);
       const advance = isFreelancer && milestone.advanceEligible ? <AdvanceOffer milestoneId={milestone.id} compact /> : null;
       body = (
         <>
@@ -369,7 +384,7 @@ export function MilestoneActions({
             passes or an operator resolves it.
           </Note>
           {delivery ? receipt : null}
-          {deliverFor(milestone, contract, actor, crit)}
+          {recorded ? null : deliverFor(milestone, contract, actor, crit)}
         </>
       );
       break;
@@ -406,6 +421,7 @@ export function MilestoneActions({
       {/* Which step only matters while the money is in escrow: a draft has everything ahead, a payout everything behind. */}
       {status !== "draft" && status !== "released" && status !== "partial_released" ? <LifecycleTrack status={status} /> : null}
       {status !== "draft" && status !== "released" && status !== "partial_released" ? <VaultFundedBy milestone={milestone} /> : null}
+      {recorded ? <RecordedNote /> : null}
       {body}
     </div>
   );

@@ -20,6 +20,7 @@ import {
 } from "@milestone/core";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
+import { recordedRefusal } from "@/lib/recorded";
 import { getActor, isContractClient, resolveAgentActor, type Actor, type AgentActor } from "@/lib/session";
 import { loadMilestone } from "../../_shared";
 
@@ -77,6 +78,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!found) return jsonError("milestone not found", 404);
   const { contract: c } = found;
   if (!isContractClient(actor, c)) return jsonError("only the contract's client can respond", 403);
+  const recorded = recordedRefusal(found.milestone);
+  if (recorded) return recorded;
 
   const body = (await req.json().catch(() => null)) as { action?: unknown } | null;
   const action = ACTIONS.find((a) => a === body?.action);

@@ -4,6 +4,7 @@ import {
   AUDIT_EVENTS,
   OP_KINDS,
   PolicyDecision,
+  RECORDED_SHOWCASE_TEXT,
   RELEASABLE_STATUSES,
   advances as advancesTable,
   asRecord,
@@ -16,6 +17,7 @@ import {
   milestones,
   paypalOps,
   payoutReceiver,
+  recordedForShowcase,
   requiredNotPassed,
   transition,
   type Db,
@@ -459,6 +461,10 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       await flagNeedsOperator(tx, m, { actor: "system", reason, detail: { ...detail, deliveryId: jobDeliveryId } });
       return null;
     };
+    // A milestone the showcase seed recorded with simulator ids, on the real sandbox: its capture never existed at
+    // PayPal, so a payout would pay out money that was never captured and a refund would fail after it. Nothing is
+    // claimed and nothing changes; the page shows the milestone as recorded for the showcase.
+    if (recordedForShowcase(m)) return note(AUDIT_EVENTS.releaseRefusedRecorded, RECORDED_SHOWCASE_TEXT, { paypalCaptureId: m.paypalCaptureId, paypalOrderId: m.paypalOrderId });
     const decId = decisionDeliveryId(m.decision);
     const ops = await releaseOps(tx, milestoneId);
     const opList = [ops.payout, ops.refund].filter((o): o is OpRow => o !== undefined);

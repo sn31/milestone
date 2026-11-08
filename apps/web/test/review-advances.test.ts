@@ -87,6 +87,27 @@ describe.skipIf(!e2e)("review and advance routes against Postgres", () => {
       expect(state.enqueued).toHaveLength(0);
     });
 
+    it("409 recorded_for_showcase on a milestone recorded with simulator ids when PayPal is the real sandbox", async () => {
+      const id = await milestone("recorded", { status: "needs_client", paypalOrderId: "SIM-ORD-SHOW410A7Q", paypalCaptureId: "SIM-CAP-SHOW410K2F" });
+      const saved = process.env.PAYPAL_MODE;
+      process.env.PAYPAL_MODE = "sandbox";
+      try {
+        const res = await call(id, "approve");
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ reason: "recorded_for_showcase" });
+        actAs("usr_freelancer", "freelancer");
+        const adv = await acceptReq(id);
+        expect(adv.status).toBe(409);
+        expect(await adv.json()).toMatchObject({ reason: "recorded_for_showcase" });
+      } finally {
+        if (saved === undefined) delete process.env.PAYPAL_MODE;
+        else process.env.PAYPAL_MODE = saved;
+      }
+      expect(state.enqueued).toHaveLength(0);
+      const m = await db.query.milestones.findFirst({ where: eq(core.milestones.id, id) });
+      expect(m?.clientResponse ?? null).toBeNull();
+    });
+
     it("400 for an unknown action", async () => {
       expect((await call(mid("auth"), "burn")).status).toBe(400);
     });

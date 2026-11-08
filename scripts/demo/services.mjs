@@ -110,11 +110,16 @@ export function chromePath() {
   return found;
 }
 
-/** Headless Chrome with its own profile and debugging port, 1440x900. */
-export async function startChrome({ port, profileDir, logFile, width, height }) {
+/**
+ * Headless Chrome with its own profile and debugging port, 1440x900. `headed` opens a real window instead (PayPal's
+ * sandbox login can treat headless Chrome as a bot); `userAgent` replaces Chrome's own (headless Chrome says
+ * "HeadlessChrome" in it).
+ */
+export async function startChrome({ port, profileDir, logFile, width, height, headed = false, userAgent = null }) {
   rmSync(profileDir, { recursive: true, force: true });
   const proc = start("chrome", chromePath(), [
-    "--headless=new",
+    ...(headed ? [] : ["--headless=new"]),
+    ...(userAgent ? [`--user-agent=${userAgent}`] : []),
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
     `--window-size=${width},${height}`,

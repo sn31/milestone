@@ -1,7 +1,9 @@
 // The demo beats (the demo video's storyline), driven through the real UI. Each beat gets a short hold at the end so the
 // state it reached is on screen long enough to cut. Off-camera setup (funding a milestone the script funds "off
 // camera", arming the payout failure) runs with the recorder paused, so it is not in the video.
+// A beat with `paypal: "simulated"` or `paypal: "sandbox"` runs only in that PayPal mode (record-demo.mjs --paypal).
 import { sleep } from "./cdp.mjs";
+import { sandboxCheckout, sandboxVaultApproval } from "./paypal.mjs";
 
 const M1 = "Signup form and validation";
 const M2 = "Account creation API and confirmation page";
@@ -51,12 +53,21 @@ async function unfold(ctx, title) {
   }
 }
 
-/** Client funds a milestone with the simulated PayPal button (create order, approve page, back, capture). */
+/**
+ * Client funds a milestone: with the simulated PayPal button (create order, approve page, back, capture), or on the
+ * real sandbox through PayPal's checkout window (log in as the sandbox buyer, approve; the app captures).
+ */
 async function fund(ctx, title, id) {
   const { d } = ctx;
   await d.role("usr_client");
-  await d.click({ within: title, text: "Fund" });
-  await waitStatus(ctx, id, ["funded"], 60_000);
+  if (ctx.paypal === "sandbox") {
+    await sandboxCheckout(ctx, title);
+    await waitStatus(ctx, id, ["funded"], 90_000);
+    ctx.note(`${id} funded through PayPal's sandbox checkout: capture ${ctx.db(`select paypal_capture_id from milestones where id='${id}'`)}`);
+  } else {
+    await d.click({ within: title, text: "Fund" });
+    await waitStatus(ctx, id, ["funded"], 60_000);
+  }
   await d.settle(1200);
 }
 
@@ -92,6 +103,8 @@ async function agentSetup(ctx) {
   await d.go("/agents");
   await sleep(1000);
   await d.click({ text: "Save PayPal for agent payments" });
+  // On the real sandbox the page goes to PayPal, where the buyer logs in and agrees, and comes back.
+  if (ctx.paypal === "sandbox") await sandboxVaultApproval(ctx);
   await waitDb(ctx, "select count(*) from payment_methods where user_id='usr_client' and removed_at is null", (n) => Number(n) > 0, { timeout: 60_000, what: "Casey's saved PayPal" });
   ctx.mark("saved");
   ctx.note(`saved PayPal: ${ctx.db("select paypal_payment_token_id from payment_methods where user_id='usr_client' and removed_at is null limit 1")}`);
@@ -119,7 +132,7 @@ export const BEATS = [
   },
   {
     id: "fund",
-    title: "Client funds milestone 1 with simulated PayPal",
+    title: "Client funds milestone 1 with PayPal",
     script: "Fund, 0:15 to 0:30",
     async run(ctx) {
       const { d } = ctx;
@@ -252,6 +265,8 @@ export const BEATS = [
     id: "files",
     title: "Bakery: upload a logo and a PDF style guide",
     script: "Files too, 1:50 to 2:00",
+    // Arms a simulated payout failure, and on the real sandbox the bakery milestone is recorded for the showcase.
+    paypal: "simulated",
     async run(ctx) {
       const { d } = ctx;
       await ctx.offCamera(async () => {
@@ -301,6 +316,7 @@ export const BEATS = [
     id: "ops",
     title: "Armed payout failure: bakery release held, resolved on /ops",
     script: "Under the hood (optional beat)",
+    paypal: "simulated",
     async run(ctx) {
       const { d } = ctx;
       await d.go("/contracts/ctr_brand");
@@ -328,6 +344,34 @@ export const BEATS = [
       await d.type({ selector: "input[placeholder^='Paid the freelancer']" }, "Freelancer fixed their PayPal email; paid by hand, batch DEMO-1.");
       await d.click({ text: "Mark resolved" });
       await waitDb(ctx, "select count(*) from audit_log where milestone_id='mst_brand_1' and event='ops.resolved'", (n) => Number(n) > 0, { timeout: 30_000, what: "ops.resolved" });
+      ctx.mark("resolved");
+      await sleep(1200);
+      await d.reload();
+    },
+  },
+  {
+    id: "ops-recorded",
+    title: "The operator queue on /ops: a recorded payout failure, resolved by hand",
+    script: "Under the hood (optional beat)",
+    // The real sandbox cannot be told to fail a payout: the showcase's recorded case (website copy, held) stands in.
+    paypal: "sandbox",
+    async run(ctx) {
+      const { d } = ctx;
+      await d.role("usr_partner");
+      await d.go("/ops");
+      ctx.mark("ops");
+      await sleep(ctx.holdMs);
+      if (status(ctx, "mst_brand_2") !== "held") {
+        ctx.note("no recorded operator case (the database was seeded without --showcase)");
+        return;
+      }
+      if (Number(ctx.db("select count(*) from audit_log where milestone_id='mst_brand_2' and event='ops.resolved'")) > 0) {
+        ctx.note("the recorded operator case was resolved already");
+        return;
+      }
+      await d.type({ selector: "input[placeholder^='Paid the freelancer']" }, "Freelancer fixed their PayPal email; paid by hand, batch DEMO-1.");
+      await d.click({ text: "Mark resolved" });
+      await waitDb(ctx, "select count(*) from audit_log where milestone_id='mst_brand_2' and event='ops.resolved'", (n) => Number(n) > 0, { timeout: 30_000, what: "ops.resolved" });
       ctx.mark("resolved");
       await sleep(1200);
       await d.reload();

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { paypalMode } from "@milestone/core";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import { DemoBanner } from "@/components/demo-banner";
 import { RoleSwitcher } from "@/components/role-switcher";
@@ -86,7 +87,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
           <div className="mx-auto w-full max-w-content flex-1 px-4 py-10 sm:px-6 sm:py-14">{children}</div>
           <footer className="border-t border-hairline">
             <div className="mx-auto flex w-full max-w-content flex-col gap-2 px-4 py-6 font-mono text-[11px] text-fg-faint sm:flex-row sm:items-center sm:justify-between sm:px-6">
-              <p>Demo identities. PayPal runs in sandbox or simulated mode.</p>
+              <p>Demo identities. {paypalMode() === "sandbox" ? "PayPal: the real sandbox, test accounts only." : "PayPal: simulated, no real money."}</p>
               <p>The agent explains. A fixed policy decides.</p>
             </div>
           </footer>

@@ -12,7 +12,40 @@ export async function connect(port) {
   const targets = await (await fetch(`${base}/json/list`)).json();
   let page = targets.find((t) => t.type === "page");
   if (!page) page = await (await fetch(`${base}/json/new?about:blank`, { method: "PUT" })).json();
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  const c = await connectWs(page.webSocketDebuggerUrl);
+  c.targetId = page.id;
+  return c;
+}
+
+/**
+ * Waits for a page target other than `exceptId` whose URL passes `match` (a popup the page opened, e.g. PayPal's
+ * checkout window) and connects to it. Returns null on timeout.
+ */
+export async function connectNewPage(port, { exceptId, match, timeout = 30_000 }) {
+  const base = `http://127.0.0.1:${port}`;
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const targets = await (await fetch(`${base}/json/list`)).json().catch(() => []);
+    const page = targets.find((t) => t.type === "page" && t.id !== exceptId && match(t.url ?? ""));
+    if (page) {
+      const c = await connectWs(page.webSocketDebuggerUrl);
+      c.targetId = page.id;
+      return c;
+    }
+    await sleep(250);
+  }
+  return null;
+}
+
+/** True while the page target `id` is still open. */
+export async function targetOpen(port, id) {
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json().catch(() => []);
+  return targets.some((t) => t.id === id);
+}
+
+/** A CDP client over one target's WebSocket. */
+export async function connectWs(url) {
+  const ws = new WebSocket(url);
   await new Promise((resolve, reject) => {
     ws.addEventListener("open", resolve, { once: true });
     ws.addEventListener("error", reject, { once: true });
@@ -36,6 +69,7 @@ export async function connect(port) {
   });
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
+      if (client.closed) return reject(new Error(`${method}: target closed`));
       const i = ++id;
       pending.set(i, { resolve, reject, method });
       ws.send(JSON.stringify({ id: i, method, params }));
@@ -46,7 +80,13 @@ export async function connect(port) {
       const off = on((m) => { if (m.method === name && pred(m.params)) { clearTimeout(t); off(); resolve(m.params); } });
       const t = setTimeout(() => { off(); resolve(null); }, ms);
     });
-  return { send, on, waitEvent, logs, close: () => ws.close() };
+  const client = { send, on, waitEvent, logs, closed: false, close: () => ws.close() };
+  ws.addEventListener("close", () => {
+    client.closed = true;
+    for (const [, p] of pending) p.reject(new Error(`${p.method}: target closed`));
+    pending.clear();
+  });
+  return client;
 }
 
 /**
@@ -71,6 +111,24 @@ export class Recorder {
 
   async start() {
     mkdirSync(this.framesDir, { recursive: true });
+    await this.listen();
+    this.t0 = Date.now();
+    this.recording = true;
+    this.timer = setInterval(() => this.tick(), Math.max(10, Math.floor(1000 / this.fps / 3)));
+  }
+
+  /**
+   * Records another target from now on (a popup such as PayPal's checkout window, whose viewport the caller sets to
+   * the recorder's size), keeping the same timeline; switchTo(original) goes back.
+   */
+  async switchTo(cdp) {
+    this.off?.();
+    await this.cdp.send("Page.stopScreencast").catch(() => {});
+    this.cdp = cdp;
+    await this.listen();
+  }
+
+  async listen() {
     this.off = this.cdp.on((m) => {
       if (m.method !== "Page.screencastFrame") return;
       this.cdp.send("Page.screencastFrameAck", { sessionId: m.params.sessionId }).catch(() => {});
@@ -81,9 +139,6 @@ export class Recorder {
       this.latestN++;
     });
     await this.cdp.send("Page.startScreencast", { format: "jpeg", quality: this.quality, maxWidth: this.width, maxHeight: this.height, everyNthFrame: 1 });
-    this.t0 = Date.now();
-    this.recording = true;
-    this.timer = setInterval(() => this.tick(), Math.max(10, Math.floor(1000 / this.fps / 3)));
   }
 
   /** Milliseconds of video recorded so far (wall clock minus paused stretches). */

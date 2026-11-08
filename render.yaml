@@ -1,8 +1,13 @@
 # Render Blueprint for the hosted Milestone demo (https://render.com/docs/blueprint-spec). Owner's steps: docs/deploy.md.
 #
-# One web service runs Next.js and the job worker side by side (scripts/start-render.mjs): the PayPal simulator's
-# state and uploaded deliveries are files both processes share, so they live on one instance with one disk. Jobs live
-# in Postgres (pg-boss), so there is no Key Value store. `node scripts/check-render.mjs` checks this file in CI.
+# The hosted demo runs on the REAL PayPal sandbox (PAYPAL_MODE=sandbox): judges pay through PayPal's sandbox checkout
+# with a sandbox buyer account. The PayPal variables below are asked for once, on Blueprint creation; with any of them
+# missing the service refuses to start and its log names the missing ones (scripts/start-render.mjs).
+#
+# One web service runs Next.js and the job worker side by side (scripts/start-render.mjs): uploaded deliveries (and,
+# in simulated mode, the PayPal simulator's state) are files both processes share, so they live on one instance with
+# one disk. Jobs live in Postgres (pg-boss), so there is no Key Value store. `node scripts/check-render.mjs` checks
+# this file in CI.
 services:
   - type: web
     name: milestone
@@ -14,7 +19,8 @@ services:
     # Dev dependencies are needed at run time (tsx runs the worker and the seed, drizzle-kit migrates), so the install
     # forces them even though NODE_ENV is production. pnpm comes from the packageManager field through corepack.
     buildCommand: corepack enable && NODE_ENV=development pnpm install --frozen-lockfile && pnpm --filter @milestone/web build
-    # Every deploy: apply migrations, then seed the showcase only if the users table is empty (the first deploy).
+    # Every deploy: apply migrations, then seed the showcase only if the users table is empty (the first deploy), or
+    # reset and reseed when the data belongs to the other PayPal mode (PAYPAL_MODE was switched).
     preDeployCommand: node scripts/start-render.mjs predeploy
     startCommand: node scripts/start-render.mjs
     healthCheckPath: /api/dev/paypal/mode
@@ -34,17 +40,19 @@ services:
         fromDatabase:
           name: milestone-db
           property: connectionString
-      # Shows the demo banner and enables POST /api/demo/reset (re-seeds the showcase, at most once every 30 s).
+      # Shows the demo banner and enables POST /api/demo/reset (re-seeds this app's data, at most once every 30 s;
+      # PayPal's sandbox keeps its own history).
       - key: DEMO_MODE
         value: "1"
-      # simulated: no PayPal account needed; a built-in simulator answers the REST calls and posts its own webhooks.
-      # To use the real PayPal sandbox instead, set PAYPAL_MODE=sandbox and fill PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET
-      # and PAYPAL_WEBHOOK_ID (webhook at <service url>/api/webhooks/paypal); see docs/deploy.md.
+      # sandbox: the real PayPal sandbox (checkout, payouts, refunds, vault, webhooks). simulated: a built-in simulator
+      # answers the same REST calls and posts its own webhooks, no PayPal account needed (switching resets the data on
+      # the next deploy). See docs/deploy.md.
       - key: PAYPAL_MODE
-        value: simulated
+        value: sandbox
+      # Never "live" on the demo: start-render refuses it.
       - key: PAYPAL_ENV
         value: sandbox
-      # Authenticates the simulator's own webhooks (required in production). Generated once by Render.
+      # Only used with PAYPAL_MODE=simulated: authenticates the simulator's own webhooks. Generated once by Render.
       - key: SIMULATED_WEBHOOK_SECRET
         generateValue: true
       # Files both processes share, on the persistent disk so a restart keeps them.
@@ -65,12 +73,29 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      # Only for PAYPAL_MODE=sandbox (asked for once, on Blueprint creation; leave empty for the simulated demo).
+      # PayPal sandbox, all required with PAYPAL_MODE=sandbox (asked for once, on Blueprint creation; docs/deploy.md).
+      # The platform app (Payouts and Vault enabled): checkout, captures, payouts, refunds, receipts, webhook checks.
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET
         sync: false
+      # The id of the webhook on the platform app that points at <service url>/api/webhooks/paypal.
       - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      # The capital partner's own sandbox app (a second business account): advances are paid from it, never from the
+      # platform account.
+      - key: PAYPAL_PARTNER_CLIENT_ID
+        sync: false
+      - key: PAYPAL_PARTNER_CLIENT_SECRET
+        sync: false
+      # Payout receivers the seed gives the demo freelancer (a sandbox personal account) and partner (the partner's
+      # sandbox business account).
+      - key: PAYPAL_FREELANCER_EMAIL
+        sync: false
+      - key: PAYPAL_PARTNER_EMAIL
+        sync: false
+      # Optional: the platform's sandbox business email, printed on receipts.
+      - key: PAYPAL_PLATFORM_EMAIL
         sync: false
       # Optional: GitHub pull-request deliveries (webhook at <service url>/api/webhooks/github) and API rate limits.
       - key: GITHUB_WEBHOOK_SECRET

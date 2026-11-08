@@ -1,3 +1,4 @@
+import type { PayPalMode } from "@milestone/core";
 import { isModelConfigured } from "@milestone/verify";
 
 /** Demo mode is on only when DEMO_MODE is exactly "1" (the hosted demo on Render sets it in render.yaml). */
@@ -21,4 +22,13 @@ export async function modelMode(env: NodeJS.ProcessEnv = process.env): Promise<M
 export const MODEL_MODE_TEXT: Record<ModelMode, string> = {
   claude: "Judgment by Claude",
   none: "Judgment goes to the client: no model on this host",
+};
+
+/**
+ * What the band says about money on this host. On the real sandbox a reset puts this app's data back but cannot undo
+ * anything at PayPal (orders, payouts and refunds stay in the sandbox accounts' history).
+ */
+export const PAYPAL_MODE_TEXT: Record<PayPalMode, string> = {
+  sandbox: "real PayPal sandbox (test accounts, no real money), test identities; Reset demo resets this app's data, not PayPal's sandbox",
+  simulated: "simulated PayPal (no real money), test identities; reset any time",
 };

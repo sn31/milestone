@@ -66,6 +66,7 @@ vi.mock("@/lib/session", async () => ({
   getActor: async () => fake.state.actor,
 }));
 vi.mock("@/lib/http", () => import(/* @vite-ignore */ new URL("../../web/src/lib/http.ts", import.meta.url).pathname));
+vi.mock("@/lib/recorded", () => import(/* @vite-ignore */ new URL("../../web/src/lib/recorded.ts", import.meta.url).pathname));
 vi.mock("@/lib/db", async () => {
   const { getDb } = await import("../src/lib/db.ts");
   return { getDb };

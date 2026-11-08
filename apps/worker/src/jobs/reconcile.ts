@@ -1,6 +1,6 @@
 import type { Job } from "pg-boss";
 import { and, gte, inArray, like, or } from "drizzle-orm";
-import { OP_KINDS, asRecord, asString, audit, isFreelancerAccount, isPartnerAccount, ledgerEntries, paypalMode, paypalOps, webhookEvents, type Db } from "@milestone/core";
+import { OP_KINDS, asRecord, asString, audit, isFreelancerAccount, isSimulatorId, isPartnerAccount, ledgerEntries, paypalMode, paypalOps, webhookEvents, type Db } from "@milestone/core";
 import { PayPalMcpError, openPayPalMcp, parseTransactions, type PayPalMcpSession, type PayPalTransaction } from "@milestone/money";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
@@ -93,6 +93,12 @@ export interface Expected {
   required: boolean;
 }
 
+/** An op the showcase seed recorded with simulator ids (its PayPal id, or an id in its stored response). */
+export function isRecordedOp(op: Pick<OpLike, "paypalId" | "response">): boolean {
+  if (isSimulatorId(op.paypalId)) return true;
+  return [...idsIn(op.response, ITEM_KEYS_AND_BATCH)].some((id) => isSimulatorId(id));
+}
+
 /** Every string value under these keys in a stored PayPal response (payout items carry their ids there). */
 function idsIn(v: unknown, keys: ReadonlySet<string>, out: Set<string> = new Set(), depth = 0): Set<string> {
   if (depth > 6 || v === null || typeof v !== "object") return out;
@@ -107,6 +113,7 @@ function idsIn(v: unknown, keys: ReadonlySet<string>, out: Set<string> = new Set
   return out;
 }
 const ITEM_KEYS: ReadonlySet<string> = new Set(["payout_item_id", "payoutItemId", "transaction_id"]);
+const ITEM_KEYS_AND_BATCH: ReadonlySet<string> = new Set([...ITEM_KEYS, "payout_batch_id", "id"]);
 
 /** Sum of one direction's lines whose ref passes `ref` (and whose account passes `account`), with their currency. */
 function booked(ledger: LedgerLike[], ref: (r: string) => boolean, direction: "debit" | "credit", account: (a: string) => boolean = () => true): { minor: number | null; currency: string | null } {
@@ -334,13 +341,18 @@ export async function runReconcile(db: Db, opts: RunReconcileOptions = {}): Prom
     await audit(db, { actor: "worker", event: RECONCILE_EVENTS.failed, detail: { ...base, window, simulated, error: error.slice(0, 1000), body: err?.body ?? null, code: outcome.code, status: outcome.status } });
     return outcome;
   }
-  const { ops, ledger, itemTxnIds } = await loadRecords(db, window);
+  const loaded = await loadRecords(db, window);
+  const { ledger, itemTxnIds } = loaded;
+  // Against the real PayPal, ops the showcase seed recorded with simulator ids were never sent there: matching them
+  // would report them missing in PayPal. They are left out and counted (recordedSkipped).
+  const ops = simulated ? loaded.ops : loaded.ops.filter((o) => !isRecordedOp(o));
+  const recordedSkipped = loaded.ops.length - ops.length;
   const report = matchTransactions(window, fetched.txns, expectedFromOps(ops, ledger, itemTxnIds));
   const summary = reconcileSummary(report, simulated);
   await audit(db, {
     actor: "worker",
     event: RECONCILE_EVENTS.reconciled,
-    detail: { ...base, simulated, pages: fetched.pages, ...report, mismatches: report.counts.missingInLedger + report.counts.missingInPayPal + report.counts.amountMismatches, summary, summarySource: "template" },
+    detail: { ...base, simulated, pages: fetched.pages, ...(recordedSkipped ? { recordedSkipped } : {}), ...report, mismatches: report.counts.missingInLedger + report.counts.missingInPayPal + report.counts.amountMismatches, summary, summarySource: "template" },
   });
   return { kind: "reconciled", report, simulated, summary };
 }

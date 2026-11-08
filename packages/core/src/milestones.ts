@@ -97,6 +97,8 @@ export const AUDIT_EVENTS = {
   releaseSkipped: "release.skipped",
   releaseSkippedInFlight: "release.skipped_in_flight",
   releaseRefusedNeedsOperator: "release.refused_needs_operator",
+  /** The milestone was recorded for the showcase with simulator ids and this process talks to the real sandbox. */
+  releaseRefusedRecorded: "release.refused_recorded",
   releaseBlockedByDispute: "release.blocked_by_dispute",
   releaseLeaseTakenOver: "release.lease_taken_over",
   releaseWaiting: "release.waiting",

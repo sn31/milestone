@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // Render entry point for the one web service that hosts Milestone (see render.yaml and docs/deploy.md).
 //
-//   node scripts/start-render.mjs predeploy   migrate, then seed the showcase on an empty database (preDeployCommand)
+//   node scripts/start-render.mjs predeploy   migrate, then seed the showcase on an empty database, or reset and reseed
+//                                             one whose data belongs to the other PayPal mode (preDeployCommand)
 //   node scripts/start-render.mjs             start Next.js and the worker side by side (startCommand)
+//
+// PAYPAL_MODE=sandbox (the hosted demo) needs the PayPal variables in SANDBOX_REQUIRED below. With any of them unset
+// both steps refuse to run and log one line naming the missing variables (names only, never values), so a deploy
+// fails visibly instead of starting a demo whose payouts, webhooks or advances silently fail.
 //
 // Web and worker run in one service because the PayPal simulator's state and uploaded deliveries are files (var/,
 // or the paths in SIMULATED_PAYPAL_STATE_FILE and UPLOAD_DIR) that both processes read and write. If either process
@@ -27,6 +32,45 @@ const drizzleKit = join(root, "packages/core/node_modules/drizzle-kit/bin.cjs");
 const next = join(root, "apps/web/node_modules/next/dist/bin/next");
 
 const env = { ...process.env };
+
+// Mirrors SANDBOX_REQUIRED_ENV in packages/core/src/env.ts (a test keeps the two lists in step).
+const SANDBOX_REQUIRED = [
+  "PAYPAL_CLIENT_ID",
+  "PAYPAL_CLIENT_SECRET",
+  "PAYPAL_WEBHOOK_ID",
+  "PAYPAL_PARTNER_CLIENT_ID",
+  "PAYPAL_PARTNER_CLIENT_SECRET",
+  "PAYPAL_FREELANCER_EMAIL",
+  "PAYPAL_PARTNER_EMAIL",
+];
+
+/** The PayPal mode as packages/core paypalMode() reads it. */
+function paypalMode(e) {
+  const explicit = e.PAYPAL_MODE?.trim().toLowerCase();
+  if (explicit === "simulated") return "simulated";
+  if (explicit === "sandbox" || explicit === "live" || explicit === "paypal") return "sandbox";
+  if (!e.PAYPAL_CLIENT_ID && e.NODE_ENV !== "production") return "simulated";
+  return "sandbox";
+}
+
+/** Exits when sandbox mode lacks a required variable. Logs names only. */
+function checkPayPalEnv() {
+  const mode = paypalMode(env);
+  if (mode !== "sandbox") {
+    console.log(`start-render: PAYPAL_MODE=${mode}: the built-in PayPal simulator answers every call`);
+    return;
+  }
+  const missing = SANDBOX_REQUIRED.filter((k) => !env[k]?.trim());
+  if (missing.length) {
+    console.error(`start-render: PAYPAL_MODE=sandbox but ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set; refusing to start. Set ${missing.length === 1 ? "it" : "them"} on the service's Environment page (docs/deploy.md, "Owner's steps"), or set PAYPAL_MODE=simulated for the simulator.`);
+    process.exit(1);
+  }
+  if (env.PAYPAL_ENV?.trim() === "live") {
+    console.error("start-render: PAYPAL_ENV=live; the hosted demo only runs on the PayPal sandbox. Unset it.");
+    process.exit(1);
+  }
+  console.log("start-render: PAYPAL_MODE=sandbox: the real PayPal sandbox (platform and partner apps, webhook id and receivers set)");
+}
 // APP_URL is where the simulator posts its webhooks and where PayPal sends the buyer back; Render gives the public URL.
 if (!env.APP_URL && env.RENDER_EXTERNAL_URL) env.APP_URL = env.RENDER_EXTERNAL_URL;
 
@@ -70,8 +114,11 @@ const mode = process.argv[2] ?? "start";
 if (mode === "predeploy") {
   need(drizzleKit);
   need(tsx);
+  checkPayPalEnv();
   step("migrate", [drizzleKit, "migrate"], join(root, "packages/core"));
-  step("seed --showcase --if-empty", [tsx, "src/seed.ts", "--showcase", "--if-empty"], join(root, "packages/core"));
+  // --reset-if-other-mode: switching PAYPAL_MODE (simulated <-> sandbox) resets the data, whose PayPal ids belong to the
+  // other mode; otherwise only an empty database is seeded.
+  step("seed --showcase --if-empty --reset-if-other-mode", [tsx, "src/seed.ts", "--showcase", "--if-empty", "--reset-if-other-mode"], join(root, "packages/core"));
   process.exit(0);
 }
 
@@ -82,6 +129,7 @@ if (mode !== "start") {
 
 need(next);
 need(tsx);
+checkPayPalEnv();
 if (env.MILESTONE_ALLOW_LOCAL_REPOS?.trim() === "1") console.warn("start-render: MILESTONE_ALLOW_LOCAL_REPOS=1, local repositories are allowed");
 else if (httpsOnlyGit()) console.log("start-render: git limited to https repositories");
 if (env.DEMO_MODE?.trim() === "1") {

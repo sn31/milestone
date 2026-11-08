@@ -97,3 +97,53 @@ export function seedPaypalEmails(env: NodeJS.ProcessEnv = process.env): { freela
  * a model, so they carry this marker whether or not a Claude key is set (the UI labels them "recorded for the showcase").
  */
 export const RECORDED_VERDICT_MODEL = "recorded-showcase";
+
+// ---------- Simulator ids on the real sandbox ----------
+
+/** Every id the PayPal simulator mints, and every PayPal id the showcase seed writes, starts with this. */
+export const SIMULATOR_ID_PREFIX = "SIM-";
+
+/**
+ * The shape of a simulator id: "SIM-" and upper-case letters, digits and dashes (orders, captures, batches, items,
+ * vault tokens, customers), or a simulated dispute ("PP-D-SIM..."). Strict on purpose, so a title such as "SIM card
+ * shop" is not mistaken for one.
+ */
+export const SIMULATOR_ID_RE = /^(?:SIM-[A-Z0-9][A-Z0-9-]*|PP-D-SIM[A-Z0-9]+)$/;
+
+/** True for an id the simulator (or the showcase seed) made up: PayPal's sandbox has never seen it. */
+export function isSimulatorId(id: unknown): id is string {
+  return typeof id === "string" && SIMULATOR_ID_RE.test(id);
+}
+
+/**
+ * A milestone whose funding (order or capture) carries simulator ids while this process talks to the real PayPal
+ * sandbox: rows the showcase seed recorded for display. Nothing may act on it there (a refund of a capture PayPal never
+ * made, a payout backed by money that was never captured), so routes refuse, jobs stop before PayPal is called and the
+ * page shows it as recorded. Never true in simulated mode, where those ids are the simulator's own.
+ */
+export function recordedForShowcase(m: { paypalOrderId?: string | null; paypalCaptureId?: string | null } | null | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!m || paypalMode(env) === "simulated") return false;
+  return isSimulatorId(m.paypalOrderId) || isSimulatorId(m.paypalCaptureId);
+}
+
+/** The refusal reason code and text for an action on a milestone recordedForShowcase. */
+export const RECORDED_SHOWCASE_REASON = "recorded_for_showcase";
+export const RECORDED_SHOWCASE_TEXT =
+  "This milestone was recorded for the showcase with simulator PayPal ids, so it is display only on the real PayPal sandbox. Fund a draft milestone with PayPal to run this step for real.";
+
+/** The variables PAYPAL_MODE=sandbox needs for the whole demo (checkout, payouts, webhooks, advances, receivers). */
+export const SANDBOX_REQUIRED_ENV = [
+  "PAYPAL_CLIENT_ID",
+  "PAYPAL_CLIENT_SECRET",
+  "PAYPAL_WEBHOOK_ID",
+  "PAYPAL_PARTNER_CLIENT_ID",
+  "PAYPAL_PARTNER_CLIENT_SECRET",
+  "PAYPAL_FREELANCER_EMAIL",
+  "PAYPAL_PARTNER_EMAIL",
+] as const;
+
+/** The SANDBOX_REQUIRED_ENV names that are unset or blank (names only, never values). Empty outside sandbox mode. */
+export function missingSandboxEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  if (paypalMode(env) !== "sandbox") return [];
+  return SANDBOX_REQUIRED_ENV.filter((k) => !envOr(k, env));
+}

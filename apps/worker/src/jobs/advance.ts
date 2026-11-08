@@ -3,6 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   AUDIT_EVENTS,
   OP_KINDS,
+  RECORDED_SHOWCASE_TEXT,
   accounts,
   advances,
   asString,
@@ -16,6 +17,7 @@ import {
   payoutReceiver,
   postTransaction,
   recordOpResult,
+  recordedForShowcase,
   type MilestoneStatus,
 } from "@milestone/core";
 import { fundAdvance, moneyContextFor, type PayPalClient } from "@milestone/money";
@@ -128,7 +130,8 @@ export async function advance(job: Job<JobData>, deps: AdvanceDeps = {}): Promis
         .where(and(eq(paypalOps.key, m.id), inArray(paypalOps.kind, [OP_KINDS.payout, OP_KINDS.refund]), inArray(paypalOps.status, ["sent", "succeeded", "failed"])))
         .limit(1);
 
-      const refusal = refusalReason({ opStatus: op?.status ?? null, milestoneStatus: m.status, releaseClaimed: releaseClaimed.length > 0, freelancerPaypalEmail: freelancer?.paypalEmail ?? null, partnerReceiver });
+      // Recorded for the showcase (simulator ids on the real sandbox): the escrow behind it was never captured.
+      const refusal = recordedForShowcase(m) ? RECORDED_SHOWCASE_TEXT : refusalReason({ opStatus: op?.status ?? null, milestoneStatus: m.status, releaseClaimed: releaseClaimed.length > 0, freelancerPaypalEmail: freelancer?.paypalEmail ?? null, partnerReceiver });
       if (refusal) {
         if (op || !partnerReceiver) {
           // op: the payout was claimed before, PayPal may have paid it, so it is never withdrawn. A person decides.
