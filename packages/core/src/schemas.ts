@@ -190,7 +190,7 @@ export function decisionDeliveryId(decision: unknown): string | null {
 /**
  * Descriptions of the required criteria whose verdict status is not "pass"; a criterion the verdict does not mention
  * counts as not passed. `verdict` is the raw deliveries.verdict JSON (anything else reads as an empty verdict). The
- * review route refuses approve / confirm_partial and the release job skips while this is non-empty (F9).
+ * review route refuses approve / confirm_partial and the release job skips while this is non-empty.
  */
 export function requiredNotPassed(verdict: unknown, criteria: ReadonlyArray<Pick<CriterionSpec, "id" | "required" | "description">>): string[] {
   const rows = verdict && typeof verdict === "object" ? (verdict as { criteria?: unknown }).criteria : undefined;

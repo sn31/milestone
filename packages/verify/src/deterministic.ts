@@ -101,7 +101,7 @@ export interface OverlayReport {
   manifests: Array<{ path: string; keys: string[] }>;
   /** npm lockfiles dropped because the delivery's dependencies no longer match the baseline's. */
   lockfilesDropped: string[];
-  /** Dependencies the delivery adds or re-points at a non-registry source (finding 4); each is unclear evidence on the test criterion. */
+  /** Dependencies the delivery adds or re-points at a non-registry source; each is unclear evidence on the test criterion. */
   newDependencies: NewDependency[];
 }
 
@@ -131,7 +131,7 @@ export function npmCacheDir(env: string | undefined = process.env.MILESTONE_NPM_
 const CLEAN_ENV = { PATH: process.env.PATH ?? "", CI: "1", NODE_ENV: "test", HOME: "", npm_config_ignore_scripts: "true", npm_config_cache: npmCacheDir() };
 const COMMIT_ID = /^[0-9a-f]{7,64}$/i;
 
-/** The baseline-suite evidence item (the id predates the overlay: it used to hold the tamper check). */
+/** The baseline-suite evidence item (the id is kept from an earlier tamper check). */
 export const TAMPER_EVIDENCE_ID = "evd_tamper_check";
 /** Context evidence the judge may cite for judgment criteria (see the header). */
 export const DIFF_EVIDENCE_ID = "evd_diff";
@@ -282,7 +282,7 @@ export function mergeManifest(baselineText: string, deliveredText: string): Mani
     }
   }
   const dependencyChange = canonical(out.dependencies) !== canonical(b.dependencies);
-  // Finding 4 (a policy rule, not detection): the merged dependencies are what npm will install and run with the
+  // A policy rule, not detection: the merged dependencies are what npm will install and run with the
   // client's tests. Flag a name absent from every baseline dependency field, or an existing name re-pointed at a
   // non-registry source. A version bump within the same registry name is not flagged.
   const newDependencies: NewDependency[] = [];
@@ -795,7 +795,7 @@ export interface OverlayPlan {
   manifests: Array<{ path: string; text: string; keys: string[] }>;
   /** The merged dependencies differ from the baseline's: drop the root npm lockfiles instead of restoring them. */
   dropLockfiles: boolean;
-  /** Dependencies the delivery adds or re-points at a non-registry source (finding 4), with the manifest they came from. */
+  /** Dependencies the delivery adds or re-points at a non-registry source, with the manifest they came from. */
   newDependencies: Array<{ path: string; dep: NewDependency }>;
 }
 
@@ -1177,7 +1177,7 @@ export function describeDependency(d: NewDependency): string {
 }
 
 /**
- * Evidence items for finding 4 (a policy rule, not detection): a dependency the delivery adds, or re-points at a
+ * Evidence items for the new-dependency rule (a policy rule, not detection): a dependency the delivery adds, or re-points at a
  * non-registry source, installs and runs unreviewed code with the client's tests. Each is unclear on the test
  * criterion, so a passing suite is sent to the client (P3) rather than trusted. Capped like the gaming hits.
  */

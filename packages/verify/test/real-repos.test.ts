@@ -31,7 +31,7 @@ interface Expected {
   removed: string[];
   manifests: string[];
   gaming: string[];
-  /** Delivery-added or re-pointed dependencies (finding 4), as "name@spec reason[/source]". */
+  /** Delivery-added or re-pointed dependencies, as "name@spec reason[/source]". */
   dependencies?: string[];
   removedCommitted: boolean;
   result: VerdictResult;

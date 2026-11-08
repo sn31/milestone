@@ -154,7 +154,7 @@ describe.skipIf(!run)("advance job end to end", async () => {
     await expect(advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }), deps)).rejects.toThrow(/socket hang up/);
     expect((await t.state()).ops).toMatchObject([{ status: "sent" }]);
 
-    // Withdraw-eligible now (the old code deleted the advance here): the milestone moved on.
+    // Withdraw-eligible now: the milestone moved on.
     await db.$client.query(`update milestones set status = 'review' where id = $1`, [t.milestoneId]);
     await advance(job({ milestoneId: t.milestoneId, advanceId: t.advanceId }, { retryCount: 1 }), deps);
     let s = await t.state();

@@ -1,5 +1,5 @@
 /**
- * Money spike (Oct 9): create order -> approve in a browser as the client sandbox account ->
+ * Money spike: create order -> approve in a browser as the client sandbox account ->
  * capture into the platform account -> full release payout -> a second order and a partial release
  * (payout plus refund). Goes through the same policy functions the worker uses.
  * Run: pnpm paypal:spike   (reads ../../.env; needs SPIKE_FREELANCER_EMAIL)

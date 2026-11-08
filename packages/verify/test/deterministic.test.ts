@@ -46,7 +46,7 @@ describe("test locations by name", () => {
   it("treats test folders, *.test/*.spec files, snapshots and a ROOT test.js/tests.js/spec.js as tests", () => {
     for (const p of ["test/a.js", "src/__tests__/x.js", "spec/b.rb", "src/a.spec.ts", "x.test.mjs", "tests.js", "test.mjs", "spec.ts", "src/__snapshots__/a.snap"]) expect(isTestPath(p), p).toBe(true);
   });
-  it("does not treat source that happens to be named test.js deeper down as a test (review finding 3)", () => {
+  it("does not treat source that happens to be named test.js deeper down as a test", () => {
     for (const p of ["lib/test.js", "src/spec.ts", "src/testing.js", "CHANGELOG.md", "index.js"]) expect(isTestPath(p), p).toBe(false);
   });
   it("counts runner config, package-manager config and lockfiles as test machinery", () => {
@@ -130,7 +130,7 @@ describe("mergeManifest: baseline values of the test keys, the delivery's everyt
   });
 });
 
-describe("new/re-pointed dependencies (finding 4, a policy rule)", () => {
+describe("new/re-pointed dependencies (a policy rule)", () => {
   it("classifies a version spec by where its code comes from", () => {
     expect(depSource("^1.2.3")).toBeNull();
     expect(depSource("1.0.0")).toBeNull();
@@ -267,9 +267,9 @@ describe("runDeterministicStage: the client's suite grades the delivery (local g
     await branch("script", { "src/x.js": "module.exports = 2;\n", "package.json": pkg({ test: "exit 0" }) });
     // A regression hidden by editing the client's test.
     await branch("edit", { "src/x.js": "module.exports = 2;\n", "test/a.test.js": clientTest.replace("), 1)", "), 2)") });
-    // A regression next to an added setup file and runner config (review finding 1).
+    // A regression next to an added setup file and runner config.
     await branch("added", { "src/x.js": "module.exports = 2;\n", "test/00-setup.js": "process.exit(0);\n", ".mocharc.yml": "require: ./test/00-setup.js\n" });
-    // A regression made invisible under CI=1 (review finding 5): the gaming scan's job.
+    // A regression made invisible under CI=1: the gaming scan's job.
     await branch("sniff", { "src/x.js": "// CI runs the tests\nmodule.exports = process.env.CI ? 1 : 2;\n" });
     // A sniff that does not even hide the regression: the fail stands.
     await branch("sniffFail", { "src/x.js": "if (process.env.npm_lifecycle_event === 'never') {}\nmodule.exports = 2;\n" });
@@ -351,13 +351,13 @@ describe("runDeterministicStage: the client's suite grades the delivery (local g
     expect(delivered!.summary).toMatch(/exited 0/);
   });
 
-  it("added setup files and runner config are removed for the graded run (review finding 1)", { timeout: 60_000 }, async () => {
+  it("added setup files and runner config are removed for the graded run", { timeout: 60_000 }, async () => {
     const { out, tests } = await stage(shas.added!);
     expect(out.overlay!.removed).toEqual([".mocharc.yml", "test/00-setup.js"]);
     expect(tests.status).toBe("fail");
   });
 
-  it("source that sniffs CI passes the client's suite, and the gaming scan sends it to the client (review finding 5)", { timeout: 60_000 }, async () => {
+  it("source that sniffs CI passes the client's suite, and the gaming scan sends it to the client", { timeout: 60_000 }, async () => {
     const { out, tests, verdict } = await stage(shas.sniff!);
     expect(tests.status).toBe("pass");
     expect(out.gaming).toEqual([{ file: "src/x.js", line: 2, rule: "env-sniff", what: "reads process.env.CI", text: "module.exports = process.env.CI ? 1 : 2;" }]);

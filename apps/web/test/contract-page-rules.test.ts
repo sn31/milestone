@@ -1,6 +1,6 @@
 /**
- * The contract page's pure rules: when a delivery still waits for its verdict (F3), when the review card offers
- * a partial release (F4), the PayPal background-tab error (F7), what counts as one of a contract's PayPal calls (F9),
+ * The contract page's pure rules: when a delivery still waits for its verdict, when the review card offers
+ * a partial release, the PayPal background-tab error, what counts as one of a contract's PayPal calls,
  * and when a dispute's claim can be accepted. countContractOps also runs against Postgres when MILESTONE_E2E=1.
  */
 import { randomUUID } from "node:crypto";

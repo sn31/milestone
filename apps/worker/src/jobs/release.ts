@@ -501,7 +501,7 @@ async function claimRelease(db: Db, milestoneId: string, jobDeliveryId: string |
       return null;
     }
     if (m.status === "needs_client" && decId) {
-      // F9: the client cannot approve past a required criterion that did not pass.
+      // The client cannot approve past a required criterion that did not pass.
       const delivery = await tx.query.deliveries.findFirst({ columns: { verdict: true }, where: (d, { eq }) => eq(d.id, decId) });
       const rows = await tx.query.criteria.findMany({ where: (c, { eq }) => eq(c.milestoneId, milestoneId) });
       const blocked = requiredNotPassed(delivery?.verdict, rows);

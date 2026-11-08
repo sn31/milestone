@@ -1,5 +1,5 @@
 /**
- * F5: judgment criteria get citable context evidence (evd_diff, evd_tree, evd_commit), read_file/get_diff results
+ * Judgment criteria get citable context evidence (evd_diff, evd_tree, evd_commit), read_file/get_diff results
  * carry the evd_diff id, and the parser attaches evd_diff to an uncited judgment pass only when the run read the delivery.
  */
 import { afterEach, describe, expect, it } from "vitest";

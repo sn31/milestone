@@ -33,7 +33,7 @@ export interface PayoutBatch {
 /** Release and advances: POST /v1/payments/payouts */
 /**
  * Release and advances: POST /v1/payments/payouts.
- * Learned from the sandbox on Oct 9: PayPal does NOT replay a payout for a repeated PayPal-Request-Id. It answers
+ * PayPal's sandbox does NOT replay a payout for a repeated PayPal-Request-Id. It answers
  * 400 USER_BUSINESS_ERROR "Batch with given sender_batch_id already exists" with a link to the existing batch.
  * That still means "never paid twice", so a retry recovers that batch and returns it as the result.
  */

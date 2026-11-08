@@ -1,6 +1,6 @@
 # Demo repo
 
-A small Node 24 project for the signup landing page, with no dependencies. The demo repo is published as its own public GitHub repo before Oct 15, with a repository webhook pointed at `/api/webhooks/github`.
+A small Node 24 project for the signup landing page, with no dependencies. The demo repo is published as its own public GitHub repo, with a repository webhook pointed at `/api/webhooks/github`.
 
 ## Layout
 

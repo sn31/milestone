@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pushes the demo repository (fixtures/demo-repo, built by scripts/make-demo-repo.sh) to a new, empty, PUBLIC GitHub
-# repository the owner created, so the hosted demo on Render can clone it over https.
+# repository you created, so the hosted demo on Render can clone it over https.
 #
 # Usage: scripts/render-push-demo-repo.sh https://github.com/<you>/<repo>.git
 #

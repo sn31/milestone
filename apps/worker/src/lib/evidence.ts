@@ -21,7 +21,7 @@ export async function git(workdir: string, args: string[], timeoutMs = 60_000): 
   return r.output;
 }
 
-/** Evidence summaries and verdict rationales with worker directories stripped (F11: no temp paths in what parties see). */
+/** Evidence summaries and verdict rationales with worker directories stripped (no temp paths in what the parties see). */
 export function scrubVerdictPaths<T extends { evidence: EvidenceSummary[]; verdict: VerdictOutput }>(v: T, roots: string[]): T {
   return {
     ...v,

@@ -1,6 +1,6 @@
-// The demo beats (the demo video's storyline), driven through the real UI. Each beat gets a short hold at the end so the
-// state it reached is on screen long enough to cut. Off-camera setup (funding a milestone the script funds "off
-// camera", arming the payout failure) runs with the recorder paused, so it is not in the video.
+// The demo beats, driven through the real UI. Each beat holds briefly at the end so the state it reached stays on
+// screen. Setup that is not part of a beat (funding a milestone, arming the payout failure) runs with the recorder
+// paused.
 // A beat with `paypal: "simulated"` or `paypal: "sandbox"` runs only in that PayPal mode (record-demo.mjs --paypal).
 import { sleep } from "./cdp.mjs";
 import { sandboxCheckout, sandboxVaultApproval } from "./paypal.mjs";

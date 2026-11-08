@@ -169,7 +169,7 @@ describe.skipIf(!run)("verify job end to end", async () => {
     const tamper = evidence.find((e) => e.id === "evd_tamper_check");
     expect(tamper?.status).toBe("pass");
     expect(tamper?.summary).toMatch(/no baseline recorded/);
-    // F5: context evidence the judge can cite; F11: no worker temp paths in anything the parties see.
+    // Context evidence the judge can cite; no worker temp paths in anything the parties see.
     expect(evidence.filter((e) => ["evd_diff", "evd_tree", "evd_commit"].includes(e.id)).map((e) => e.id)).toEqual(["evd_diff", "evd_tree", "evd_commit"]);
     expect(evidence.find((e) => e.id === "evd_tree")?.summary).toMatch(/README\.md/);
     expect(JSON.stringify([s.d.evidence, s.d.verdict])).not.toMatch(/milestone-verify-|\/var\/folders\//);

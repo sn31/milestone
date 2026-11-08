@@ -9,7 +9,7 @@
  * every category below was verified against search-engine excerpts of that US page taken the same day. Only items an
  * excerpt confirmed are listed; the page's own "last updated" date could not be read. Items seen only in older or
  * non-US versions (for example currency exchange, check cashing and debt settlement) are left out. Re-check the live
- * page before relying on this list beyond the hackathon.
+ * page before relying on this list in production.
  *
  * Note for the platform itself: the "Activities Requiring Approval" list names escrow services (under Payment
  * Facilitator). This check is about what a contract pays for; Milestone holding funds is the platform's own matter.

@@ -72,7 +72,7 @@
        "content": "\n// signed strings\n\ndescribe('ms(signed string)', function() {\n  it('should accept an explicit leading +', function() {\n    expect(ms('+1h')).to.be(3600000);\n    expect(ms('+1.5 days')).to.be(129600000);\n    expect(ms('+.5s')).to.be(500);\n  });\n\n  it('should still reject a lone sign', function() {\n    expect(isNaN(ms('+'))).to.be(true);\n  });\n});\n"
       }
      ],
-     "note": "ms keeps every test in the root tests.js, so the new tests are appended there. The graded run restores the client's tests.js and runs it against the improved index.js (it passes); the appended tests run in the informational pass. Before Oct 14 this pair was flagged as tampering and could only ask the client.",
+     "note": "ms keeps every test in the root tests.js, so the new tests are appended there. The graded run restores the client's tests.js and runs it against the improved index.js (it passes); the appended tests run in the informational pass.",
      "expected": {
       "testStatus": "pass",
       "testExit": 0,

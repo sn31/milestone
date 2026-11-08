@@ -106,7 +106,7 @@ describe("gaming scan: added source lines that game a test run", () => {
 });
 
 // Each new rule below has a positive example (flagged) and a negative example (not flagged), per the task.
-describe("test-detect: a non-env signal matched against a test runner name (finding 1)", () => {
+describe("test-detect: a non-env signal matched against a test runner name", () => {
   it("flags process.argv compared with a runner name; a plain CLI argv read is not flagged", () => {
     // positive: the value of process.argv is matched against a runner name (mocha).
     expect(rules(diff("index.js", ["var underTest = process.argv.join(' ').indexOf('mocha') !== -1;"]))).toEqual(["index.js:1 test-detect"]);
@@ -131,7 +131,7 @@ describe("test-detect: a non-env signal matched against a test runner name (find
   });
 });
 
-describe("assert-patch: writing to an assertion library in every listed form (finding 2)", () => {
+describe("assert-patch: writing to an assertion library in every listed form", () => {
   it("flags an inline require(lib).prototype write; calling an assertion is not flagged", () => {
     // positive: patching a non-'assert' assertion library inline.
     expect(rules(diff("index.js", ["require('expect.js').Assertion.prototype.assert = function () { return this; };"]))).toEqual(["index.js:1 assert-patch"]);
@@ -165,7 +165,7 @@ describe("assert-patch: writing to an assertion library in every listed form (fi
   });
 });
 
-describe("exit: an obfuscated computed process call (finding 3)", () => {
+describe("exit: an obfuscated computed process call", () => {
   it("flags process[k](0) and process['ex'+'it'](0); a computed env read is not flagged", () => {
     // positive: calling a computed process method (hidden process.exit).
     expect(rules(diff("index.js", ["process['ex' + 'it'](0);"]))).toEqual(["index.js:1 exit"]);

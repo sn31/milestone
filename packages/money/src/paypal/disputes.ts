@@ -1,5 +1,5 @@
 /**
- * PayPal disputes (week 3, the dispute copilot). PayPal's MCP tools can only list, read and accept disputes, so evidence
+ * PayPal disputes (the dispute copilot). PayPal's MCP tools can only list, read and accept disputes, so evidence
  * goes by REST:
  *   GET  /v1/customer/disputes/{id}
  *   POST /v1/customer/disputes/{id}/provide-evidence   multipart: an "input" JSON part + optional file parts

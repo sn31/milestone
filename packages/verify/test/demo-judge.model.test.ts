@@ -1,5 +1,5 @@
 /**
- * Opt-in (F5): judge() with the real model on the demo repo's m1-pass delivery and the seeded milestone-1 criteria.
+ * Opt-in: judge() with the real model on the demo repo's m1-pass delivery and the seeded milestone-1 criteria.
  *   MILESTONE_MODEL_EVAL=1 pnpm --filter @milestone/verify exec vitest run test/demo-judge.model.test.ts --silent=false
  * MILESTONE_DEMO_RUNS (default 5) runs; the judgment criterion must come back pass with cited evidence in at least
  * 4 of 5 (80%). MILESTONE_DEMO_DIR builds the demo repo there instead of a temp dir (it must not exist or be empty).

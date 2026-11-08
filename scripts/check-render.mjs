@@ -227,7 +227,7 @@ else {
   const expect = (key, check, why) => { if (!check(webEnv.get(key))) fail(`web service env ${key}: ${why}`); };
   expect("DATABASE_URL", (v) => v?.fromDatabase?.property === "connectionString", "fromDatabase connectionString");
   expect("DEMO_MODE", (v) => v?.value === "1", 'must be "1" on the hosted demo');
-  expect("DEMO_REPO_URL", (v) => v?.sync === false || /^https:\/\//.test(v?.value ?? ""), "the demo lock's repository: sync: false (set by the owner) or an https URL");
+  expect("DEMO_REPO_URL", (v) => v?.sync === false || /^https:\/\//.test(v?.value ?? ""), "the demo lock's repository: sync: false (set per deployment) or an https URL");
   expect("PAYPAL_MODE", (v) => v?.value === "sandbox", 'must be "sandbox": the hosted demo runs on the real PayPal sandbox (simulated is the no-keys local option)');
   expect("PAYPAL_ENV", (v) => !v || v.value === "sandbox", 'unset or "sandbox", never live');
   expect("SIMULATED_WEBHOOK_SECRET", (v) => v?.generateValue === true, "generateValue: true (required in production)");

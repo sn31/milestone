@@ -154,7 +154,7 @@ describe("finalisation (R5: a partial waits for its refund)", () => {
   });
 });
 
-describe("mergeItemOutcome (F6)", () => {
+describe("mergeItemOutcome", () => {
   const ok = { status: "succeeded" as const, amountMinor: 9_680, eventId: "e1", payoutItemId: "I1" };
   const bad = { status: "failed" as const, amountMinor: 9_680, eventId: "e2", reason: "BLOCKED" };
   const response = { batch_header: { payout_batch_id: "B1" } };
@@ -266,7 +266,7 @@ describe("paidTotal", () => {
   });
 });
 
-describe("ledgerRef (F10)", () => {
+describe("ledgerRef", () => {
   it("is one ref per milestone and party, not per event", () => {
     expect(ledgerRef.release(mid, "freelancer")).toBe(`release:${mid}`);
     expect(ledgerRef.release(mid, "partner")).toBe(`release:${mid}:partner`);

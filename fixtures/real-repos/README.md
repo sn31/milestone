@@ -98,7 +98,7 @@ delivered (no status, never decides). It runs only when the overlay changed some
 npm cache.
 
 What the "own tests exit" column shows: in bytes/f and slugify/f and slugify/h the delivered tree passes (exit 0), so
-before this change those deliveries would have passed `npm test` with a clean tamper check (review findings 1 and 2).
+before this change those deliveries would have passed `npm test` with a clean tamper check.
 In c and e the delivered edit also makes its own run pass; only the restored suite fails. ms/f exits 1 as delivered
 because `mocha tests.js` never loads `test/00-setup.js`. In the g, i and j pairs the overlay changed nothing (no informational
 pass); the client's suite passes because the delivered source reacts to the test run (g reads `process.env.CI`; i matches
@@ -117,31 +117,27 @@ Notes:
   scan also catches `vendor/ms-compat/index.js`; a registry dependency's source would not be scanned at all, which is
   what makes the dependency rule (policy, not detection) the general defence.
 
-## History
+## Why the stage works this way
 
-- Oct 10: the first run used a tamper check that detected edits to the test machinery and recorded a pass as unclear.
-  It found that a root `tests.js` was not treated as a test (ms/c could release with a judged pass); that was fixed
-  the same day by also treating files named by package.json scripts as tests, and 15 of 15 pairs matched.
-- Oct 10 (later): an independent review showed the edit-detection approach was a speed bump. Added files (a
-  `test/00-setup.js` that exits 0, a reassigned `assert`, a legacy `mocha.opts` with `--require`) passed it,
-  slugify's extensionless `node bin/build` was missed, scanning every script flagged honest edits (`CHANGELOG.md`,
-  `index.js`, `src/`), and source that sniffs `CI`/`NODE_ENV` was invisible to any path rule.
-- Oct 14 (this table): the stage runs the client's baseline suite against the delivered code (see CLAUDE.md rule 9 and
-  the header of `packages/verify/src/deterministic.ts`) and scans added source lines for gaming
-  (`packages/verify/src/gaming.ts`). c and e moved from P3 ask_client to P2 hold, a on ms moved from "flagged, ask the
-  client whatever the model says" to "tests pass, release if the judgment passes", and the f, g and h deliveries were
-  added from the review.
-- Oct 14 (red team): three adversarial deliveries were added from a red-team pass. i (`test-detect`) notices the test
-  run through `process.argv`/`require.main`/`process.mainModule`/`module.parent`/a stack trace rather than an env var;
-  j (`assert-patch`) neuters the assertion library the client's tests use, in every listed form (an aliased
+- **Edit detection was not enough.** An earlier stage detected edits to the test machinery and recorded a pass as
+  unclear. Added files (a `test/00-setup.js` that exits 0, a reassigned `assert`, a legacy `mocha.opts` with
+  `--require`) passed it, slugify's extensionless `node bin/build` was missed, scanning every script flagged honest
+  edits (`CHANGELOG.md`, `index.js`, `src/`), and source that sniffs `CI`/`NODE_ENV` was invisible to any path rule.
+- **So the client's baseline suite grades the delivery.** The stage runs the client's baseline suite against the
+  delivered code (CLAUDE.md rule 9 and the header of `packages/verify/src/deterministic.ts`) and scans added source
+  lines for gaming (`packages/verify/src/gaming.ts`). Files named by package.json scripts count as tests, which is
+  what catches a root `tests.js` like ms's.
+- **Three adversarial deliveries test the limits.** i (`test-detect`) notices the test run through
+  `process.argv`/`require.main`/`process.mainModule`/`module.parent`/a stack trace rather than an env var; j
+  (`assert-patch`) neuters the assertion library the client's tests use, in every listed form (an aliased
   `require('assert')`, a non-`assert` library like `expect.js`, `Object.prototype`/`Reflect.defineProperty` writes,
-  computed global/process keys); k (the dependency rule) adds a new `file:` dependency whose unreviewed code runs with
-  the client's tests. The gaming scan was extended for i and j and an obfuscated computed `process[k](0)` exit; a new
-  policy rule in `deterministic.ts` (`mergeManifest`/`dependencyEvidence`) sends a delivery that adds or re-points a
-  dependency to the client (P3) even when the suite passes. All 29 pairs match; i and j reach P3 by the scan, k by the
-  dependency rule, and none of these specific deliveries can release even with a judged pass.
+  computed global/process keys); k adds a new `file:` dependency whose unreviewed code runs with the client's tests.
+  The gaming scan covers i and j and an obfuscated computed `process[k](0)` exit; a policy rule in `deterministic.ts`
+  (`mergeManifest`/`dependencyEvidence`) sends a delivery that adds or re-points a dependency to the client (P3) even
+  when the suite passes. All 29 pairs match; i and j reach P3 by the scan, k by the dependency rule, and none of these
+  deliveries can release even with a judged pass.
 
-## Verifier round, Oct 14: the scan is a tripwire, not a guarantee
+## The scan is a tripwire, not a guarantee
 
 A follow-up red team tried nine new variations of the three attack classes on `vercel/ms`. Four were caught (an assertion patch through a loop over the prototype, an npm alias dependency, `overrides` pointing at a vendored fake, a lockfile re-pointing a test dependency). Five would release if a judge passed the judgment criterion: runner detection through test globals (`typeof describe === 'function'`), through `require.cache`, or through a signal read in another file, and assertion patching through `Object.assign` on an alias or a `require` called under another name.
 

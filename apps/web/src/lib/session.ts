@@ -5,7 +5,7 @@ import { agentActor, authenticateAgent, bearerToken, userRole, type AgentMandate
 export type Role = (typeof userRole.enumValues)[number];
 export interface Actor { userId: string; role: Role }
 
-/** Demo identities: no real auth for the hackathon, the role switcher picks one via a cookie. */
+/** Demo identities: no real auth; the role switcher picks one via a cookie. */
 export const ACTORS: Record<string, Actor> = {
   usr_client: { userId: "usr_client", role: "client" },
   usr_freelancer: { userId: "usr_freelancer", role: "freelancer" },

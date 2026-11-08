@@ -93,7 +93,7 @@ describe("payoutShares", () => {
 
 const askClient: PolicyDecision = { action: "ask_client", amountMinor: 0, ruleIds: ["P3"], reason: "unclear" };
 
-describe("staleReason (F4)", () => {
+describe("staleReason", () => {
   it("accepts a job for the current decision in review or needs_client", () => {
     expect(staleReason({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "review" })).toBeNull();
     expect(staleReason({ jobDeliveryId: "d1", decisionDeliveryId: "d1", status: "needs_client" })).toBeNull();
@@ -121,7 +121,7 @@ describe("decisionDeliveryId", () => {
   });
 });
 
-describe("clientOutcome (F3 window state)", () => {
+describe("clientOutcome (review window state)", () => {
   const m = (status: "review" | "needs_client", clientResponse: string | null, reviewEndsAt: Date | null = null) => ({ status, clientResponse, reviewEndsAt, amountMinor: 50_000 });
 
   it("holds on veto or hold, whatever the window says", () => {
@@ -152,7 +152,7 @@ describe("clientOutcome (F3 window state)", () => {
   });
 });
 
-describe("requiredNotPassed (F9)", () => {
+describe("requiredNotPassed", () => {
   const crit = [
     { id: "c1", required: true, description: "tests pass" },
     { id: "c2", required: true, description: "builds" },

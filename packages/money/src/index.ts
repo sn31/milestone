@@ -20,7 +20,7 @@ export { paypalMode, payoutReceiver } from "@milestone/core";
 export type { PayPalMode } from "@milestone/core";
 export { openSimulatedDispute } from "./paypal/simulated.ts";
 export type { SimulatedDispute } from "./paypal/simulated.ts";
-// Disputes (week 3): read by REST, respond with evidence (multipart) or accept the claim.
+// Disputes: read by REST, respond with evidence (multipart) or accept the claim.
 // accept-claim moves money: its REST call is in ./paypal/money.ts and it is reached only through acceptDisputeClaim below.
 export { getDispute, provideEvidence, parseDispute, recordDisputeEvent, findOpenedDispute, openDisputesFor, evidenceOpKey, submitDisputeEvidence, disputeAcceptPlan, ACCEPT_CLAIM_STATUSES, EVIDENCE_NOTES_MAX, EVIDENCE_FILE_MAX_BYTES, EVIDENCE_TOTAL_MAX_BYTES, EVIDENCE_FILE_TYPES, SERVICE_EVIDENCE_TYPE } from "./paypal/disputes.ts";
 export type { Dispute, DisputeAmount, Evidence, EvidenceFile, DisputeEventInfo, DisputeEventOutcome, DisputeActionResult, AcceptClaimPlan } from "./paypal/disputes.ts";
