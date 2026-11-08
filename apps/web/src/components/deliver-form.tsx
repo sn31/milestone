@@ -211,7 +211,6 @@ export function DeliverForm(props: {
                   className={cx(inputClass, "font-mono text-[13px]")}
                   value={repoUrl}
                   onChange={(e) => setRepoUrl(e.target.value)}
-                  // scripts/demo/beats.mjs finds this field by its placeholder: keep the two in step.
                   placeholder="https://github.com/you/repo.git"
                   required
                   disabled={busy !== null}

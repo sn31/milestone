@@ -32,7 +32,7 @@ export const LOCAL_REPO_REFUSED = "local repositories are not accepted";
 /**
  * Whether this process may clone local repositories (file:// URLs and absolute paths) on a freelancer's say-so.
  * A local path makes the worker clone any repository on the host, so it is only allowed when MILESTONE_ALLOW_LOCAL_REPOS
- * is "1", or outside production while PayPal is simulated (the recorder delivers from a local checkout), and never with
+ * is "1", or outside production while PayPal is simulated (a local run), and never with
  * DEMO_MODE=1 (the hosted demo accepts its one https repository only; see checkDemoRepo in @milestone/core).
  */
 export function localReposAllowed(env: NodeJS.ProcessEnv = process.env): boolean {

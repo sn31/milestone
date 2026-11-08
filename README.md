@@ -119,7 +119,7 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 - **Render:** `render.yaml` is a one-click Blueprint: one web service running Next.js and the job worker, Postgres, and a disk; the start script refuses to boot on the sandbox without its keys.
 - **Postman:** `fixtures/postman/milestone.postman_collection.json` covers every API route.
 - **APIMatic:** a TypeScript SDK generated from the OpenAPI spec, in `sdks/typescript/`.
-- **Claude Code** was the coding assistant; **Kokoro TTS** was used only to preview the demo video's narration timing.
+- **Claude Code** was the coding assistant.
 
 ## Documentation
 

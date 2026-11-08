@@ -112,19 +112,6 @@ The disk is mounted at `/var/data`. It holds uploaded deliveries (`UPLOAD_DIR`),
 
 The health check is `GET /api/dev/paypal/mode`. It answers with the PayPal mode and does not touch the database or PayPal.
 
-## Recording the video against the hosted demo
-
-Payout confirmations need PayPal's webhook to reach the app, so the real video is recorded against the deployed service, not a local run:
-
-```bash
-SANDBOX_CLIENT_EMAIL=... SANDBOX_CLIENT_PASSWORD=... \
-  node scripts/record-demo.mjs --app-url https://milestone-xxxx.onrender.com \
-    --database-url "<Render: milestone-db, Connections, External Database URL>" \
-    --repo-url https://github.com/<you>/landing --reset
-```
-
-The recorder drives the deployed app in Chrome, funds through PayPal's real checkout (it clicks PayPal's button, logs in as the sandbox buyer in PayPal's window and approves), and reads the database only to wait for states. The buyer's credentials are read from the environment and typed into PayPal's fields only, never logged. `--headed` shows the browser window. Beats that need the simulator (the bakery upload with an armed payout failure) are left out on the sandbox; the operator beat shows the recorded held case instead.
-
 ## The GitHub demo repository
 
 The hosted worker clones over https and needs no credentials, so the repository it verifies must be **public**. The demo repository lives in `fixtures/demo-repo`. To publish it:

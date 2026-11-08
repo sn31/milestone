@@ -137,7 +137,7 @@ The baseline-suite and gaming-scan behaviour (CLAUDE.md rule 9) is exercised aga
 
 ## Local repository paths
 
-`POST /api/milestones/{id}/deliver` accepts a `file://` URL or an absolute local path only when `MILESTONE_ALLOW_LOCAL_REPOS=1`, or when `NODE_ENV` is not `production` and PayPal is simulated (`PAYPAL_MODE=simulated`, which the demo and the recorder set); anywhere else it answers 400 with `local repositories are not accepted`, because a local path makes the worker clone any repository on the host. `https` URLs are accepted (with `DEMO_MODE=1`, only `DEMO_REPO_URL`: any other repository answers 403 `demo_repo_only`, and local repositories are refused even with the flag); `ssh`, `git://`, `ext::` and URLs carrying credentials are always refused. Set the flag only on a machine you own, never on a shared or production host.
+`POST /api/milestones/{id}/deliver` accepts a `file://` URL or an absolute local path only when `MILESTONE_ALLOW_LOCAL_REPOS=1`, or when `NODE_ENV` is not `production` and PayPal is simulated (`PAYPAL_MODE=simulated`, the local default); anywhere else it answers 400 with `local repositories are not accepted`, because a local path makes the worker clone any repository on the host. `https` URLs are accepted (with `DEMO_MODE=1`, only `DEMO_REPO_URL`: any other repository answers 403 `demo_repo_only`, and local repositories are refused even with the flag); `ssh`, `git://`, `ext::` and URLs carrying credentials are always refused. Set the flag only on a machine you own, never on a shared or production host.
 
 ## Reconciliation via PayPal MCP
 

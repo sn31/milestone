@@ -418,7 +418,7 @@ export function LedgerGrid({ rows }: { rows: LedgerRow[] }) {
             rowClassRules={rowClassRules}
             pinnedBottomRowData={totals}
             domLayout="autoHeight"
-            // Every row in the DOM from the first paint (a bounded grid): full-page captures and the recorder never see
+            // Every row in the DOM from the first paint (a bounded grid): full-page captures never see
             // an empty band where the rows below the viewport belong.
             suppressRowVirtualisation={rows.length <= 400}
             suppressColumnVirtualisation
