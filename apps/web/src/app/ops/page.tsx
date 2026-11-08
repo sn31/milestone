@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps } from "@milestone/core";
+import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps, users } from "@milestone/core";
 import { aupView } from "@/lib/aup";
 import { AupCheck } from "@/app/contracts/_components/aup-check";
 import { AupReviewForm } from "./aup-review-form";
@@ -148,6 +148,10 @@ export default async function OpsPage() {
 
   // Contracts the PayPal Acceptable Use Policy check sent to a person, oldest check first.
   const aupQueue = await db.select().from(contracts).where(eq(contracts.aupStatus, "review")).orderBy(asc(contracts.aupCheckedAt));
+  // Parties by their stored name (a second client, for one, is not one of the four demo roles).
+  const aupPartyIds = [...new Set(aupQueue.flatMap((c) => [c.clientId, c.freelancerId]))];
+  const aupPeople = aupPartyIds.length ? await db.select({ id: users.id, name: users.name }).from(users).where(inArray(users.id, aupPartyIds)) : [];
+  const partyName = (id: string) => aupPeople.find((p) => p.id === id)?.name ?? nameOf(id);
 
   const now = new Date();
   const stopped = new Map<string, number>();
@@ -363,7 +367,7 @@ export default async function OpsPage() {
                       </Link>
                     </h2>
                     <p className="mt-1 text-[13px] text-fg-muted">
-                      {nameOf(c.clientId)} pays {nameOf(c.freelancerId)} · {formatMoney(c.totalMinor, c.currency)}
+                      {partyName(c.clientId)} pays {partyName(c.freelancerId)} · {formatMoney(c.totalMinor, c.currency)}
                     </p>
                   </header>
                   <div className="px-5 py-4 sm:px-6">
