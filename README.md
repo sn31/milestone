@@ -8,28 +8,66 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). The
 
 ## Quick start
 
-Needs Node 24+, pnpm, and Docker (or any Postgres).
+Runs locally with **no PayPal account and no API keys**: a built-in PayPal simulator answers the same REST calls and posts its own webhooks, and without an Anthropic key the judgment criteria go to the client to decide.
+
+**Prerequisites**
+
+- Node.js 24 or later (`node -v`)
+- pnpm 12 (`corepack enable` picks up the version pinned in `package.json`; or `npm i -g pnpm@12`)
+- git, and a POSIX shell (macOS or Linux; on Windows use WSL)
+- Postgres 15 or later: Docker (Docker Desktop running) for the bundled Postgres 17, or a Postgres you already have
+- The first `pnpm install` downloads about 650 packages, which takes a few minutes on a cold machine.
+
+**1. Get the code and install**
 
 ```bash
-git clone <this repository> milestone && cd milestone
+git clone https://github.com/sn31/milestone.git && cd milestone
 pnpm install
-cp .env.example .env          # PAYPAL_MODE=simulated: no PayPal credentials needed
-docker compose up -d          # Postgres on :5432 (user, password, db: milestone)
-pnpm db:migrate
-pnpm db:seed
-pnpm dev                      # web on http://localhost:3000, worker in the same terminal
+cp .env.example .env          # leave every key blank: PAYPAL_MODE=simulated, no model
 ```
 
+**2. Start Postgres** (pick one)
+
+```bash
+docker compose up -d          # Postgres 17 on :5432, user/password/database all "milestone"
+```
+
+If :5432 is already taken, put `POSTGRES_PORT=5433` in `.env`, change `DATABASE_URL` in `.env` to `localhost:5433`, then run `docker compose up -d`.
+
+With your own Postgres instead of Docker:
+
+```bash
+createuser -P milestone       # password: milestone
+createdb -O milestone milestone
+```
+
+and point `DATABASE_URL` in `.env` at it if the host, port or name differ. Every command below (migrate, seed, web, worker) reads `DATABASE_URL` from `.env`; a value exported in your shell takes precedence.
+
+**3. Create the schema and the demo data, then run**
+
+```bash
+pnpm db:migrate
+pnpm db:seed                  # 5 users, 3 contracts, 7 milestones
+pnpm dev                      # web on http://localhost:3000 and the worker, in one terminal; Ctrl-C stops both
+```
+
+Wait for `worker up: verify, release, settle, advance, ...` and Next.js's `Ready`, then open **http://localhost:3000**. The role switcher at the top right picks who you are (there is no sign-in): client **Casey**, freelancer **Frankie** or capital partner **Parker** (see [Demo roles](#demo-roles)). Then follow the [Ten-minute tour](#ten-minute-tour).
+
+**Reset**
+
+- `pnpm db:reset` empties every table, deletes the simulator's state (`var/simulated-paypal.json`) and uploads, and seeds again. Stop `pnpm dev` first and start it again after.
+- `pnpm db:seed -- --reset --showcase` re-seeds with every milestone state on screen at once (tour step 7).
+
 Notes:
-- `PAYPAL_MODE=simulated` is the default no-credentials path: a local simulator stands in for PayPal, shares its state between web and worker in `var/simulated-paypal.json` (delete it to reset) and posts its own webhooks. For the real sandbox set `PAYPAL_MODE=sandbox` with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and the partner app's credentials; see `docs/runbook.md`.
-- A model is optional. It judges judgment criteria, compiles a scope into a contract, phrases advance explanations and drives the agent console: set `ANTHROPIC_API_KEY` for Claude. Without a key the contract form builds a fixed three-milestone demo contract titled from the scope's first sentence, and a delivery that passes every checkable criterion goes to "needs client" instead of the review window, because the judgment criteria stay unclear.
+- `PAYPAL_MODE=simulated` is the no-credentials path: a local simulator stands in for PayPal, shares its state between web and worker in `var/simulated-paypal.json` and posts its own webhooks. For the real sandbox set `PAYPAL_MODE=sandbox` with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and the partner app's credentials; see `docs/runbook.md`.
+- A model is optional. It judges judgment criteria, compiles a scope into a contract, phrases advance explanations and drives the agent console: set `ANTHROPIC_API_KEY` in `.env` for Claude (restart `pnpm dev`). Without a key the contract form builds a fixed three-milestone demo contract titled from the scope's first sentence, and a delivery that passes every checkable criterion goes to "needs client" instead of the review window, because the judgment criteria stay unclear.
 - In simulated mode the seed gives the freelancer and partner test payout receivers, so releases and advances work with no setup. For the real sandbox, set `PAYPAL_FREELANCER_EMAIL` and `PAYPAL_PARTNER_EMAIL` (sandbox accounts) before `pnpm db:seed`.
 - Build the demo repository with `scripts/make-demo-repo.sh <dir>`. Its branches are `m1-pass` (the signup form's password field and validation; all tests pass), `m2-partial` (a pricing page; the client's annual-discount test fails against it, so the milestone is held) and `m2-injection` (same code, commit message tries to instruct the reviewer; flagged). Deliver a branch from the milestone's Deliver form (repository path and branch) or by merging a pull request with the GitHub webhook set up.
-- Check everything with `pnpm typecheck`, `pnpm test` and `pnpm check:boundaries`. Postgres-backed end-to-end suites are opt-in with `MILESTONE_E2E=1 pnpm test`.
+- Check everything with `pnpm typecheck`, `pnpm test` and `pnpm check:boundaries`. Postgres-backed end-to-end suites are opt-in with `MILESTONE_E2E=1 pnpm test` (seed first).
 
 ## Ten-minute tour
 
-The fastest way to see what Milestone is. Set `REVIEW_WINDOW_SECONDS=120` in `.env` first so review windows run at demo pace.
+The fastest way to see what Milestone is. Set `REVIEW_WINDOW_SECONDS=120` in `.env` so review windows run at demo pace, **before** `pnpm dev` (if it is already running, stop it with Ctrl-C and start it again).
 
 1. `scripts/make-demo-repo.sh /tmp/milestone-demo` builds the demo repository and its three delivery branches.
 2. As **client** (role switcher, top right), open the signup-flow contract and fund milestone 1. In simulated mode the PayPal checkout is one click.
@@ -47,6 +85,8 @@ The role switcher in the header sets a cookie. There is no sign-in; this is a de
 - freelancer (Frankie): approves contracts, delivers (merged pull request, a commit, or uploaded files) and takes advances.
 - partner (Parker): the capital partner and operator; sees the lender's book at `/lender` and resolves cases at `/ops`.
 
+Driving the API by hand (curl, Postman): send the cookie `milestone_actor=usr_client`, `usr_freelancer` or `usr_partner`; with no cookie you are the client.
+
 Seed data: three active contracts. "Signup flow for a SaaS landing page" (`ctr_demo`) has three milestones of $100 that match the demo repo branches. "Brand refresh for a bakery" (`ctr_brand`) has two milestones whose criteria are uploaded files (logo, PDF style guide, website copy). "Analytics dashboard" (`ctr_dash`) is a second client's (Dana) small contract so the lender's book has two clients. `pnpm db:seed -- --showcase` places every milestone in a different state.
 
 ## Agent quick start
@@ -57,6 +97,16 @@ Seed data: three active contracts. "Signup flow for a SaaS landing page" (`ctr_d
 
 An agent funds only the next draft milestone of an approved contract, for exactly its amount and currency, within the mandate's fund caps, from a saved PayPal that belongs to its user; the funding guarantee is in [docs/mcp.md](docs/mcp.md). An agent's approve is accepted only when the policy already decided release for the latest delivery, every required criterion passed and the amount is within the mandate's cap. No agent tool pays out or refunds. Every call, accepted or refused, is in the audit log as `agent:<name> for <user>`, and `/agents` shows it. Revoking the mandate stops the agent on its next call.
 
+## Tools used
+
+- **Claude** (`claude-sonnet-5-5` by default) through the Anthropic SDK, optional (`ANTHROPIC_API_KEY`): judges the judgment criteria of a delivery and must cite evidence, compiles a scope into a contract, phrases advance offers, drafts dispute responses, and drives the agent console. It never decides payment; the pure `decide()` policy does.
+- **Model Context Protocol:** Milestone's own MCP server (`/api/mcp`) lets AI agents (Claude Desktop, Cursor, the built-in console) act under a capped mandate; **PayPal's MCP server** (`@paypal/mcp`) is used read-only for reconciliation, disputes and the console.
+- **PayPal developer platform** (sandbox, or the built-in simulator of the same calls): Orders v2 and JS SDK v6, Payment Method Tokens v3, Payouts v1, Refunds, Invoicing v2, Disputes, webhooks.
+- **Sponsor tools:** AG Grid Community (four grids), Render (`render.yaml`), Postman (collection), and an OpenAPI spec ready for APIMatic.
+- **Claude Code** was the coding assistant; **Kokoro TTS** was used only to time and voice the demo video's narration.
+
+The full list, with how each is used, is under "Tools used" in [docs/submission.md](docs/submission.md#tools-used).
+
 ## Documentation
 
 - [docs/submission.md](docs/submission.md): the Devpost text.
@@ -66,7 +116,7 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 - [docs/eval.md](docs/eval.md): the model eval set and runs.
 - [fixtures/real-repos/README.md](fixtures/real-repos/README.md): 29 deliveries against real repositories, including red-team attacks.
 - [docs/video-script.md](docs/video-script.md): the demo video script.
-- [docs/openapi.yaml](docs/openapi.yaml) and [docs/apimatic.md](docs/apimatic.md): API spec and SDK generation.
+- [docs/openapi.yaml](docs/openapi.yaml) and [docs/apimatic.md](docs/apimatic.md): the OpenAPI spec and how to generate an SDK from it with APIMatic (no generated SDK is committed).
 - [fixtures/postman/milestone.postman_collection.json](fixtures/postman/milestone.postman_collection.json): Postman collection.
 - [docs/deploy.md](docs/deploy.md): deploying the hosted demo to Render.
 - [docs/runbook.md](docs/runbook.md): operator runbook.
@@ -100,4 +150,4 @@ The other four (home, the milestone rail, the criteria editor and the lender's b
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE).
+Open source under the MIT License, see [LICENSE](LICENSE).

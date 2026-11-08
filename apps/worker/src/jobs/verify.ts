@@ -164,6 +164,11 @@ export async function conclude(deliveryId: string, milestone: Milestone, criteri
   return checksOnly(deliveryId, criteria, evidence, deliveryTexts, extra, "not judged: no model configured");
 }
 
+/** An evidence summary's first line, without the "; last lines:" lead-in to an output tail that lives in the evidence. */
+export function evidenceHeadline(summary: string): string {
+  return (summary.split("\n")[0] ?? summary).replace(/;?\s*last lines:\s*$/i, "").trim();
+}
+
 /** The verdict from deterministic evidence alone: each criterion it settles keeps its result, every other one is unclear. */
 function checksOnly(deliveryId: string, criteria: CriterionSpec[], evidence: EvidenceSummary[], deliveryTexts: Array<{ source: string; text: string }>, extra: Injection, unjudged: string) {
   const injection = detectInjection(deliveryTexts);
@@ -171,7 +176,7 @@ function checksOnly(deliveryId: string, criteria: CriterionSpec[], evidence: Evi
   const byCriterion = new Map(evidence.filter((e) => e.criterion_id).map((e) => [e.criterion_id!, e]));
   for (const c of verdict.criteria) {
     const ev = byCriterion.get(c.criterion_id);
-    c.rationale = ev?.status ? (ev.summary.split("\n")[0] ?? ev.summary) : unjudged;
+    c.rationale = ev?.status ? evidenceHeadline(ev.summary) : unjudged;
   }
   return { evidence, verdict, result: overall(verdict, criteria), model: "deterministic-only", promptHash: null as string | null, injectionHits: [...injection.hits, ...extra.hits], judged: null };
 }
