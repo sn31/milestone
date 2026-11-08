@@ -4,11 +4,11 @@ Freelance pay runs on trust: in one survey of 3,300 freelancers, 85% are paid la
 
 PayPal holds and moves every dollar: the client pays through PayPal Checkout or from a PayPal saved once, the funds wait in the platform account, and PayPal Payouts pays the freelancer, with a refund of the rest when only part of the work passed. Judgment criteria are judged by Claude (`claude-sonnet-5-5` by default) through the Anthropic SDK when `ANTHROPIC_API_KEY` is set. A client can hand bounded actions to an AI agent (Claude Desktop, Cursor, or the built-in console) through Milestone's MCP server: it funds only the next milestone within the mandate's caps, and can only make a release happen sooner, never one the policy would not.
 
-Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). The hosted demo and the demo video use a built-in PayPal simulator that answers the same REST calls and posts its own webhooks; the same money route ran against the real PayPal sandbox on Nov 5 (capture, payout, a retried payout that did not pay twice, and a partial payout plus refund: `fixtures/paypal-recordings/spike-2026-11-05.json`).
+Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). The hosted demo runs on the real PayPal sandbox: you fund milestones through PayPal's own sandbox checkout with a sandbox buyer account, and payouts, refunds, advances and webhooks are PayPal's. Locally it runs with no keys on a built-in PayPal simulator that answers the same REST calls and posts its own webhooks, or on your own sandbox app. The money route was first proved against the sandbox on Nov 5 (capture, payout, a retried payout that did not pay twice, and a partial payout plus refund: `fixtures/paypal-recordings/spike-2026-11-05.json`).
 
 ## Quick start
 
-Runs locally with **no PayPal account and no API keys**: a built-in PayPal simulator answers the same REST calls and posts its own webhooks, and without an Anthropic key the judgment criteria go to the client to decide.
+Runs locally with **no PayPal account and no API keys**: a built-in PayPal simulator answers the same REST calls and posts its own webhooks, and without an Anthropic key the judgment criteria go to the client to decide. With your own PayPal sandbox app, `PAYPAL_MODE=sandbox` runs the same app on the real sandbox (see the notes below). The hosted demo is the real sandbox already; `docs/deploy.md` describes it.
 
 **Prerequisites**
 
@@ -59,7 +59,7 @@ Wait for `worker up: verify, release, settle, advance, ...` and Next.js's `Ready
 - `pnpm db:seed -- --reset --showcase` re-seeds with every milestone state on screen at once (tour step 7).
 
 Notes:
-- `PAYPAL_MODE=simulated` is the no-credentials path: a local simulator stands in for PayPal, shares its state between web and worker in `var/simulated-paypal.json` and posts its own webhooks. For the real sandbox set `PAYPAL_MODE=sandbox` with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and the partner app's credentials; see `docs/runbook.md`.
+- `PAYPAL_MODE=simulated` is the no-credentials path: a local simulator stands in for PayPal, shares its state between web and worker in `var/simulated-paypal.json` and posts its own webhooks. For the real sandbox set `PAYPAL_MODE=sandbox` with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and the partner app's credentials; see `docs/runbook.md`. Locally, PayPal's payout webhook cannot reach `localhost`, so a release stays at "releasing"; the hosted demo receives it and shows Released. On the sandbox the showcase's other states are recorded with simulator ids and marked "recorded for the showcase" (display only); the signup-flow contract is the live path.
 - A model is optional. It judges judgment criteria, compiles a scope into a contract, phrases advance explanations and drives the agent console: set `ANTHROPIC_API_KEY` in `.env` for Claude (restart `pnpm dev`). Without a key the contract form builds a fixed three-milestone demo contract titled from the scope's first sentence, and a delivery that passes every checkable criterion goes to "needs client" instead of the review window, because the judgment criteria stay unclear.
 - In simulated mode the seed gives the freelancer and partner test payout receivers, so releases and advances work with no setup. For the real sandbox, set `PAYPAL_FREELANCER_EMAIL` and `PAYPAL_PARTNER_EMAIL` (sandbox accounts) before `pnpm db:seed`.
 - Build the demo repository with `scripts/make-demo-repo.sh <dir>`. Its branches are `m1-pass` (the signup form's password field and validation; all tests pass), `m2-partial` (a pricing page; the client's annual-discount test fails against it, so the milestone is held) and `m2-injection` (same code, commit message tries to instruct the reviewer; flagged). Deliver a branch from the milestone's Deliver form (repository path and branch) or by merging a pull request with the GitHub webhook set up.
@@ -101,9 +101,13 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 
 - **Claude** (`claude-sonnet-5-5` by default) through the Anthropic SDK, optional (`ANTHROPIC_API_KEY`): judges the judgment criteria of a delivery and must cite evidence, compiles a scope into a contract, phrases advance offers, drafts dispute responses, and drives the agent console. It never decides payment; the pure `decide()` policy does.
 - **Model Context Protocol:** Milestone's own MCP server (`/api/mcp`) lets AI agents (Claude Desktop, Cursor, the built-in console) act under a capped mandate; **PayPal's MCP server** (`@paypal/mcp`) is used read-only for reconciliation, disputes and the console.
-- **PayPal developer platform** (sandbox, or the built-in simulator of the same calls): Orders v2 and JS SDK v6, Payment Method Tokens v3, Payouts v1, Refunds, Invoicing v2, Disputes, webhooks.
-- **Sponsor tools:** AG Grid Community (four grids), Render (`render.yaml`), Postman (collection), and an OpenAPI spec ready for APIMatic.
-- **Claude Code** was the coding assistant; **Kokoro TTS** was used only to time and voice the demo video's narration.
+- **PayPal developer platform** (the hosted demo runs on the real sandbox; a built-in simulator of the same calls covers keyless local runs): Orders v2 and JS SDK v6 checkout to fund a milestone, Payment Method Tokens v3 to save a client's PayPal once so an agent can fund the next milestone, Payouts v1 to release (one batch, a lending partner repaid first), Refunds for the unpassed share of a partial release, Invoicing v2 receipts, Disputes, and signature-verified webhooks; a milestone is Released only when the payout webhook confirms it. Every POST carries `PayPal-Request-Id` from a stored operation, so a retry never pays twice.
+- **PayPal Acceptable Use Policy check:** before a contract can be signed or funded, a keyword pass and Claude screen it against PayPal's Acceptable Use Policy (each flag must quote the contract); a pure rule blocks signing and funding until an operator clears a flag on `/ops`.
+- **AG Grid Community:** four grids. The contract ledger (double-entry legs with a pinned totals row that shows the books balance, quick filter and money filters that work in dollars over cents), the lending partner's book (pinned book total, exposure and repayment cells), the audit log and the receipt's evidence (expandable full-width detail rows). One Theming API theme follows the app's light and dark mode.
+- **Render:** `render.yaml` is a one-click Blueprint: one web service running Next.js and the job worker, Postgres, and a disk; the start script refuses to boot on the sandbox without its keys.
+- **Postman:** `fixtures/postman/milestone.postman_collection.json` covers every API route.
+- **Sponsor tools:** AG Grid Community (four grids), Render (`render.yaml`), Postman (collection), and APIMatic (a TypeScript SDK generated from the OpenAPI spec, in `sdks/typescript/`).
+- **Claude Code** was the coding assistant; **Kokoro TTS** was used only to preview the demo video's narration timing.
 
 ## Documentation
 
@@ -111,7 +115,7 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 - [docs/mcp.md](docs/mcp.md): the Milestone MCP server, mandates and the agent guarantee.
 - [docs/eval.md](docs/eval.md): the model eval set and runs.
 - [fixtures/real-repos/README.md](fixtures/real-repos/README.md): 29 deliveries against real repositories, including red-team attacks.
-- [docs/openapi.yaml](docs/openapi.yaml) and [docs/apimatic.md](docs/apimatic.md): the OpenAPI spec and how to generate an SDK from it with APIMatic (no generated SDK is committed).
+- [docs/openapi.yaml](docs/openapi.yaml) and [docs/apimatic.md](docs/apimatic.md): the OpenAPI spec, and the TypeScript SDK APIMatic generated from it (`sdks/typescript/`, with a working example).
 - [fixtures/postman/milestone.postman_collection.json](fixtures/postman/milestone.postman_collection.json): Postman collection.
 - [docs/deploy.md](docs/deploy.md): deploying the hosted demo to Render.
 - [docs/runbook.md](docs/runbook.md): operator runbook.
@@ -119,7 +123,7 @@ An agent funds only the next draft milestone of an approved contract, for exactl
 
 ## Structure
 
-`apps/web` (UI, API routes, webhooks, the MCP server at `/api/mcp`, `/agents`), `apps/worker` (verify, release, settle, advance, dispute and reconcile jobs), `packages/core` (schemas, ledger, state machine, mandates), `packages/money` (PayPal client, PayPal MCP client and policy), `packages/verify` (compiler, deterministic stage, judgment). Only `packages/money/src/policy/execute.ts` moves money, enforced by `pnpm check:boundaries` in CI. `render.yaml` is the Render blueprint for the hosted demo (one service running web and worker, plus Postgres, simulated PayPal). Not built: the KERNEL visual stage and negotiation.
+`apps/web` (UI, API routes, webhooks, the MCP server at `/api/mcp`, `/agents`), `apps/worker` (verify, release, settle, advance, dispute and reconcile jobs), `packages/core` (schemas, ledger, state machine, mandates), `packages/money` (PayPal client, PayPal MCP client and policy), `packages/verify` (compiler, deterministic stage, judgment). Only `packages/money/src/policy/execute.ts` moves money, enforced by `pnpm check:boundaries` in CI. `render.yaml` is the Render blueprint for the hosted demo (one service running web and worker, plus Postgres and a disk, on the real PayPal sandbox). Not built: the KERNEL visual stage and negotiation.
 
 Known limitation: delivered code runs on the worker host with network access; a real deployment needs a container or microVM per verification.
 
