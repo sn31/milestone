@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { AUDIT_EVENTS, audit, contracts, criteria, fromPayPalValue, milestones, storableCompiledCriteria, type ContractSpec } from "@milestone/core";
 import { compileContract, isModelConfigured } from "@milestone/verify";
+import { ensureAup } from "@/lib/aup";
 import { getDb } from "@/lib/db";
 import { jsonError } from "@/lib/http";
 import { RATE_RULES, rateLimited } from "@/lib/rate-limit";
@@ -126,5 +127,7 @@ export async function POST(req: Request) {
     }
     await audit(tx, { actor: actor.userId, event: AUDIT_EVENTS.contractCreated, contractId, detail: { milestones: result.contract.milestones.length } });
   });
+  // The PayPal Acceptable Use Policy check, before anyone can sign or fund: keywords here, the model in the worker.
+  await ensureAup(db, contractId, actor.userId);
   return NextResponse.redirect(new URL(`/contracts/${contractId}`, req.url), 303);
 }

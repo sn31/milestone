@@ -517,6 +517,44 @@
       }
     },
     {
+      "name": "Clear or reject a flagged contract (PayPal AUP review)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Cookie",
+            "value": "milestone_actor=usr_partner"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/ops/aup/ctr_aup",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "ops",
+            "aup",
+            "ctr_aup"
+          ]
+        },
+        "description": "Only while the contract's PayPal Acceptable Use Policy check is in review (the seeded ctr_aup is). action is clear (the parties can sign and fund it) or reject (final).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"clear\",\n  \"note\": \"Read the scope: sandbox demo only, no real gambling or crypto.\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "Deliver a commit (manual)",
       "request": {
         "method": "POST",

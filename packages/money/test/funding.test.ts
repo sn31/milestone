@@ -10,7 +10,7 @@ const earlier = new Date(now.getTime() - 86_400_000);
 function facts(over: Partial<FundingFacts> = {}): FundingFacts {
   return {
     mandate: { userId: "usr_c", actions: ["read", "fund"], currency: "USD", expiresAt: later, revokedAt: null, fundCapMinor: 20_000, fundTotalCapMinor: 50_000 },
-    contract: { id: "ctr_1", clientId: "usr_c", status: "active", currency: "USD", clientApprovedAt: earlier, freelancerApprovedAt: earlier },
+    contract: { id: "ctr_1", clientId: "usr_c", status: "active", currency: "USD", clientApprovedAt: earlier, freelancerApprovedAt: earlier, aupStatus: "clear" },
     milestone: { id: "mst_2", contractId: "ctr_1", seq: 2, status: "draft", amountMinor: 10_000, paypalCaptureId: null },
     siblings: [
       { id: "mst_1", seq: 1, status: "released" },
@@ -49,6 +49,10 @@ describe("fundingAllows", () => {
     expect(refused({ ...f, contract: { ...f.contract, clientId: "usr_other" } })).toBe("not_contract_client");
     expect(refused({ ...f, contract: { ...f.contract, status: "draft" } })).toBe("contract_not_approved");
     expect(refused({ ...f, contract: { ...f.contract, freelancerApprovedAt: null } })).toBe("contract_not_approved");
+    expect(refused({ ...f, contract: { ...f.contract, aupStatus: null } })).toBe("aup_unchecked");
+    expect(refused({ ...f, contract: { ...f.contract, aupStatus: "checking" } })).toBe("aup_checking");
+    expect(refused({ ...f, contract: { ...f.contract, aupStatus: "review" } })).toBe("aup_review");
+    expect(refused({ ...f, contract: { ...f.contract, aupStatus: "rejected" } })).toBe("aup_rejected");
     expect(refused({ ...f, milestone: { ...f.milestone, contractId: "ctr_2" } })).toBe("milestone_not_in_contract");
     expect(refused({ ...f, milestone: { ...f.milestone, status: "funded" } })).toBe("milestone_not_draft");
     expect(refused({ ...f, milestone: { ...f.milestone, paypalCaptureId: "CAP" } })).toBe("capture_in_progress");
@@ -112,13 +116,14 @@ function arbFacts(): fc.Arbitrary<FundingFacts> {
       captureId: mostly<string | null>(null, "CAP-1"),
       captureInProgress: mostly(false, true),
       otherContract: mostly(false, true),
+      aup: mostly<string | null>("clear", "keywords_only", "cleared", null, "checking", "review", "rejected"),
     })
     .map((r): FundingFacts => {
       const siblings = r.statuses.map((status, i) => ({ id: `mst_${i + 1}`, seq: i + 1, status }));
       const target = siblings[r.pick % siblings.length]!;
       return {
         mandate: { userId: "usr_c", actions: r.hasFund ? ["read", "fund"] : ["read"], currency: r.mandateCurrency, expiresAt: new Date(now.getTime() + r.expiresIn * 60_000), revokedAt: r.revoked ? earlier : null, fundCapMinor: r.fundCap, fundTotalCapMinor: r.totalCap },
-        contract: { id: "ctr_1", clientId: r.clientIsUser ? "usr_c" : "usr_x", status: r.contractStatus, currency: "USD", clientApprovedAt: r.clientApproved ? earlier : null, freelancerApprovedAt: r.freelancerApproved ? earlier : null },
+        contract: { id: "ctr_1", clientId: r.clientIsUser ? "usr_c" : "usr_x", status: r.contractStatus, currency: "USD", clientApprovedAt: r.clientApproved ? earlier : null, freelancerApprovedAt: r.freelancerApproved ? earlier : null, aupStatus: r.aup },
         milestone: { id: target.id, contractId: r.otherContract ? "ctr_2" : "ctr_1", seq: target.seq, status: target.status, amountMinor: r.milestoneAmount, paypalCaptureId: r.captureId },
         siblings,
         paymentMethod:
@@ -173,6 +178,13 @@ describe("fundingAllows properties: an ok always satisfies the whole guarantee",
         if (!ok(f)) return true;
         return f.contract.status === "active" && !!f.contract.clientApprovedAt && !!f.contract.freelancerApprovedAt && f.contract.clientId === f.mandate.userId && f.milestone.contractId === f.contract.id;
       }),
+      { numRuns: 2_000 },
+    );
+  });
+
+  it("never ok unless the PayPal AUP check is clear, keywords only or cleared by an operator", () => {
+    fc.assert(
+      fc.property(arbFacts(), (f) => !ok(f) || ["clear", "keywords_only", "cleared"].includes(f.contract.aupStatus ?? "")),
       { numRuns: 2_000 },
     );
   });

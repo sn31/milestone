@@ -17,3 +17,7 @@ export { postVerdictComment, formatVerdictComment, commentMarker, defaultBranchH
 export type { PostCommentInput, PostCommentResult, VerdictCommentInput } from "./github.ts";
 export { compileEvidencePack, draftResponse, templateResponse, packCites, citationsIn, packHash, RESPONSE_MAX_CHARS } from "./dispute.ts";
 export type { EvidencePack, EvidencePackInput, DraftResponse, PackContract, PackMilestone, PackCriterion, PackDelivery, PackAuditRow, PackLedgerRow, PackDispute, PackFile, PackTimelineItem, PackCriterionRow, PackLedgerItem, PackClientAction, PackEvidenceItem } from "./dispute.ts";
+export { checkAcceptableUse, aupKeywordFlags, parseAupFlags, AUP_KEYWORDS, AUP_SYSTEM } from "./aup/check.ts";
+export type { AupCheckResult, AupParseResult } from "./aup/check.ts";
+export { PAYPAL_AUP_CATEGORIES, PAYPAL_AUP_SOURCE, aupCategory } from "./aup/paypal-aup.ts";
+export type { AupCategory } from "./aup/paypal-aup.ts";

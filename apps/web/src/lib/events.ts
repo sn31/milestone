@@ -26,6 +26,9 @@ export function eventTone(event: string): ToneKey {
   const known = DISPUTE_EVENTS[event];
   if (known) return known.tone;
   const e = event.toLowerCase();
+  if (e === "aup.checked") return "draft";
+  if (e === "aup.cleared") return "released";
+  if (e === "aup.flagged") return "held";
   if (/fail|error|denied|revers|mismatch|conflict|refused|unmatched|needs_operator|shortfall|injection/.test(e)) return "danger";
   if (/needs_client/.test(e)) return "needs";
   if (/held|veto|client\.hold|waiting|skipped|withdrawn/.test(e)) return "held";

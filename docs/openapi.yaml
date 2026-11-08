@@ -51,7 +51,9 @@ paths:
       summary: Compile a scope into a draft contract
       description: |
         Form post from the New contract page. With ANTHROPIC_API_KEY set, Claude compiles the scope; otherwise a
-        three-milestone demo contract is built. Responds with a 303 redirect to the contract page.
+        three-milestone demo contract is built. Responds with a 303 redirect to the contract page. The new contract's
+        PayPal Acceptable Use Policy check starts here: without a model the keyword pass is stored at once (keywords_only,
+        or review on a hit); with one the contract is "checking" until the worker's aup job stores the result.
       requestBody:
         required: true
         content:
@@ -76,12 +78,19 @@ paths:
       tags: [contracts]
       operationId: approveContract
       summary: Approve a contract as the client or the freelancer
-      description: Records the caller's approval time. When both have approved, the contract becomes active.
+      description: |
+        Records the caller's approval time. When both have approved, the contract becomes active. Neither party can
+        approve while the contract's PayPal Acceptable Use Policy check is not clear, keywords_only or cleared by an
+        operator: 409 with reason aup_unchecked, aup_checking, aup_review or aup_rejected (audited as aup.refused). A
+        browser form post (Accept text/html) is redirected to /contracts/{id}?aup=<reason> instead.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: ctr_demo }
       responses:
         "303":
           description: Redirect to /contracts/{id}
+        "409":
+          description: Refused by the PayPal AUP check (reason aup_unchecked, aup_checking, aup_review or aup_rejected)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "403":
           description: Only the client or freelancer can approve
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -93,7 +102,10 @@ paths:
       tags: [milestones]
       operationId: createFundingOrder
       summary: Create or replay the PayPal order that funds a milestone
-      description: Client only. The contract must be active and the milestone in draft. Repeated calls return the same order.
+      description: |
+        Client only. The contract must be active and the milestone in draft. Repeated calls return the same order.
+        Refused with 409 and reason aup_unchecked, aup_checking, aup_review or aup_rejected while the contract's PayPal
+        Acceptable Use Policy check is not clear, keywords_only or cleared (no order is created; audited as aup.refused).
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: mst_1 }
       responses:
@@ -329,6 +341,41 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /api/ops/aup/{contractId}:
+    post:
+      tags: [ops]
+      operationId: resolveAupReview
+      summary: Clear or reject a contract the PayPal AUP check flagged
+      description: |
+        Partner or platform role only, and only while the contract's PayPal Acceptable Use Policy check is in review.
+        clear moves it to cleared (it can be signed and funded as usual; aup.cleared). reject is final (aup.rejected).
+        Moves no money.
+      parameters:
+        - { name: contractId, in: path, required: true, schema: { type: string }, example: ctr_aup }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, note]
+              properties:
+                action: { type: string, enum: [clear, reject] }
+                note: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: string, enum: [cleared, rejected] }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: The contract is not waiting for an AUP review }
   /api/milestones/{id}/deliver:
     post:
       tags: [deliveries]
@@ -601,7 +648,8 @@ paths:
       summary: Edit one milestone's release conditions while the contract is a draft
       description: |
         Either party. Body: { milestoneId, operations: [{ op: add | remove | update | reorder, ... }] }. Validated with
-        the compiler's rules and audited before and after; an edit after one party approved clears both approvals. With
+        the compiler's rules and audited before and after; an edit after one party approved clears both approvals. An
+        edit that changes the criteria starts a new PayPal Acceptable Use Policy check of the contract text. With
         DEMO_MODE=1, test and build commands are limited to npm test and npm run <script>, with no options or shell characters.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, example: ctr_demo }
@@ -824,7 +872,8 @@ paths:
       description: |
         Authenticated by a mandate token; the agent acts as the mandate's user through the same routes a human uses, and
         every call, refused ones included, is audited. Seven tools: list_contracts, get_milestone, get_ledger,
-        draft_contract, fund_milestone, deliver_milestone, respond_to_review. See docs/mcp.md.
+        draft_contract, fund_milestone, deliver_milestone, respond_to_review. list_contracts carries each contract's
+        PayPal AUP check (aupCheck); fund_milestone refuses a contract whose check is not clear. See docs/mcp.md.
       security:
         - mandateToken: []
       requestBody:

@@ -30,9 +30,19 @@ Failed refund. A partial release paid out but the refund of the unverified share
 
 Recording the resolution: submit the note on the `/ops` card, or `POST /api/ops/{milestoneId}/resolve` with `{"note": "..."}` as the partner. This writes `ops.resolved` and removes the card from the queue. It does not move money and does not change the milestone status; the manual PayPal action does that.
 
+## PayPal AUP reviews
+
+Every contract is checked against PayPal's Acceptable Use Policy before it can be signed or funded (see `docs/architecture.md`, "The PayPal Acceptable Use Policy check"). A contract the check flags, or whose model call failed, waits under "PayPal AUP reviews" on `/ops` with each flag's policy section, category and the contract words it quotes. The seeded `ctr_aup` (an online casino promo page) is one.
+
+1. Open the contract from the card and read the scope, milestones and criteria. The quotes are the parties' words; the flag is a reason to look, not a finding. A failed model call shows `model: <error>` and no model flags.
+2. Decide against the policy (the link on the card opens the version the check used). An "Activities Requiring Approval" item is allowed only if PayPal has approved that activity for this account; for the hackathon sandbox, assume it has not.
+3. Clear (the parties can sign and fund as usual; `aup.cleared`) or Reject (final: it can never be signed or funded; `aup.rejected`), with a note saying what you checked. The same as an API call, as the partner or platform: `POST /api/ops/aup/{contractId}` with `{"action": "clear" | "reject", "note": "..."}` (409 unless the contract is in review).
+
+A cleared contract whose criteria are edited later is checked again and can come back. A contract that stays "checking" for more than a minute means the worker is not running the `aup` job: start the worker; the next signing or funding attempt does not re-queue a check while one is pending for the same text. Without `ANTHROPIC_API_KEY` the check is the keyword pass alone, stored at once as "keywords only" (or review on a keyword hit).
+
 ## Audit events to search
 
-`audit_log.event`: `milestone.needs_operator`, `ops.resolved`, `release.refused_needs_operator`, `verify.refused_needs_operator`, `release.claimed`, `release.waiting`, `release.skipped_in_flight`, `paypal.payout`, `paypal.refund`, `paypal.payout_error`, `paypal.refund_error`, `paypal.payout_failed`, `paypal.payout_reversed`, `paypal.payout_batch_denied`, `paypal.payout_unmatched`, `paypal.unmatched_batch`, `paypal.refund_failed`, `paypal.refund_unmatched`, `paypal.capture_unmatched`, `milestone.capture_mismatch`, `milestone.settle_conflict`, `milestone.reversed`, `advance.repayment_failed`, `ledger.skipped`, `paypal.receipt_failed`, `delivery.manual`, `delivery.upload`, `advance.accepted`, `advance.funded`, `advance.needs_operator`, `advance.withdrawn`, `advance.refused`, `advance.skipped`, `advance.config_error`, `paypal.advance_payout_error`. Example:
+`audit_log.event`: `milestone.needs_operator`, `ops.resolved`, `release.refused_needs_operator`, `verify.refused_needs_operator`, `release.claimed`, `release.waiting`, `release.skipped_in_flight`, `paypal.payout`, `paypal.refund`, `paypal.payout_error`, `paypal.refund_error`, `paypal.payout_failed`, `paypal.payout_reversed`, `paypal.payout_batch_denied`, `paypal.payout_unmatched`, `paypal.unmatched_batch`, `paypal.refund_failed`, `paypal.refund_unmatched`, `paypal.capture_unmatched`, `milestone.capture_mismatch`, `milestone.settle_conflict`, `milestone.reversed`, `advance.repayment_failed`, `ledger.skipped`, `paypal.receipt_failed`, `delivery.manual`, `delivery.upload`, `advance.accepted`, `advance.funded`, `advance.needs_operator`, `advance.withdrawn`, `advance.refused`, `advance.skipped`, `advance.config_error`, `paypal.advance_payout_error`, `aup.checked`, `aup.flagged`, `aup.cleared`, `aup.rejected`, `aup.refused`. Example:
 
 ```sql
 select created_at, actor, event, detail from audit_log where milestone_id = 'mst_1' order by created_at;

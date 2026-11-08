@@ -25,7 +25,8 @@ import {
 } from "@milestone/core";
 import { txnKind } from "@/components/ledger-labels";
 import { policyRule } from "@/lib/policy-rules";
-import { cleanText, untrusted } from "./untrusted";
+import { UNTRUSTED_CONTRACT_WARNING, cleanText, untrusted } from "./untrusted";
+import { aupView } from "@/lib/aup";
 
 type Contract = typeof contracts.$inferSelect;
 type Milestone = typeof milestones.$inferSelect;
@@ -36,6 +37,32 @@ export function partyRole(userId: string, c: Pick<Contract, "clientId" | "freela
   if (c.clientId === userId) return "client";
   if (c.freelancerId === userId) return "freelancer";
   return null;
+}
+
+// ---------- PayPal Acceptable Use Policy check ----------
+
+/**
+ * A contract's AUP check for an agent: the status and whether it may be signed and funded, the flagged categories, and
+ * the contract words each flag quotes. Those words were written by the parties, so they sit inside an untrusted field.
+ */
+export function aupSummary(c: Pick<Contract, "aupStatus" | "aupCheck" | "aupCheckedAt"> | undefined | null) {
+  if (!c) return null;
+  const v = aupView(c);
+  return {
+    status: v.status,
+    label: v.label,
+    allowsSigningAndFunding: v.allowsSigningAndFunding,
+    refusal: v.refusal,
+    mode: v.mode,
+    model: v.model,
+    checkedAt: v.checkedAt,
+    policy: v.policy,
+    flags: v.flags.map((f) => ({ category: f.category, name: f.name, section: f.section, confidence: f.confidence, source: f.source })),
+    resolution: v.resolution ? { action: v.resolution.action, at: v.resolution.at } : null,
+    untrusted: v.flags.length
+      ? untrusted({ quotes: v.flags.map((f) => ({ category: f.category, quote: cleanText(f.quote, 300), rationale: cleanText(f.rationale, 600) })) }, UNTRUSTED_CONTRACT_WARNING)
+      : null,
+  };
 }
 
 // ---------- list_contracts ----------
@@ -55,6 +82,7 @@ export async function listContracts(db: Db, userId: string) {
     repo: c.repoFullName,
     approvedByClient: c.clientApprovedAt !== null,
     approvedByFreelancer: c.freelancerApprovedAt !== null,
+    aupCheck: aupSummary(c),
     milestones: c.milestones.map((m) => ({ id: m.id, seq: m.seq, title: m.title, status: m.status, amount: money(m.amountMinor, c.currency), reviewEndsAt: m.reviewEndsAt?.toISOString() ?? null })),
   }));
 }
@@ -153,6 +181,7 @@ export async function milestoneView(db: Db, mandate: AgentMandate, userId: strin
       contractId: c.id,
       contractTitle: c.title,
       contractStatus: c.status,
+      contractAupCheck: aupSummary(c),
       seq: m.seq,
       title: m.title,
       status: m.status,

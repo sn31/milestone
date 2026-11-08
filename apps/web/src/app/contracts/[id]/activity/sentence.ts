@@ -36,6 +36,21 @@ export function eventSentence(event: string, raw: unknown, names: Record<string,
       return "Signed by the client";
     case "contract.approved_by_freelancer":
       return "Signed by the freelancer";
+    case "aup.checked": {
+      const how = d.mode === "keywords" ? " (keywords only)" : d.mode === "recorded" ? " (recorded for the showcase)" : d.mode === "model_error" ? " (the model call failed)" : "";
+      const status = d.status === "review" ? "needs an operator's review" : d.status === "keywords_only" ? "no keyword matched" : "clear";
+      return `PayPal AUP check: ${status}${how}`;
+    }
+    case "aup.flagged": {
+      const flags = Array.isArray(d.flags) ? d.flags.map((f) => (f && typeof f === "object" ? str((f as Detail).category) : null)).filter(Boolean) : [];
+      return flags.length ? `PayPal AUP check flagged ${flags.join(", ").replace(/_/g, " ")}; an operator decides` : "PayPal AUP check could not finish; an operator decides";
+    }
+    case "aup.cleared":
+      return `An operator cleared the PayPal AUP review${str(d.note) ? `: ${d.note}` : ""}`;
+    case "aup.rejected":
+      return `An operator rejected the contract under PayPal's AUP${str(d.note) ? `: ${d.note}` : ""}`;
+    case "aup.refused":
+      return `${d.action === "sign" ? "Signing" : "Funding"} refused: the PayPal AUP check is ${d.reason === "aup_review" ? "waiting for an operator" : d.reason === "aup_rejected" ? "rejected" : d.reason === "aup_checking" ? "still running" : "not done yet"}`;
     case "milestone.order_created":
       return `PayPal order created${amt ? ` for ${amt}` : ""}`;
     case "milestone.funded":

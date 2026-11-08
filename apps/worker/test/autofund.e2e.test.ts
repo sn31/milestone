@@ -81,7 +81,7 @@ describe.skipIf(!run)("auto-fund after a release", async () => {
   async function contract(amounts: number[]) {
     const id = `ctr_e2e_af_${tag}_${++n}`;
     contractIds.push(id);
-    await db.insert(core.contracts).values({ id, clientId, freelancerId, title: `autofund ${tag}`, scopeText: "t", currency: "USD", totalMinor: amounts.reduce((a, b) => a + b, 0), status: "active", clientApprovedAt: new Date(), freelancerApprovedAt: new Date() });
+    await db.insert(core.contracts).values({ id, clientId, freelancerId, title: `autofund ${tag}`, scopeText: "t", currency: "USD", totalMinor: amounts.reduce((a, b) => a + b, 0), status: "active", clientApprovedAt: new Date(), freelancerApprovedAt: new Date(), aupStatus: "clear" });
     const ms = amounts.map((_, i) => `mst_e2e_af_${tag}_${n}_${i + 1}`);
     const deliveryId = `dlv_e2e_af_${tag}_${n}`;
     const critId = `crt_e2e_af_${tag}_${n}`;

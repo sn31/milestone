@@ -7,6 +7,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { aupGate } from "./aup.ts";
 import type { Executor } from "./db.ts";
 import { agentMandates, contracts, milestones, paymentMethods, paypalOps, users } from "./schema.ts";
 import { MandateAction } from "./schemas.ts";
@@ -210,6 +211,10 @@ export const FUNDING_REFUSALS = [
   "fund_cap_missing",
   "fund_cap_exceeded",
   "fund_total_cap_exceeded",
+  "aup_unchecked",
+  "aup_checking",
+  "aup_review",
+  "aup_rejected",
 ] as const;
 export type FundingRefusal = (typeof FUNDING_REFUSALS)[number];
 
@@ -222,7 +227,7 @@ const ESCROW_STATUSES: ReadonlySet<string> = new Set(["funded", "verifying", "re
 
 export interface FundingFacts {
   mandate: Pick<AgentMandate, "userId" | "actions" | "currency" | "expiresAt" | "revokedAt" | "fundCapMinor" | "fundTotalCapMinor">;
-  contract: Pick<ContractRow, "id" | "clientId" | "status" | "currency" | "clientApprovedAt" | "freelancerApprovedAt">;
+  contract: Pick<ContractRow, "id" | "clientId" | "status" | "currency" | "clientApprovedAt" | "freelancerApprovedAt" | "aupStatus">;
   milestone: Pick<MilestoneRow, "id" | "contractId" | "seq" | "status" | "amountMinor" | "paypalCaptureId">;
   /** Every milestone of the contract (this one included): the sequence check reads it. */
   siblings: ReadonlyArray<Pick<MilestoneRow, "id" | "seq" | "status">>;
@@ -249,7 +254,9 @@ const nonNegInt = (n: unknown): n is number => typeof n === "number" && Number.i
  *      the contract still holds money in escrow: an agent funds one milestone at a time, after the previous one settles;
  *  (d) the charge is exactly the milestone amount (a positive integer);
  *  (e) in the contract's currency, which is the mandate's currency;
- *  (f) within the per-milestone fund cap and, added to what the mandate has funded, the total fund cap.
+ *  (f) within the per-milestone fund cap and, added to what the mandate has funded, the total fund cap;
+ *  (i) the contract passed the PayPal Acceptable Use Policy check (aupGate: clear, keywords only, or cleared by an
+ *      operator), checked right after (a).
  * Anything missing or malformed refuses (fails closed). Checked in this order; the first failure is the reason.
  */
 export function fundingAllows(f: FundingFacts, now: Date = new Date()): { ok: true } | { refused: FundingRefusal } {
@@ -267,6 +274,9 @@ export function fundingAllows(f: FundingFacts, now: Date = new Date()): { ok: tr
   const c = f.contract;
   if (c.clientId !== m.userId) return { refused: "not_contract_client" };
   if (c.status !== "active" || !c.clientApprovedAt || !c.freelancerApprovedAt) return { refused: "contract_not_approved" };
+  // (i) PayPal's Acceptable Use Policy check: clear, keywords only, or cleared by an operator (aup.ts).
+  const aup = aupGate(c);
+  if ("refused" in aup) return { refused: aup.refused };
 
   const ms = f.milestone;
   if (ms.contractId !== c.id || !f.siblings.some((s) => s.id === ms.id)) return { refused: "milestone_not_in_contract" };

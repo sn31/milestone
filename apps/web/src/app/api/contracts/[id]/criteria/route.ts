@@ -13,6 +13,7 @@ import {
   type CriteriaEditError,
   type EditableCriterion,
 } from "@milestone/core";
+import { ensureAup } from "@/lib/aup";
 import { getDb } from "@/lib/db";
 import { json, jsonError } from "@/lib/http";
 import { getActor, isContractClient, isContractFreelancer } from "@/lib/session";
@@ -31,6 +32,7 @@ const view = (c: typeof criteria.$inferSelect): EditableCriterion => ({ id: c.id
  * single operation inline. The contract row is locked for the edit (the approve route takes the same lock), the result
  * is validated with the compiler's rules, and every accepted edit is audited with the criteria before and after. An
  * edit after one party approved clears both approvals. Once both approved, or any milestone is funded: 409 contract_locked.
+ * A changed edit starts a new PayPal Acceptable Use Policy check of the contract text (ensureAup).
  */
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
@@ -81,7 +83,11 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     return { status: 200, body: { ok: true, milestoneId, criteria: after, approvalsCleared, changed: true } };
   });
 
-  if (outcome.status === 200) return json(outcome.body);
+  if (outcome.status === 200) {
+    // Changed release conditions are changed contract text: check it against PayPal's Acceptable Use Policy again.
+    if (outcome.body.changed) await ensureAup(getDb(), id, actor.userId);
+    return json(outcome.body);
+  }
   if (outcome.status === 409) return jsonError(outcome.error, 409, { reason: outcome.reason });
   if (outcome.status === 422) return jsonError(outcome.error, 422, { errors: outcome.errors });
   return jsonError(outcome.error, outcome.status);

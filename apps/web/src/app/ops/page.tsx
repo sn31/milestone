@@ -1,7 +1,10 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { and, asc, desc, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { asNumber as num, asRecord as obj, asString as str, auditLog, contracts, milestones, openOperatorFlags, paypalOps } from "@milestone/core";
+import { aupView } from "@/lib/aup";
+import { AupCheck } from "@/app/contracts/_components/aup-check";
+import { AupReviewForm } from "./aup-review-form";
 import { armedSimulatedFailures, paypalMode } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { ACTOR_NAMES, getActor, isOperator } from "@/lib/session";
@@ -142,6 +145,9 @@ export default async function OpsPage() {
       label: `${titleOf.get(m.contractId) ?? m.contractId} · ${m.seq}. ${m.title}`,
     }));
   const armed = simulated ? armedSimulatedFailures() : [];
+
+  // Contracts the PayPal Acceptable Use Policy check sent to a person, oldest check first.
+  const aupQueue = await db.select().from(contracts).where(eq(contracts.aupStatus, "review")).orderBy(asc(contracts.aupCheckedAt));
 
   const now = new Date();
   const stopped = new Map<string, number>();
@@ -329,6 +335,46 @@ export default async function OpsPage() {
                 </Reveal>
               );
             })}
+          </ol>
+        )}
+      </section>
+
+      <section className="mt-12" aria-label="PayPal AUP reviews">
+        <SectionTitle eyebrow="Before money is held" title="PayPal AUP reviews" actions={<p className="font-mono text-[11px] text-fg-faint tabular">{aupQueue.length} waiting</p>} />
+        <p className="mb-5 max-w-[68ch] text-[13px] leading-relaxed text-fg-muted">
+          Every contract is checked against PayPal&apos;s Acceptable Use Policy before it can be signed or funded. A flag from the keyword pass or the model, or a model call that failed, stops it here. Clear lets the parties sign and fund it as usual; reject is final.
+        </p>
+        {aupQueue.length === 0 ? (
+          <p className="rounded-panel border border-hairline bg-surface-sunken px-4 py-3 text-[13px] text-fg-muted">No contract is waiting for an AUP review.</p>
+        ) : (
+          <ol className="grid gap-4">
+            {aupQueue.map((c, i) => (
+              <Reveal as="li" key={c.id} index={i}>
+                <Panel as="article" variant="solid" tone="held" padded={false} aria-label={`AUP review ${i + 1}`}>
+                  <header className="border-b border-hairline px-5 py-4 sm:px-6">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[11px] text-fg-faint tabular">
+                      <span className="text-tone">AUP {String(i + 1).padStart(2, "0")}</span>
+                      <StatePill state={c.status} />
+                      {c.aupCheckedAt ? <span>checked {hms(c.aupCheckedAt)} UTC · {age(c.aupCheckedAt, now)} ago</span> : null}
+                    </div>
+                    <h2 className="type-display-s mt-2 text-fg">
+                      <Link href={`/contracts/${c.id}`} className="underline decoration-hairline-strong underline-offset-[3px] hover:decoration-fg-muted">
+                        {c.title}
+                      </Link>
+                    </h2>
+                    <p className="mt-1 text-[13px] text-fg-muted">
+                      {nameOf(c.clientId)} pays {nameOf(c.freelancerId)} · {formatMoney(c.totalMinor, c.currency)}
+                    </p>
+                  </header>
+                  <div className="px-5 py-4 sm:px-6">
+                    <AupCheck view={aupView(c)} />
+                  </div>
+                  <footer className="border-t border-hairline bg-surface-sunken/60 px-5 py-4 sm:px-6">
+                    <AupReviewForm contractId={c.id} disabled={!canAct} />
+                  </footer>
+                </Panel>
+              </Reveal>
+            ))}
           </ol>
         )}
       </section>

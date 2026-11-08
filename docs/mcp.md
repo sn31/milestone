@@ -27,6 +27,9 @@ An agent can fund only a milestone the contract's parties agreed to, and only wi
 `fund_milestone` tool (and the auto-fund rule, below) may charge the client's saved PayPal only when all of these hold:
 
 - the contract is active and both parties approved it;
+- the contract's PayPal Acceptable Use Policy check is clear, keywords only, or cleared by an operator (a flagged,
+  rejected, unchecked or still-checking contract is refused with `aup_review`, `aup_rejected`, `aup_unchecked` or
+  `aup_checking`; see `docs/architecture.md`);
 - the milestone is in `draft`, and is the next unfunded milestone in sequence;
 - the charge is exactly the milestone amount, in the mandate's currency;
 - the amount is within the mandate's per-milestone fund cap (`fundCapMinor`), and the total the mandate has funded
@@ -122,8 +125,8 @@ to Casey Client and allows read, draft_contract, fund, approve and hold, with ap
 
 | Tool | Mandate action | Input | What it does |
 | --- | --- | --- | --- |
-| `list_contracts` | `read` | `{}` | Lists the user's contracts (as client or freelancer) with each milestone's id, title, amount and status. |
-| `get_milestone` | `read` | `{ milestoneId }` | Returns the status, amount and criteria; the latest verdict per criterion (status, confidence, evidence ids); the decision and its rule; the seconds left in the review window; and `agentApproval { allowedNow, blockedBy[] }`. Freelancer text is in `untrusted`. |
+| `list_contracts` | `read` | `{}` | Lists the user's contracts (as client or freelancer) with each milestone's id, title, amount and status, and `aupCheck`: the PayPal Acceptable Use Policy check (`status`, `label`, `allowsSigningAndFunding`, `refusal`, flagged categories with section and confidence; the quoted contract words are in `untrusted`). |
+| `get_milestone` | `read` | `{ milestoneId }` | Returns the status, amount and criteria; the latest verdict per criterion (status, confidence, evidence ids); the decision and its rule; the seconds left in the review window; and `agentApproval { allowedNow, blockedBy[] }`; the contract's AUP check as `milestone.contractAupCheck`. Freelancer text is in `untrusted`. |
 | `get_ledger` | `read` | `{ contractId }` | Returns the contract's ledger transactions with their legs, the escrow held per milestone, totals by kind, and whether every transaction balances. |
 | `draft_contract` | `draft_contract` (client) | `{ scope, total: "1500.00", currency: "USD", repo?: "owner/name", title? }` | Calls `POST /api/contracts`, which runs `compileContract` the same way the New contract form does. The result is a draft that both parties must approve in the UI. |
 | `fund_milestone` | `fund` (client) | `{ milestoneId }` | With a saved PayPal and fund caps on the mandate, charges the saved PayPal under the funding guarantee and returns `{ funded: true, captureId, amount, remainingTotalCap }` (`pending: true` when PayPal has not completed the capture; the milestone turns funded when it does). Without a saved PayPal or fund caps it creates the PayPal order via `POST /api/milestones/[id]/order` and returns `{ orderId, approvalUrl }` with `vault.why`; a human approves the payment, and the tool never captures. Refused with a reason when the guarantee does not hold. |

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AUDIT_EVENTS, UploadPayload, advances, suggestedRepoUrl, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
+import { AUDIT_EVENTS, UploadPayload, aupGate, advances, suggestedRepoUrl, agentMandates, auditLog, decisionDeliveryId, isAgentActor, requiredNotPassed, type contracts, type criteria as criteriaTable, type deliveries, type milestones } from "@milestone/core";
 import { advanceRepayment, paypalMode } from "@milestone/money";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db";
@@ -248,6 +248,7 @@ export function MilestoneActions({
     case "draft": {
       let action: ReactNode;
       if (contract.status !== "active") action = <Note>Funding opens once both parties sign the contract.</Note>;
+      else if (!("ok" in aupGate(contract))) action = <Note tone="held">Funding is paused by the PayPal AUP check (see above).</Note>;
       else if (isClient)
         action = (
           <FundButton

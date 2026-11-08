@@ -4,6 +4,7 @@ import { fundFromVault, type VaultFundResult } from "@milestone/money";
 import { defaultBranchHead } from "@milestone/verify";
 import type { JobData } from "../handlers.ts";
 import { getDb } from "../lib/db.ts";
+import { ensureAup } from "./aup.ts";
 import { paypal } from "../lib/paypal.ts";
 
 /** The audit event of every auto-fund attempt (the result, or the refusal and its reason). */
@@ -84,6 +85,9 @@ export async function runAutofund(db: Db, job: Job<JobData>, now: Date = new Dat
   }
   // No saved PayPal is still passed through: fundFromVault refuses it (payment_method_missing) and audits the refusal.
   const paymentMethod = await activePaymentMethod(db, mandate.userId);
+  // Right before funding: a contract whose text changed since its PayPal AUP check (or was never checked) is checked
+  // again; fundFromVault then refuses anything but clear, keywords only or cleared (fundingAllows, aup_*).
+  await ensureAup(db, contract.id);
   const result = await fundFromVault({ client: paypal(), db }, { mandate, paymentMethod, milestone, contract, via: "auto_fund", baselineSha: (c) => defaultBranchHead(c.repoFullName), now });
   const retry = shouldRetry(result);
   await audit(db, {

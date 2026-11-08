@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
-import { AUDIT_EVENTS, OP_KINDS, criteriaLock, criteriaVersion, RELEASABLE_STATUSES, advances, asRecord, asString, auditLog, decisionDeliveryId, deliveries, ledgerEntries, paypalOps, reviewWindowSeconds } from "@milestone/core";
+import { AUDIT_EVENTS, AUP_REFUSAL_TEXT, OP_KINDS, type AupRefusal, criteriaLock, criteriaVersion, RELEASABLE_STATUSES, advances, asRecord, asString, auditLog, decisionDeliveryId, deliveries, ledgerEntries, paypalOps, reviewWindowSeconds } from "@milestone/core";
 import { advanceRepayment } from "@milestone/money";
 import { getDb } from "@/lib/db";
 import { ACTOR_NAMES, getActor, isContractClient, isContractFreelancer } from "@/lib/session";
@@ -37,6 +37,8 @@ import {
 } from "@/components/ui";
 import { ActivityLedger } from "../_components/activity-ledger";
 import { ApprovalStrip } from "../_components/approval-strip";
+import { AupCheck } from "../_components/aup-check";
+import { aupView } from "@/lib/aup";
 import { CriteriaEditor } from "./_components/criteria-editor";
 
 export const dynamic = "force-dynamic";
@@ -72,8 +74,9 @@ function phaseOf(status: string): Phase {
   return "current";
 }
 
-export default async function ContractPage({ params }: PageProps<"/contracts/[id]">) {
+export default async function ContractPage({ params, searchParams }: PageProps<"/contracts/[id]">) {
   const { id } = await params;
+  const aupParam = (await searchParams).aup;
   const db = getDb();
   const [contract, actor, ms, activity] = await Promise.all([
     loadContract(id),
@@ -259,6 +262,7 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
   // Both signatures, dated by the later one: the moment funding opened.
   const signedAt = ca && fa ? (ca > fa ? ca : fa) : null;
   const signed = signedAt !== null;
+  const aup = aupView(contract);
 
   return (
     <main>
@@ -302,6 +306,11 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
       />
       {contract.scopeText ? <p className="mt-4 max-w-[68ch] text-[14.5px] leading-relaxed whitespace-pre-wrap text-fg-muted">{contract.scopeText}</p> : null}
 
+      {/* PayPal's Acceptable Use Policy, checked before anyone can sign or fund (core aup.ts). */}
+      <div className="mt-6">
+        <AupCheck view={aup} refusedNow={typeof aupParam === "string" && aupParam in AUP_REFUSAL_TEXT ? AUP_REFUSAL_TEXT[aupParam as AupRefusal] : null} />
+      </div>
+
       {/* The instrument row: what the contract is worth and where that money is now, then one bar segment per milestone. */}
       <section aria-label="Money" className="mt-10 border-t border-hairline pt-6">
         <div className="grid grid-cols-2 gap-x-6 gap-y-6 md:grid-cols-3 md:gap-x-0 md:divide-x md:divide-hairline">
@@ -328,6 +337,7 @@ export default async function ContractPage({ params }: PageProps<"/contracts/[id
             canApproveAs={isParty && !myApproval ? actor.role : null}
             isParty={isParty}
             criteriaVersion={criteriaVersion(crit)}
+            blocked={aup.allowsSigningAndFunding ? null : aup.status === "checking" ? "Signing opens when the PayPal AUP check finishes." : "Signing is paused by the PayPal AUP check."}
           />
           {/* While neither the signatures nor any funding have fixed them, either party may edit the checks. */}
           {isParty && !criteriaLock(contract, ms) ? (

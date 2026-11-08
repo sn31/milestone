@@ -4,13 +4,14 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb } from "./db.ts";
 import { demoRepoFullName, demoRepoUrl } from "./demo-repo.ts";
+import { AUP_AUDIT, aupStatusFor, loadAupSubject } from "./aup.ts";
 import { RECORDED_VERDICT_MODEL, loadRootEnv, paypalMode, seedPaypalEmails } from "./env.ts";
 import { dropQueuedJobs, enqueue, releaseDelaySeconds } from "./jobs.ts";
 import { ledgerRefs } from "./ledger.ts";
 import { createMandate } from "./mandates.ts";
 import { reviewWindowSeconds } from "./milestones.ts";
 import { advances, agentMandates, auditLog, contracts, criteria, deliveries, ledgerEntries, milestones, paymentMethods, paypalOps, users } from "./schema.ts";
-import type { PolicyDecision } from "./schemas.ts";
+import type { AupCheckRecord, PolicyDecision } from "./schemas.ts";
 
 loadRootEnv(); // no .env: rely on process.env
 
@@ -161,6 +162,61 @@ criteriaRows.push(
 );
 for (const c of criteriaRows.slice(-4)) {
   await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
+}
+
+// A small contract the PayPal Acceptable Use Policy check flags, so the review path (contract badge, /ops queue,
+// signing and funding refused) can be seen. Draft and unsigned: it never reaches funding unless an operator clears it.
+const aupFlagged = {
+  id: "ctr_aup",
+  clientId: "usr_client2",
+  freelancerId: "usr_freelancer",
+  title: "Promo page for an online casino",
+  scopeText: "A one-page promo site for an online casino: sports betting odds on the front page and a deposit form that takes crypto.",
+  currency: "USD",
+  totalMinor: 4000,
+  repoFullName: null,
+  status: "draft" as const,
+  clientApprovedAt: null,
+  freelancerApprovedAt: null,
+};
+const { id: _aid, ...aupFlaggedSet } = aupFlagged;
+await db.insert(contracts).values(aupFlagged).onConflictDoUpdate({ target: contracts.id, set: aupFlaggedSet });
+const aupMilestone = { id: "mst_aup_1", contractId: "ctr_aup", seq: 1, title: "Promo page", amountMinor: 4000, status: "draft" as const, advanceEligible: true };
+{
+  const { id: _mid, ...mSet } = aupMilestone;
+  await db.insert(milestones).values(aupMilestone).onConflictDoUpdate({ target: milestones.id, set: mSet });
+}
+criteriaRows.push({ id: "crt_aup_1_file", milestoneId: "mst_aup_1", kind: "upload", description: "The page as a single HTML file", spec: { pattern: "*.html" }, required: true });
+for (const c of criteriaRows.slice(-1)) {
+  await db.insert(criteria).values(c).onConflictDoUpdate({ target: criteria.id, set: { milestoneId: c.milestoneId, kind: c.kind, description: c.description, spec: c.spec, required: c.required } });
+}
+
+// Recorded PayPal AUP checks (core aup.ts): written by hand for the showcase, labelled "recorded for the showcase",
+// never presented as a model's output. Each stores the hash of the contract text as seeded, so an edit re-checks it.
+// The flagged contract's flags are what the keyword pre-pass finds in its text (packages/verify/test/aup.test.ts).
+const aupPolicy = { url: "https://www.paypal.com/us/legalhub/paypal/acceptableuse-full", retrievedOn: "2026-11-07" };
+const aupRecorded: Array<{ id: string; flags: AupCheckRecord["flags"] }> = [
+  { id: "ctr_demo", flags: [] },
+  { id: "ctr_brand", flags: [] },
+  { id: "ctr_dash", flags: [] },
+  {
+    id: "ctr_aup",
+    flags: [
+      { category: "cryptocurrency", section: "Activities Requiring Approval", quote: `Scope: ${aupFlagged.scopeText}`, rationale: 'The keyword "crypto" points at Cryptocurrency (Activities Requiring Approval). A keyword is a reason for a person to look, not a finding.', confidence: 0.5, source: "keywords" },
+      { category: "gambling", section: "Activities Requiring Approval", quote: `Title: ${aupFlagged.title}`, rationale: 'The keyword "casino" points at Gambling and prize games (Activities Requiring Approval). A keyword is a reason for a person to look, not a finding.', confidence: 0.5, source: "keywords" },
+    ],
+  },
+];
+for (const r of aupRecorded) {
+  const subject = await loadAupSubject(db, r.id);
+  if (!subject) continue;
+  const check: AupCheckRecord = { mode: "recorded", model: RECORDED_VERDICT_MODEL, flags: r.flags, policy: aupPolicy, checkedAt: now.toISOString() };
+  const status = aupStatusFor(check);
+  await db.update(contracts).set({ aupStatus: status, aupTextHash: subject.hash, aupCheck: check, aupCheckedAt: now }).where(eq(contracts.id, r.id));
+  await db.insert(auditLog).values({ id: `aud_aup_checked_${r.id}`, actor: "verifier", event: AUP_AUDIT.checked, contractId: r.id, detail: { status, mode: check.mode, model: check.model, flags: r.flags.length, textHash: subject.hash, policy: aupPolicy }, createdAt: now }).onConflictDoNothing();
+  if (status === "review") {
+    await db.insert(auditLog).values({ id: `aud_aup_flagged_${r.id}`, actor: "verifier", event: AUP_AUDIT.flagged, contractId: r.id, detail: { mode: check.mode, flags: r.flags.map((f) => ({ category: f.category, section: f.section, quote: f.quote, confidence: f.confidence, source: f.source })) }, createdAt: now }).onConflictDoNothing();
+  }
 }
 
 // Freelancer history: five past releases with a verified pass. Fixed ids keep reseeding a no-op.
@@ -509,6 +565,6 @@ if (process.argv.includes("--showcase")) {
 
 const [row] = (await db.execute(sql`select count(*)::int as n from audit_log where event = 'milestone.released'`)).rows as { n: number }[];
 const n = row?.n ?? 0;
-console.log(`seed ok: ${userRows.length} users, 3 contracts, ${3 + brandMilestones.length + dashMilestones.length} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held after a failed payout, second client funded, draft)` : ""}`);
+console.log(`seed ok: ${userRows.length} users, 4 contracts (ctr_aup flagged by the PayPal AUP check), ${3 + brandMilestones.length + dashMilestones.length + 1} milestones, ${criteriaRows.length} criteria, ${n} release events${showcase ? `, showcase: ${showcase} milestones placed (funded, review, released, needs_client, held after a failed payout, second client funded, draft)` : ""}`);
 if (agentToken) console.log(`showcase agent mandate mdt_show_casey (Casey's agent, approve up to 200.00 USD, fund up to 200.00 USD a milestone and 500.00 USD in all${savedPayPal ? " from saved PayPal pm_show_casey" : ", no saved PayPal outside simulated mode"}, 30 days). Bearer token, shown once: ${agentToken}`);
 process.exit(0);

@@ -10,6 +10,8 @@ loadRootEnv();
 const state = vi.hoisted(() => ({ actor: { userId: "usr_client", role: "client" } as { userId: string; role: string }, db: null as unknown }));
 vi.mock("@/lib/session", async (orig) => ({ ...(await orig<typeof import("@/lib/session")>()), getActor: async () => state.actor }));
 vi.mock("@/lib/db", () => ({ getDb: () => state.db }));
+// No model: the PayPal AUP check that signing runs is the keyword pass alone, inline (these texts match no keyword).
+vi.mock("@milestone/verify", async (orig) => ({ ...(await orig<typeof import("@milestone/verify")>()), isModelConfigured: async () => false }));
 
 import * as core from "@milestone/core";
 import { and, eq, inArray } from "drizzle-orm";

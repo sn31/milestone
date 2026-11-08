@@ -207,8 +207,49 @@ export const MandateAction = z.enum(["read", "draft_contract", "fund", "deliver"
 export type MandateAction = z.infer<typeof MandateAction>;
 export const MANDATE_ACTIONS = MandateAction.options;
 
+// ---------- PayPal Acceptable Use Policy check (aup.ts) ----------
+/** The two lists of PayPal's Acceptable Use Policy a flag can point at. */
+export const AupSection = z.enum(["Prohibited Activities", "Activities Requiring Approval"]);
+export type AupSection = z.infer<typeof AupSection>;
+
+/** One reason a contract needs a person to look at it: a category of the policy, and the contract words that raised it. */
+export const AupFlag = z.object({
+  /** A category id from packages/verify/src/aup/paypal-aup.ts. */
+  category: z.string().min(1),
+  section: AupSection,
+  /** Words copied from the contract (untrusted text). A flag without one is dropped by the parser. */
+  quote: z.string().min(1),
+  rationale: z.string(),
+  confidence: z.number().min(0).max(1),
+  /** keywords: the deterministic pre-pass; model: Claude through llm.ts, kept only when its quote is in the contract. */
+  source: z.enum(["keywords", "model"]),
+});
+export type AupFlag = z.infer<typeof AupFlag>;
+
+/**
+ * How a check ran. model: Claude read the contract (and the keyword pass ran). keywords: no model is configured, so only
+ * the keyword pass ran ("keywords only"). model_error: the model call failed or gave no usable answer, so the contract
+ * goes to an operator (fail closed). recorded: written by the showcase seed, not produced by a model.
+ */
+export const AupMode = z.enum(["model", "keywords", "model_error", "recorded"]);
+export type AupMode = z.infer<typeof AupMode>;
+
+/** contracts.aup_check: the latest check and, once an operator acted, their resolution. */
+export const AupCheckRecord = z.object({
+  mode: AupMode,
+  model: z.string().nullable(),
+  flags: z.array(AupFlag),
+  error: z.string().optional(),
+  /** The policy version the check used: its source URL and the date it was retrieved. */
+  policy: z.object({ url: z.string(), retrievedOn: z.string() }),
+  checkedAt: z.string(),
+  promptHash: z.string().optional(),
+  resolution: z.object({ action: z.enum(["clear", "reject"]), by: z.string(), at: z.string(), note: z.string() }).optional(),
+});
+export type AupCheckRecord = z.infer<typeof AupCheckRecord>;
+
 // ---------- Jobs and events ----------
-export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute", "reconcile", "autofund"]);
+export const JobName = z.enum(["verify", "release", "settle", "advance", "dispute", "reconcile", "autofund", "aup"]);
 export type JobName = z.infer<typeof JobName>;
 
 /** Confirmed against PayPal's webhook event reference on 2026-10-08. */

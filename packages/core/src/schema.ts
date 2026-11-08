@@ -1,6 +1,6 @@
 import { relations } from "drizzle-orm";
 import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import type { MandateAction, StoredDecision } from "./schemas.ts";
+import type { AupCheckRecord, MandateAction, StoredDecision } from "./schemas.ts";
 
 export const userRole = pgEnum("user_role", ["client", "freelancer", "partner", "platform"]);
 export const contractStatus = pgEnum("contract_status", ["draft", "approved", "active", "closed"]);
@@ -41,8 +41,18 @@ export const contracts = pgTable("contracts", {
   status: contractStatus("status").default("draft").notNull(),
   clientApprovedAt: timestamp("client_approved_at", { withTimezone: true }),
   freelancerApprovedAt: timestamp("freelancer_approved_at", { withTimezone: true }),
+  /**
+   * The PayPal Acceptable Use Policy check (core aup.ts): checking | clear | keywords_only | review | cleared | rejected;
+   * null: never checked. Only clear, keywords_only and cleared let the contract be signed or funded.
+   */
+  aupStatus: text("aup_status"),
+  /** sha256 of the contract text the check read (aupTextHash): a different hash means the text changed since. */
+  aupTextHash: text("aup_text_hash"),
+  /** The latest check: its mode, model, flags (each with a quote from the contract) and the operator's resolution. */
+  aupCheck: jsonb("aup_check").$type<AupCheckRecord>(),
+  aupCheckedAt: timestamp("aup_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
-});
+}, (t) => [index("contracts_aup_status").on(t.aupStatus)]);
 
 /** The policy decision lives on the milestone: one current decision, the history is in audit_log. */
 export const milestones = pgTable("milestones", {

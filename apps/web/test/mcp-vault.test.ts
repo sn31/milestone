@@ -64,7 +64,7 @@ describe.skipIf(!e2e)("MCP fund_milestone from the saved PayPal", () => {
   let n = 0;
   const later = () => new Date(Date.now() + 86_400_000);
 
-  async function contract(o: { amounts: number[]; approved?: boolean; currency?: string; clientId?: string; freelancerId?: string; statuses?: core.MilestoneStatus[] }) {
+  async function contract(o: { amounts: number[]; approved?: boolean; currency?: string; clientId?: string; freelancerId?: string; statuses?: core.MilestoneStatus[]; aupStatus?: string }) {
     const id = `ctr_mcpv_${tag}_${++n}`;
     contractIds.push(id);
     const approved = o.approved ?? true;
@@ -78,6 +78,7 @@ describe.skipIf(!e2e)("MCP fund_milestone from the saved PayPal", () => {
       totalMinor: o.amounts.reduce((a, b) => a + b, 0),
       status: approved ? "active" : "draft",
       clientApprovedAt: approved ? new Date() : null,
+      aupStatus: o.aupStatus ?? "clear",
       freelancerApprovedAt: approved ? new Date() : null,
     });
     const ids: string[] = [];
@@ -243,6 +244,35 @@ describe.skipIf(!e2e)("MCP fund_milestone from the saved PayPal", () => {
     await expectRefused(a.c, notClient.ms[0]!, "not_contract_client");
   });
 
+  it("refuses to fund a contract the PayPal AUP check flagged, on either path, and funds it once an operator clears it", async () => {
+    const k = await contract({ amounts: [1_000], aupStatus: "review" });
+    const a = await agent("aup");
+    const r = await fund(a.c, k.ms[0]!);
+    expect(r.isError, r.text).toBe(true);
+    expect(r.body).toMatchObject({ ok: false, reason: "aup_review", aupCheck: { status: "review", allowsSigningAndFunding: false } });
+    expect(r.body.error).toContain(core.AUP_REFUSAL_TEXT.aup_review);
+    expect(r.body.error).toContain("Nothing was charged");
+    expect(await vaultOps(k.ms[0]!)).toEqual([]);
+    expect(await statusOf(k.ms[0]!)).toBe("draft");
+    const refused = await db.select().from(core.auditLog).where(and(eq(core.auditLog.contractId, k.id), eq(core.auditLog.event, "agent.fund_milestone_refused")));
+    expect((refused.at(-1)?.detail as Any)?.reason).toBe("aup_review");
+
+    // Without fund caps (the approval-link path) the same refusal comes first: no PayPal order is created.
+    const noCaps = await agent("aup-nocaps", { fundCapMinor: null, fundTotalCapMinor: null });
+    expect((await fund(noCaps.c, k.ms[0]!)).body.reason).toBe("aup_review");
+    const orders = await db.select().from(core.paypalOps).where(and(eq(core.paypalOps.key, k.ms[0]!), eq(core.paypalOps.kind, core.OP_KINDS.order)));
+    expect(orders).toEqual([]);
+
+    // Rejected is final; cleared lets the agent fund it as usual.
+    const rejected = await contract({ amounts: [1_000], aupStatus: "review" });
+    expect(await core.resolveAupReview(db, rejected.id, "reject", { userId: "usr_platform", role: "platform" }, `test ${tag}`)).toBe("ok");
+    expect((await fund(a.c, rejected.ms[0]!)).body.reason).toBe("aup_rejected");
+    expect(await core.resolveAupReview(db, k.id, "clear", { userId: "usr_platform", role: "platform" }, `test ${tag}`)).toBe("ok");
+    const ok = await fund(a.c, k.ms[0]!);
+    expect(ok.isError, ok.text).toBe(false);
+    expect(ok.body).toMatchObject({ funded: true, status: "funded" });
+  });
+
   it("falls back to an approval link and says why: no fund caps, or no saved PayPal", async () => {
     const k = await contract({ amounts: [1_000] });
     // No fund caps: the vault is not used. The order route then refuses this non-demo user (identity_unbound), but the
@@ -300,7 +330,7 @@ describe("the funding guarantee: refusals the tool cannot reach", () => {
   const now = new Date("2026-10-17T12:00:00Z");
   const base = (): core.FundingFacts => ({
     mandate: { userId: "u", actions: ["fund"], currency: "USD", expiresAt: new Date("2026-11-01T00:00:00Z"), revokedAt: null, fundCapMinor: 10_000, fundTotalCapMinor: 20_000 },
-    contract: { id: "c", clientId: "u", status: "active", currency: "USD", clientApprovedAt: now, freelancerApprovedAt: now },
+    contract: { id: "c", clientId: "u", status: "active", currency: "USD", clientApprovedAt: now, freelancerApprovedAt: now, aupStatus: "clear" },
     milestone: { id: "m1", contractId: "c", seq: 1, status: "draft", amountMinor: 5_000, paypalCaptureId: null },
     siblings: [{ id: "m1", seq: 1, status: "draft" }],
     paymentMethod: { userId: "u", provider: "paypal", paypalPaymentTokenId: "tok", removedAt: null },
@@ -329,6 +359,10 @@ describe("the funding guarantee: refusals the tool cannot reach", () => {
       ["fund_cap_missing", (f) => void (f.mandate.fundCapMinor = null)],
       ["fund_cap_exceeded", (f) => void ((f.milestone.amountMinor = 10_001), (f.amountMinor = 10_001))],
       ["fund_total_cap_exceeded", (f) => void (f.fundedMinor = 15_001)],
+      ["aup_unchecked", (f) => void (f.contract.aupStatus = null)],
+      ["aup_checking", (f) => void (f.contract.aupStatus = "checking")],
+      ["aup_review", (f) => void (f.contract.aupStatus = "review")],
+      ["aup_rejected", (f) => void (f.contract.aupStatus = "rejected")],
     ];
     expect(cases.map(([c]) => c).sort()).toEqual([...core.FUNDING_REFUSALS].sort());
     for (const [code, change] of cases) {

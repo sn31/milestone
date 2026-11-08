@@ -35,6 +35,7 @@ export function ApprovalStrip({
   canApproveAs,
   isParty,
   criteriaVersion,
+  blocked,
 }: {
   contractId: string;
   client: Party;
@@ -44,6 +45,8 @@ export function ApprovalStrip({
   isParty: boolean;
   /** Fingerprint of the checks on screen; the approve route records nothing if they changed since (criteriaVersion in core). */
   criteriaVersion?: string;
+  /** Set while the PayPal AUP check does not allow signing: why, in place of the approve button. */
+  blocked?: string | null;
 }) {
   const both = Boolean(client.at && freelancer.at);
   return (
@@ -62,6 +65,8 @@ export function ApprovalStrip({
               <span aria-hidden className="size-1.5 rounded-full bg-tone" />
               Funding open
             </p>
+          ) : canApproveAs && blocked ? (
+            <p className="text-[13px] text-fg-muted">{blocked}</p>
           ) : canApproveAs ? (
             <>
               <p className="text-[13px] text-fg-muted">Approving accepts the milestones and their checks.</p>

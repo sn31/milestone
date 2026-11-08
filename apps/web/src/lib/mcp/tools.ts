@@ -7,12 +7,13 @@
  * fundFromVault (packages/money/src/policy/execute.ts), which enforces the funding guarantee under row locks.
  */
 import { getOrder, approveLink, fundFromVault, type VaultFundResult } from "@milestone/money";
-import { activePaymentMethod, loadMilestone, mandateAllows, mandateFundedMinor, paypalMode, type AgentMandate, type FundingRefusal, type MandateAction, type MandateRefusal } from "@milestone/core";
+import { AUP_REFUSAL_TEXT, activePaymentMethod, aupGateNow, loadMilestone, mandateAllows, mandateFundedMinor, paypalMode, type AgentMandate, type FundingRefusal, type MandateAction, type MandateRefusal } from "@milestone/core";
 import { defaultBranchHead } from "@milestone/verify";
+import { ensureAup } from "@/lib/aup";
 import { paypal } from "@/lib/paypal";
 import { auditTool, currentMandate, type McpContext } from "./context";
 import { callContract, callDeliver, callOrder, callReview } from "./routes";
-import { ledgerView, listContracts, milestoneView, money, partyRole } from "./views";
+import { aupSummary, ledgerView, listContracts, milestoneView, money, partyRole } from "./views";
 
 export const GUARANTEE =
   "Milestone's guarantee: an agent can only make a release happen sooner, never make one happen that the policy would not. " +
@@ -23,7 +24,8 @@ export const GUARANTEE =
 
 export const FUNDING_GUARANTEE =
   "Funding guarantee: fund_milestone charges the client's saved PayPal (money goes into Milestone's escrow, never to the " +
-  "freelancer) only for the next unfunded milestone, in order, of a contract both parties approved, for exactly the " +
+  "freelancer) only for the next unfunded milestone, in order, of a contract both parties approved and whose PayPal Acceptable " +
+  "Use Policy check is clear (or cleared by an operator), for exactly the " +
   "milestone amount in the mandate's currency, within the mandate's per-milestone fund cap and its total fund cap, while " +
   'the mandate is unexpired, unrevoked and includes "fund". Anything else is refused with a reason; without a saved ' +
   "PayPal or fund caps it only creates a PayPal order that a human approves.";
@@ -48,8 +50,10 @@ export const TOOLS: ToolSpec[] = [
     name: "list_contracts",
     title: "List contracts",
     description:
-      "Lists the contracts the mandate's user is a party to (as client or freelancer), each with its status and its milestones' ids, " +
-      'titles, amounts and states. Read-only; needs "read" in the mandate. Start here to find milestone ids.',
+      "Lists the contracts the mandate's user is a party to (as client or freelancer), each with its status, its milestones' ids, " +
+      "titles, amounts and states, and aupCheck: the contract's PayPal Acceptable Use Policy check (status clear, keywords_only, checking, " +
+      "review, cleared or rejected; allowsSigningAndFunding; flagged categories, with the quoted contract words inside an untrusted field). " +
+      'Read-only; needs "read" in the mandate. Start here to find milestone ids.',
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     needs: "read",
@@ -106,7 +110,9 @@ export const TOOLS: ToolSpec[] = [
       "Funds a draft milestone into escrow. When the client has saved a PayPal account in Milestone and this mandate sets fund caps, " +
       "Milestone charges that saved PayPal itself, with no human step, and returns { funded: true, captureId, amount, remainingTotalCap }. " +
       "Otherwise it creates (or returns the existing) PayPal order and returns approvalUrl plus vault.why: a human must open approvalUrl and " +
-      "approve the payment. Calling it twice never charges twice. It never pays out or refunds. Client mandates only; needs \"fund\". " +
+      "approve the payment. Calling it twice never charges twice. It never pays out or refunds. Refused (reason aup_review, aup_checking, " +
+      "aup_unchecked or aup_rejected) while the contract's PayPal Acceptable Use Policy check is not clear: see aupCheck in list_contracts. " +
+      'Client mandates only; needs "fund". ' +
       FUNDING_GUARANTEE,
     inputSchema: { type: "object", properties: { milestoneId: ID }, required: ["milestoneId"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -272,6 +278,18 @@ export async function callTool(ctx: McpContext, name: string, rawArgs: unknown):
       const ids = { contractId: found.contract.id, milestoneId: found.milestone.id };
       const amount = money(found.milestone.amountMinor, found.contract.currency);
 
+      // PayPal Acceptable Use Policy: a contract whose text changed since its last check (or was never checked) is
+      // checked again first. A contract that is not clear is refused here with the reason, before either path; the
+      // vault path's fundingAllows and the order route enforce the same gate again on their own.
+      await ensureAup(ctx.db, found.contract.id, ctx.agent.auditActor);
+      const aup = await aupGateNow(ctx.db, found.contract.id);
+      if ("refused" in aup) {
+        return deny(aup.refused, `${AUP_REFUSAL_TEXT[aup.refused]}. Nothing was charged and no PayPal order was created.`, {
+          ...ids,
+          extra: { aupCheck: aupSummary(await ctx.db.query.contracts.findFirst({ where: (t, { eq }) => eq(t.id, found.contract.id) })), next: "Use list_contracts to see the contract's aupCheck; only an operator can clear a flagged contract." },
+        });
+      }
+
       // The saved-PayPal path: only with a saved PayPal and a mandate that sets fund caps. fundFromVault re-checks the
       // whole funding guarantee under row locks; this only decides which path to take.
       const paymentMethod = await activePaymentMethod(ctx.db, user);
@@ -355,6 +373,10 @@ export const FUNDING_REFUSAL_TEXT: Record<FundingRefusal, string> = {
   fund_cap_missing: "the mandate sets no fund caps",
   fund_cap_exceeded: "the milestone amount is over the mandate's per-milestone fund cap",
   fund_total_cap_exceeded: "funding this would take the mandate over its total fund cap",
+  aup_unchecked: AUP_REFUSAL_TEXT.aup_unchecked,
+  aup_checking: AUP_REFUSAL_TEXT.aup_checking,
+  aup_review: AUP_REFUSAL_TEXT.aup_review,
+  aup_rejected: AUP_REFUSAL_TEXT.aup_rejected,
 };
 
 type Deny = (reason: string, error: string, o?: { contractId?: string; milestoneId?: string; extra?: Json }) => Promise<ToolResult>;

@@ -50,6 +50,13 @@
       "when": 1792199386189,
       "tag": "0006_vault_funding",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794097110493,
+      "tag": "0007_aup_check",
+      "breakpoints": true
     }
   ]
 }

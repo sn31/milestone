@@ -57,7 +57,7 @@ describe.skipIf(!on)("fundFromVault (e2e)", () => {
     const id = `ctr_v_${tag}_${name}`;
     contractIds.push(id);
     const active = (opts.status ?? "active") === "active";
-    await db.insert(contracts).values({ id, clientId: opts.clientId ?? client, freelancerId: freelancer, title: name, scopeText: "t", currency: "USD", totalMinor: amounts.reduce((a, b) => a + b, 0), status: opts.status ?? "active", clientApprovedAt: active ? now : null, freelancerApprovedAt: active ? now : null });
+    await db.insert(contracts).values({ id, clientId: opts.clientId ?? client, freelancerId: freelancer, title: name, scopeText: "t", currency: "USD", totalMinor: amounts.reduce((a, b) => a + b, 0), status: opts.status ?? "active", clientApprovedAt: active ? now : null, freelancerApprovedAt: active ? now : null, aupStatus: "clear" });
     const ids = amounts.map((_, i) => `mst_v_${tag}_${name}_${i + 1}`);
     milestoneIds.push(...ids);
     await db.insert(milestones).values(amounts.map((amountMinor, i) => ({ id: ids[i]!, contractId: id, seq: i + 1, title: `${name} ${i + 1}`, amountMinor })));
